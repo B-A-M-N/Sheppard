@@ -22,7 +22,7 @@ from src.research.models import (
 from src.research.exceptions import ProcessingError, BrowserError
 from src.memory.models import Memory
 from src.research.browser_manager import BrowserManager
-from firecrawl import FirecrawlApp
+from firecrawl import AsyncV1FirecrawlApp
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,10 @@ class ResearchPipeline:
         
         # Initialize Firecrawl if config provided
         if firecrawl_config and firecrawl_config.get('api_key'):
-            self.firecrawl = FirecrawlApp(api_key=firecrawl_config['api_key'])
+            self.firecrawl = AsyncV1FirecrawlApp(
+                api_key=firecrawl_config['api_key'],
+                api_url=firecrawl_config.get('base_url')
+            )
         else:
             self.firecrawl = None
             
@@ -258,15 +261,15 @@ class ResearchPipeline:
             try:
                 if self.firecrawl:
                     # Use Firecrawl for content extraction
-                    scrape_result = await self.firecrawl.scrape_url(
+                    scrape_result_obj = await self.firecrawl.scrape_url(
                         source['url'],
-                        params={
-                            'formats': ['markdown'],
-                            'timeout': 30000,
-                            'removeScripts': True,
-                            'removeStyles': True
-                        }
+                        formats=['markdown'],
+                        timeout=30000,
+                        removeScripts=True,
+                        removeStyles=True
                     )
+                    
+                    scrape_result = scrape_result_obj.model_dump()
                     
                     if scrape_result and 'markdown' in scrape_result:
                         findings.append({

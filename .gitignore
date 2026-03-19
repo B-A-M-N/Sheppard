@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+venv/
+ENV/
+logs/
+data/
+chroma_storage/
+temp/
+screenshots/
+chat_history/
+*.log
+src/core/system_v2.py

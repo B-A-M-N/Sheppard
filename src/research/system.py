@@ -34,6 +34,7 @@ from src.research.models import (
 from src.research.exceptions import ResearchError, TaskError, ProcessingError
 from src.memory.models import Memory
 from src.research.base_system import BaseResearchSystem
+from src.research.archivist import run_research
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -74,8 +75,13 @@ class ResearchSystem(BaseResearchSystem):
         if config and hasattr(config, 'firecrawl') and config.firecrawl:
             # Import here to avoid circular dependencies
             try:
-                from firecrawl import FirecrawlApp
-                self.firecrawl = FirecrawlApp(api_key=config.firecrawl.api_key)
+                from firecrawl import AsyncV1FirecrawlApp
+                # Use api_url from config if available (base_url in our config)
+                api_url = getattr(config.firecrawl, 'base_url', None)
+                self.firecrawl = AsyncV1FirecrawlApp(
+                    api_key=config.firecrawl.api_key,
+                    api_url=api_url
+                )
             except ImportError:
                 logger.warning("Firecrawl package not found. Firecrawl integration disabled.")
         
@@ -223,6 +229,70 @@ class ResearchSystem(BaseResearchSystem):
             await self.initialize()
             
         try:
+            if research_type == ResearchType.DEEP_RESEARCH:
+                if progress_callback:
+                    progress_callback(0.1)
+                
+                # Use Archivist for Deep Research
+                console.print(Panel(
+                    f"[bold green]INITIATING DEEP RESEARCH PROTOCOL:[/bold green] [cyan]{topic}[/cyan]",
+                    border_style="green"
+                ))
+                
+                # run_research is a blocking call in Archivist, 
+                # we wrap it in an executor if needed, but for now we'll run it directly 
+                # as Sheppard's research_topic is already called in a way that handles async
+                # or we can use asyncio.to_thread if available (Python 3.9+)
+                # Archivist uses print() internally, we might want to capture or redirect it
+                
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(
+                    None, 
+                    run_research, 
+                    f"Objective: {topic}",
+                    self.memory_manager,
+                    self.ollama_client,
+                    self.browser,
+                    topic # Pass topic explicitly
+                )
+                
+                final_results = {
+                    'topic': topic,
+                    'report': result['answer'],
+                    'sources': result['sources'],
+                    'steps': result['steps'],
+                    'timestamp': datetime.now().isoformat(),
+                    'findings': [] # For compatibility
+                }
+                
+                # Create a finding for the final report to match standard structure
+                final_results['findings'].append({
+                    'url': 'internal://archivist-report',
+                    'title': f"Deep Research Report: {topic}",
+                    'summary': result['answer'][:500] + "...",
+                    'key_takeaways': ["See full report for details"]
+                })
+
+                # Store in memory
+                if self.memory_manager:
+                    memory = Memory(
+                        content=result['answer'],
+                        metadata={
+                            'type': 'deep_research_results',
+                            'topic': topic,
+                            'sources': result['sources'],
+                            'timestamp': datetime.now().isoformat()
+                        }
+                    )
+                    # Generate embedding
+                    memory.embedding = await self.safe_generate_embedding(result['answer'])
+                    await self.memory_manager.store(memory)
+                
+                if progress_callback:
+                    progress_callback(1.0)
+                
+                return final_results
+
             if progress_callback:
                 progress_callback(0.05)
                 
@@ -494,40 +564,37 @@ class ResearchSystem(BaseResearchSystem):
             return await self._browser_scrape_fallback(url)
             
         try:
-            # Use ThreadPoolExecutor to run the synchronous API call
-            import concurrent.futures
-            
             logger.info(f"Attempting to scrape {url} with Firecrawl")
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(
-                    self.firecrawl.scrape_url,
+            
+            try:
+                # Use AsyncV1FirecrawlApp's scrape_url
+                scrape_result_obj = await self.firecrawl.scrape_url(
                     url,
-                    {'formats': ['markdown']}
+                    formats=['markdown']
                 )
                 
-                try:
-                    # Set a timeout to avoid hanging
-                    result = future.result(timeout=30)  # 30 second timeout
-                    
-                    # Validate the result
-                    if not result:
-                        logger.warning(f"Empty result from Firecrawl for {url}")
-                        return await self._browser_scrape_fallback(url)
-                    
-                    if not isinstance(result, dict):
-                        logger.warning(f"Invalid result type from Firecrawl for {url}: {type(result)}")
-                        return await self._browser_scrape_fallback(url)
-                    
-                    if 'markdown' not in result or not result['markdown']:
-                        logger.warning(f"No markdown content from Firecrawl for {url}")
-                        return await self._browser_scrape_fallback(url)
-                    
-                    logger.info(f"Successfully scraped {url} with Firecrawl")
-                    return result
-                    
-                except concurrent.futures.TimeoutError:
-                    logger.warning(f"Firecrawl request timed out for {url}")
+                # Convert Pydantic model to dictionary
+                result = scrape_result_obj.model_dump()
+                
+                # Validate the result
+                if not result:
+                    logger.warning(f"Empty result from Firecrawl for {url}")
                     return await self._browser_scrape_fallback(url)
+                
+                if not isinstance(result, dict):
+                    logger.warning(f"Invalid result type from Firecrawl for {url}: {type(result)}")
+                    return await self._browser_scrape_fallback(url)
+                
+                if 'markdown' not in result or not result['markdown']:
+                    logger.warning(f"No markdown content from Firecrawl for {url}")
+                    return await self._browser_scrape_fallback(url)
+                
+                logger.info(f"Successfully scraped {url} with Firecrawl")
+                return result
+                
+            except asyncio.TimeoutError:
+                logger.warning(f"Firecrawl request timed out for {url}")
+                return await self._browser_scrape_fallback(url)
                     
         except Exception as e:
             logger.warning(f"Firecrawl scraping failed for {url}: {str(e)}")

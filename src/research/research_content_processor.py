@@ -9,8 +9,8 @@ from datetime import datetime
 
 from src.research.models import ResearchTask, SourceType, TaskStatus
 from src.research.exceptions import ProcessingError
-from src.research.clients.firecrawl_client import FirecrawlClient
-from src.research.processors.result_processor import ResearchResultProcessor
+from src.research.firecrawl_client import FirecrawlClient
+from src.research.result_processor import ResearchResultProcessor
 from src.memory.models import Memory
 
 logger = logging.getLogger(__name__)

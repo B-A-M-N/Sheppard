@@ -47,12 +47,54 @@ COMMANDS = {
     },
 
     '/research': {
-        'description': 'Start a research task on a topic with live web browsing',
-        'usage': '/research <topic> [--depth=<1-5>] [--headless]',
+        'description': 'Start a research task on a topic with live web browsing. Use --deep for agentic deep research.',
+        'usage': '/research <topic> [--depth=<1-5>] [--headless] [--deep]',
         'examples': [
             '/research "current AI developments"',
-            '/research "climate change" --depth=3'
+            '/research "climate change" --depth=3',
+            '/research "Quantum Mechanics" --deep'
         ],
+        'category': 'research'
+    },
+    '/learn': {
+        'description': 'Start a background learning mission to continuously research and condense a topic.',
+        'usage': '/learn <topic> [--max_gb=<5-10>]',
+        'examples': [
+            '/learn "Byzantine Empire history" --max_gb=10',
+            '/learn "AI Ethics and Governance"'
+        ],
+        'category': 'research'
+    },
+    '/query': {
+        'description': 'Query the unified knowledge stack for technical facts and evidence.',
+        'usage': '/query <text> [--project=NAME] [--topic=NAME]',
+        'examples': [
+            '/query "What are the latency tradeoffs in agent swarms?"',
+            '/query "Extract system specs" --project=SOLLOL'
+        ],
+        'category': 'research'
+    },
+    '/distill': {
+        'description': 'Manually trigger a distillation pass to refine raw sources into Knowledge Atoms.',
+        'usage': '/distill <topic_id> [--priority=low|high|critical]',
+        'examples': [
+            '/distill <id>',
+            '/distill <id> --priority=high'
+        ],
+        'category': 'research'
+    },
+    '/project': {
+        'description': 'Manage and index local project codebases.',
+        'usage': '/project index <name> <path>',
+        'examples': [
+            '/project index my_app ./src'
+        ],
+        'category': 'research'
+    },
+    '/missions': {
+        'description': 'View the status of active learning missions.',
+        'usage': '/missions',
+        'examples': ['/missions'],
         'category': 'research'
     },
     '/status': {
@@ -90,6 +132,42 @@ COMMANDS = {
             '/settings temperature 0.7'
         ],
         'category': 'system'
+    },
+    '/setting': {
+        'description': 'Alias for /settings',
+        'usage': '/setting [setting] [value]',
+        'examples': ['/setting'],
+        'category': 'system'
+    },
+    '/pref': {
+        'description': 'Alias for /preferences',
+        'usage': '/pref [action] [key] [value]',
+        'examples': ['/pref list'],
+        'category': 'system'
+    },
+    '/prefs': {
+        'description': 'Alias for /preferences',
+        'usage': '/prefs [action] [key] [value]',
+        'examples': ['/prefs list'],
+        'category': 'system'
+    },
+    '/mem': {
+        'description': 'Alias for /memory',
+        'usage': '/mem <action> [options]',
+        'examples': ['/mem search "query"'],
+        'category': 'memory'
+    },
+    '/r': {
+        'description': 'Alias for /research',
+        'usage': '/r <topic>',
+        'examples': ['/r "topic"'],
+        'category': 'research'
+    },
+    '/h': {
+        'description': 'Alias for /help',
+        'usage': '/h [command]',
+        'examples': ['/h research'],
+        'category': 'general'
     },
     '/browse': {
         'description': 'Open browser to research specific URL',

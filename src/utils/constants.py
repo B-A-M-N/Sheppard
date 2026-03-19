@@ -3,12 +3,14 @@ Constants for system configuration and behavior.
 File: src/utils/constants.py
 """
 
+from src.research.models import ResponseType
+
 # Message limits
 MAX_MESSAGE_LENGTH = 10000
 MAX_CONTEXT_MESSAGES = 100
 
 # Response settings
-DEFAULT_RESPONSE_TYPE = "normal"
+DEFAULT_RESPONSE_TYPE = ResponseType.NORMAL
 
 # Persona identifiers
 SYSTEM_PERSONA_ID = "system"

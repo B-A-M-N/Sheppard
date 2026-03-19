@@ -28,7 +28,7 @@ class FirecrawlConfig:
     
     # Scraping options
     scrape_options: Dict[str, Any] = field(default_factory=lambda: {
-        "waitUntil": "networkidle0",
+        "waitFor": 2000,
         "timeout": 30000,
         "removeScripts": True,
         "removeStyles": True,

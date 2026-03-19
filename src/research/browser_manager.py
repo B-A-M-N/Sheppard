@@ -223,6 +223,7 @@ class BrowserManager:
             
             # Try initialization methods in sequence until one works
             methods = [
+                self._initialize_with_playwright,
                 self._initialize_with_undetected_chromedriver,
                 self._initialize_with_webdriver_manager,
                 self._initialize_with_fallback_methods
@@ -249,6 +250,22 @@ class BrowserManager:
             await self.cleanup()
             raise BrowserError(f"Browser initialization failed: {str(e)}")
     
+    async def _initialize_with_playwright(self, options: Any) -> None:
+        """Initialize browser with Playwright as the primary driver."""
+        try:
+            from playwright.async_api import async_playwright
+            
+            # We don't initialize a persistent browser instance here to avoid keeping it open unnecessarily.
+            # Instead, we set fallback mode to true so all operations use playwright internally.
+            self._fallback_mode = True
+            self.driver = None # No persistent Selenium driver
+            self._driver_attempts.append({"method": "playwright", "success": True})
+            logger.info("Playwright initialized as primary browser manager")
+            
+        except ImportError:
+            self._driver_attempts.append({"method": "playwright", "success": False, "error": "Playwright not installed"})
+            raise ImportError("Playwright is not installed. Please install it with 'pip install playwright'")
+
     async def _initialize_with_undetected_chromedriver(self, options: Options) -> None:
         """Initialize browser with undetected_chromedriver."""
         try:
@@ -415,10 +432,44 @@ class BrowserManager:
         search_engine: str = "google",
         progress_callback: Optional[callable] = None
     ) -> Dict[str, Any]:
-        """Gather content with multiple fallback mechanisms for reliability."""
+        """Gather content with SearXNG as primary and other engines as fallback."""
         if not self._initialized:
             await self.initialize()
-            
+
+        # Try SearXNG first if configured
+        searxng_url = os.getenv('SEARXNG_ENDPOINT')
+        if searxng_url:
+            try:
+                logger.info(f"Searching on SearXNG: {query}")
+                import requests
+                # Format: query, format=json
+                response = requests.get(
+                    f"{searxng_url}/search",
+                    params={'q': query, 'format': 'json'},
+                    timeout=self.timeout
+                )
+                response.raise_for_status()
+                data = response.json()
+                
+                results = []
+                for res in data.get('results', [])[:self.max_pages]:
+                    results.append({
+                        'url': res.get('url'),
+                        'title': res.get('title'),
+                        'snippet': res.get('content', '')
+                    })
+                
+                if results:
+                    logger.info(f"Found {len(results)} results from SearXNG")
+                    return {
+                        'query': query,
+                        'search_engine': 'searxng',
+                        'results': results,
+                        'timestamp': datetime.now().isoformat()
+                    }
+            except Exception as e:
+                logger.warning(f"SearXNG search failed, falling back: {str(e)}")
+
         # If we're in fallback mode (no Selenium driver),
         # use alternative content gathering methods
         if self._fallback_mode:

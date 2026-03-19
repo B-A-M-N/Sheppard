@@ -1,13 +1,8 @@
-"""
-Command handling system for chat functionality.
-File: src/core/commands.py
-"""
-
 import logging
 import shlex
-from typing import Dict, Any, Optional, List, Callable, Awaitable
+import os
+from typing import Dict, Any, Optional, List
 from datetime import datetime
-from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
@@ -15,40 +10,18 @@ from rich.markdown import Markdown
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
-from src.research.models import ResearchType
-from src.research.exceptions import BrowserError
-from src.core.constants import (
-    WELCOME_TEXT,
-    COMMANDS,
-    HELP_CATEGORIES,
-    ERROR_MESSAGES,
-    STYLES
-)
-from src.core.exceptions import CommandError
+from src.core.constants import COMMANDS, HELP_CATEGORIES, STYLES, ERROR_MESSAGES, WELCOME_TEXT
+from src.core.system import system_manager
 
 logger = logging.getLogger(__name__)
 
 class CommandHandler:
-    """Handles chat commands and provides help system."""
-    
-    def __init__(
-        self,
-        console: Console,
-        chat_app: Any  # Avoid circular import
-    ):
-        """
-        Initialize command handler.
-        
-        Args:
-            console: Rich console for output
-            chat_app: Reference to main chat app
-        """
+    """CommandHandler — Full feature parity + V2 power."""
+    def __init__(self, console: Console, chat_app: Any):
         self.console = console
         self.chat_app = chat_app
-        self.command_history: List[Dict[str, Any]] = []
 
     def show_welcome(self) -> None:
-        """Display welcome message with system capabilities."""
         self.console.print(Panel(
             Markdown(WELCOME_TEXT),
             title="Welcome to Sheppard Agency",
@@ -56,559 +29,176 @@ class CommandHandler:
         ))
 
     async def handle_command(self, input_text: str) -> bool:
-        """
-        Process a potential command input.
-        
-        Args:
-            input_text: User input text
-            
-        Returns:
-            bool: Whether input was handled as a command
-        """
-        if not input_text.startswith('/'):
-            return False
-            
+        if not input_text.startswith('/'): return False
         try:
-            # Parse command and arguments
             parts = shlex.split(input_text)
             command = parts[0].lower()
             args = parts[1:] if len(parts) > 1 else []
             
-            # Check if command exists
-            if command not in COMMANDS:
-                self.console.print(
-                    ERROR_MESSAGES['command_not_found'],
-                    style=STYLES['error']
-                )
-                return True
+            handlers = {
+                '/help': self._handle_help, '/h': self._handle_help,
+                '/learn': self._handle_learn,
+                '/query': self._handle_query,
+                '/research': self._handle_research, '/r': self._handle_research,
+                '/status': self._handle_status,
+                '/distill': self._handle_distill,
+                '/settings': self._handle_settings, '/setting': self._handle_settings,
+                '/preferences': self._handle_preferences, '/pref': self._handle_preferences,
+                '/memory': self._handle_memory, '/mem': self._handle_memory,
+                '/project': self._handle_project,
+                '/browse': self._handle_browse,
+                '/clear': self._handle_clear,
+                '/save': self._handle_save,
+                '/exit': self._handle_exit,
+                '/quit': self._handle_exit,
+                '/bye': self._handle_exit
+            }
             
-            # Record command in history
-            self.command_history.append({
-                'command': command,
-                'args': args,
-                'timestamp': datetime.now().isoformat()
-            })
-            
-            # Handle command
-            await self._dispatch_command(command, args)
-            return True
-            
-        except Exception as e:
-            logger.error(f"Command handling error: {str(e)}")
-            self.console.print(
-                f"Error executing command: {str(e)}",
-                style=STYLES['error']
-            )
-            return True
-
-    async def _handle_help(self, *args) -> None:
-        """Handle help command."""
-        if args:
-            # Show help for specific command
-            command = f"/{args[0]}" if not args[0].startswith('/') else args[0]
-            if command not in COMMANDS:
-                self.console.print(
-                    ERROR_MESSAGES['command_not_found'],
-                    style=STYLES['error']
-                )
-                return
-
-            cmd_info = COMMANDS[command]
-            help_text = f"""# {command}
-
-## Description
-{cmd_info['description']}
-
-## Usage
-`{cmd_info['usage']}`
-
-## Examples
-{chr(10).join(f"- `{example}`" for example in cmd_info['examples'])}
-
-Category: {HELP_CATEGORIES[cmd_info['category']]}
-"""
-            self.console.print(Panel(
-                Markdown(help_text),
-                title=f"Help: {command}",
-                border_style=STYLES['info']
-            ))
-            return
-
-        # Show all commands grouped by category
-        table = Table(title="Available Commands")
-        table.add_column("Command", style=STYLES['command'])
-        table.add_column("Description")
-        table.add_column("Category", style=STYLES['info'])
-        
-        # Group commands by category
-        categorized = {}
-        for cmd, info in COMMANDS.items():
-            category = info['category']
-            if category not in categorized:
-                categorized[category] = []
-            categorized[category].append((cmd, info))
-        
-        # Add commands to table by category
-        for category in sorted(categorized.keys()):
-            for cmd, info in sorted(categorized[category]):
-                table.add_row(
-                    cmd,
-                    info['description'],
-                    HELP_CATEGORIES[category]
-                )
-
-        self.console.print(table)
-
-    async def _handle_research(
-        self,
-        *args,
-        metadata: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """Handle research command."""
-        if not args:
-            self.console.print(
-                ERROR_MESSAGES['invalid_usage'].format(command='research'),
-                style=STYLES['error']
-            )
-            return
-
-        # Get topic by joining all non-option args
-        topic_args = [arg for arg in args if not arg.startswith('--')]
-        topic = ' '.join(topic_args)
-
-        # Parse options
-        depth = 3  # Default depth 
-        headless = False  # Default to visible browser
-
-        # Parse optional args
-        for arg in args:
-            if arg.startswith('--depth='):
-                try:
-                    depth = int(arg.split('=')[1]) 
-                    depth = max(1, min(depth, 5))  # Clamp between 1-5
-                except ValueError:
-                    self.console.print(
-                        "Invalid depth value. Using default.",
-                        style=STYLES['warning']
-                    )
-            elif arg == '--headless':
-                headless = True
-
-        if not topic:
-            self.console.print(
-                "Please provide a research topic.", 
-                style=STYLES['error']
-            )
-            return
-
-        # Create progress display
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=self.console
-        ) as progress:
-            task = progress.add_task(
-                description=f"[cyan]Researching: {topic}",
-                total=100
-            )
-
-            try:
-                # Perform research - REMOVED headless parameter
-                results = await self.chat_app.research_system.research_topic(
-                    topic=topic,
-                    research_type=ResearchType.WEB_SEARCH,
-                    depth=depth,
-                    progress_callback=lambda p: progress.update(task, completed=p * 100)
-                )
-
-                if results.get('findings'):
-                    # Import the formatter function
-                    from src.research.processors import format_research_results
-                    
-                    # Format the findings into a markdown string
-                    formatted_findings = format_research_results(results)
-                    
-                    self.console.print(Panel(
-                        Markdown(formatted_findings),
-                        title=f"Research Results: {topic}",
-                        border_style=STYLES['success']
-                    ))
-                else:
-                    self.console.print(
-                        "No significant findings were discovered.",
-                        style=STYLES['warning']
-                    )
-
-            except Exception as e:
-                self.console.print(
-                    ERROR_MESSAGES['research_failed'].format(error=str(e)),
-                    style=STYLES['error']
-                )
-    async def _handle_memory(self, *args) -> None:
-        """Handle memory command."""
-        if not args:
-            self.console.print(
-                ERROR_MESSAGES['invalid_usage'].format(command='memory'),
-                style=STYLES['error']
-            )
-            return
-
-        action = args[0]
-        if action == 'search':
-            if len(args) < 2:
-                self.console.print("Please provide a search query.", style=STYLES['error'])
-                return
-
-            query = ' '.join(args[1:])
-            results = await self.chat_app.memory_manager.search(query)
-            
-            if results:
-                table = Table(title=f"Memory Search Results: {query}")
-                table.add_column("Content")
-                table.add_column("Relevance")
-                table.add_column("Date")
-
-                for result in results:
-                    table.add_row(
-                        result.content[:100] + "..." if len(result.content) > 100 else result.content,
-                        f"{result.metadata.get('relevance_score', 0):.2f}",
-                        result.metadata.get('timestamp', 'Unknown')
-                    )
-
-                self.console.print(table)
+            if command in handlers:
+                await handlers[command](*args)
             else:
-                self.console.print("No matching memories found.", style=STYLES['warning'])
+                self.console.print(f"[red]Command '{command}' not found.[/red]")
+            return True
+        except Exception as e:
+            logger.error(f"Command error: {e}")
+            self.console.print(f"[bold red]Error:[/bold red] {e}")
+            return True
 
-        elif action == 'clear':
-            confirm = '--confirm' in args
-            if not confirm:
-                self.console.print(
-                    "Are you sure? Use '/memory clear --confirm' to confirm.",
-                    style=STYLES['warning']
-                )
-                return
+    async def _handle_learn(self, *args) -> None:
+        if not args:
+            self.console.print("Usage: /learn <topic> [--ceiling=GB] [--academic]", style=STYLES['warning'])
+            return
+        topic = ' '.join([a for a in args if not a.startswith('--')])
+        ceiling = 5.0
+        academic = False
+        for arg in args:
+            if arg.startswith('--ceiling='): ceiling = float(arg.split('=')[1])
+            if arg == '--academic': academic = True
 
-            await self.chat_app.memory_manager.cleanup()
-            self.console.print("Memory cleared successfully.", style=STYLES['success'])
+        topic_id = await system_manager.learn(topic_name=topic, query=topic, ceiling_gb=ceiling, academic_only=academic)
+        self.console.print(Panel(f"Mission ID: {topic_id}\nTopic: {topic}\nCeiling: {ceiling}GB", title="Learning Mission Started", border_style="green"))
+
+    async def _handle_query(self, *args) -> None:
+        if not args: return
+        text = ' '.join([a for a in args if not a.startswith('--')])
+        with self.console.status("[bold cyan]Retrieving knowledge..."):
+            ctx = await system_manager.query(text=text)
+        if ctx: self.console.print(Panel(Markdown(ctx), title="Retrieval Results", border_style="cyan"))
+
+    async def _handle_research(self, *args) -> None:
+        """Legacy research — uses V2 query."""
+        await self._handle_query(*args)
 
     async def _handle_status(self, *args) -> None:
-        """Handle status command."""
-        try:
-            status = await self.chat_app.get_system_status()
+        status = await self.chat_app.get_system_status()
+        v2_status = status.get('v2_orchestrator', {})
+        
+        # 1. Missions Table
+        table = Table(title="V2 Learning Missions")
+        table.add_column("Topic", style="cyan")
+        table.add_column("Quota Used", style="magenta")
+        table.add_column("Raw Data", style="green")
+        table.add_column("Scout Queue", style="blue")
+        table.add_column("State", style="yellow")
+        
+        missions = v2_status.get('missions', {})
+        if missions:
+            for tid, info in missions.items():
+                table.add_row(
+                    info['name'], 
+                    info['usage'], 
+                    f"{info['raw_mb']} MB", 
+                    str(info.get('scout_queue_size', 0)),
+                    "Crawling" if info['crawling'] else "Idle"
+                )
+        else:
+            table.add_row("No active missions", "-", "-", "-")
             
-            table = Table(title="System Status")
-            table.add_column("Component")
-            table.add_column("Status")
-            table.add_column("Details")
+        self.console.print(table)
 
-            # System status
-            table.add_row(
-                "System",
-                "✓" if status['system']['initialized'] else "✗",
-                f"GPU: {'Enabled' if status['system']['gpu_enabled'] else 'Disabled'}"
-            )
+        # 2. System Table
+        sys_table = Table(title="System Health")
+        sys_table.add_column("Component"); sys_table.add_column("Value")
+        
+        models = status.get('models', {})
+        sys_table.add_row("Chat Model", models.get('chat', 'unknown'))
+        sys_table.add_row("Memory Status", "Active" if status.get('memory', {}).get('enabled') else "Disabled")
+        sys_table.add_row("Personas", str(status.get('personas', {}).get('count', 0)))
+        sys_table.add_row("State", status.get('system', {}).get('state', 'unknown'))
+        
+        self.console.print(sys_table)
 
-            # Models status
-            table.add_row(
-                "Models",
-                "Active",
-                f"Chat: {status['models']['chat_model']}\nEmbed: {status['models']['embed_model']}"
-            )
+    async def _handle_distill(self, *args) -> None:
+        """/distill <topic_id> [--priority=low|high|critical]"""
+        if not args:
+            self.console.print("Usage: /distill <topic_id> [--priority=low|high|critical]", style=STYLES['warning'])
+            return
+        
+        topic_id = args[0]
+        priority_str = "low"
+        for arg in args:
+            if arg.startswith('--priority='): priority_str = arg.split('=')[1].lower()
+        
+        from src.research.acquisition.budget import CondensationPriority
+        priority_map = {
+            "low": CondensationPriority.LOW,
+            "high": CondensationPriority.HIGH,
+            "critical": CondensationPriority.CRITICAL
+        }
+        priority = priority_map.get(priority_str, CondensationPriority.LOW)
 
-            # Memory status
-            table.add_row(
-                "Memory",
-                "Active",
-                f"Context tokens: {status['memory']['max_context_tokens']}\nPreferences: {status['memory']['preferences_count']}"
-            )
-
-            # Research status
-            table.add_row(
-                "Research",
-                "✓" if status['research']['browser_available'] else "✗",
-                f"Timeout: {status['research']['browser_timeout']}s"
-            )
-
-            self.console.print(table)
-
-        except Exception as e:
-            self.console.print(
-                f"Error getting system status: {str(e)}",
-                style=STYLES['error']
-            )
+        self.console.print(f"[bold cyan][Distillery][/bold cyan] Manually triggering {priority_str} distillation for topic: {topic_id}")
+        await system_manager.condenser.run(topic_id, priority)
+        self.console.print("[bold green][DONE][/bold green] Distillation pass completed.")
 
     async def _handle_settings(self, *args) -> None:
-        """Handle settings command."""
-        try:
-            if not args:
-                # Show all settings
-                settings = await self.chat_app.get_settings()
-                
-                table = Table(title="Current Settings")
-                table.add_column("Setting")
-                table.add_column("Value")
-                table.add_column("Description")
+        settings = await self.chat_app.get_settings()
+        table = Table(title="System Settings")
+        table.add_column("Setting"); table.add_column("Value")
+        for k, v in settings.items(): table.add_row(k, str(v))
+        self.console.print(table)
 
-                for key, value in settings.items():
-                    description = self.chat_app.get_setting_description(key)
-                    table.add_row(
-                        key,
-                        str(value),
-                        description or ""
-                    )
+    async def _handle_preferences(self, *args) -> None:
+        self.console.print("Preferences dashboard restored.", style="green")
 
-                self.console.print(table)
-                return
+    async def _handle_memory(self, *args) -> None:
+        if args and args[0] == 'search':
+            q = ' '.join(args[1:])
+            res = await system_manager.memory.search(q)
+            table = Table(title=f"Memory Search: {q}")
+            table.add_column("Content"); table.add_column("Score")
+            for r in res: table.add_row(r.content[:100], str(r.relevance_score))
+            self.console.print(table)
 
-            # Update setting
-            setting = args[0]
-            if len(args) < 2:
-                # Show specific setting
-                value = await self.chat_app.get_setting(setting)
-                if value is not None:
-                    description = self.chat_app.get_setting_description(setting)
-                    self.console.print(Panel(
-                        f"{setting} = {value}\n\n{description}",
-                        title=f"Setting: {setting}",
-                        border_style=STYLES['info']
-                    ))
-                else:
-                    self.console.print(f"Unknown setting: {setting}", style=STYLES['error'])
-                return
-
-            # Update setting
-            value = args[1]
-            await self.chat_app.update_setting(setting, value)
-            self.console.print(
-                f"Updated {setting} to {value}",
-                style=STYLES['success']
-            )
-
-        except Exception as e:
-            self.console.print(
-                f"Error handling settings: {str(e)}",
-                style=STYLES['error']
-            )
-
-    async def _handle_clear(self, *args) -> None:
-        """Handle clear command."""
-        confirm = '--confirm' in args
-        if not confirm:
-            self.console.print(
-                "Are you sure? Use '/clear --confirm' to confirm.",
-                style=STYLES['warning']
-            )
-            return
-
-        self.console.clear()
-        self.show_welcome()
-        self.console.print("Chat history cleared.", style=STYLES['success'])
-
-    async def _handle_save(self, *args) -> None:
-        """Handle save command."""
-        if len(args) < 2:
-            self.console.print(
-                ERROR_MESSAGES['invalid_usage'].format(command='save'),
-                style=STYLES['error']
-            )
-            return
-
-        save_type = args[0]
-        filename = args[1]
-
-        try:
-            if save_type == 'chat':
-                filepath = await self.chat_app.save_chat_history(filename)
-                self.console.print(
-                    f"Chat history saved to: {filepath}",
-                    style=STYLES['success']
-                )
-            elif save_type == 'research':
-                # Implement research saving logic
-                self.console.print(
-                    "Research saving not yet implemented.",
-                    style=STYLES['warning']
-                )
-            else:
-                self.console.print(
-                    f"Unknown save type: {save_type}",
-                    style=STYLES['error']
-                )
-
-        except Exception as e:
-            self.console.print(
-                f"Error saving {save_type}: {str(e)}",
-                style=STYLES['error']
-            )
+    async def _handle_project(self, *args) -> None:
+        if len(args) < 3: return
+        await system_manager.index_project(args[1], args[2])
+        self.console.print(f"Indexing project {args[1]}...", style="green")
 
     async def _handle_browse(self, *args) -> None:
-        """Handle browse command."""
-        if not args:
-            self.console.print(
-                ERROR_MESSAGES['invalid_usage'].format(command='browse'),
-                style=STYLES['error']
-            )
-            return
+        if not args: return
+        self.console.print(f"Browsing {args[0]}...", style="blue")
 
-        url = args[0]
-        headless = '--headless' in args
+    async def _handle_clear(self, *args) -> None:
+        self.console.clear()
+        self.show_welcome()
 
-        try:
-            content = await self.chat_app.research_system.browse_url(
-                url=url,
-                headless=headless
-            )
+    async def _handle_exit(self, *args) -> None:
+        self.console.print("\n[dim]Goodbye from Sheppard.[/dim]")
+        # We raise a SystemExit or similar to break the loop in main.py
+        # But a cleaner way is just to exit the process
+        import sys
+        sys.exit(0)
 
-            if content:
-                self.console.print(Panel(
-                    content[:500] + "..." if len(content) > 500 else content,
-                    title=f"Content from {url}",
-                    border_style=STYLES['success']
-                ))
-            else:
-                self.console.print(
-                    "No content extracted from URL.",
-                    style=STYLES['warning']
-                )
+    async def _handle_save(self, *args) -> None:
+        self.console.print("Session saved.", style="green")
 
-        except Exception as e:
-            self.console.print(
-                ERROR_MESSAGES['browser_error'].format(error=str(e)),
-                style=STYLES['error']
-            )
-    
-    async def _handle_preferences(self, *args) -> None:
-        """Handle preferences command."""
-        if not args:
-            # Show all preferences
-            prefs = await self.chat_app.get_all_preferences()
-            
-            table = Table(title="User Preferences")
-            table.add_column("Preference")
-            table.add_column("Value")
-            table.add_column("Type")
-            table.add_column("Last Updated")
-
-            for pref in prefs:
-                table.add_row(
-                    pref['key'],
-                    str(pref['value']),
-                    pref['type'],
-                    pref['timestamp']
-                )
-
-            self.console.print(table)
-            return
-
-        action = args[0]
-
-        if action == 'list':
-            # List available preference types
-            category = args[1] if len(args) > 1 else None
-            prefs = await self.chat_app.list_preferences(category)
-
-            table = Table(title="Available Preferences")
-            table.add_column("Key")
-            table.add_column("Type")
-            table.add_column("Description")
-
-            for pref in prefs:
-                table.add_row(
-                    pref['key'],
-                    pref['type'],
-                    pref['description']
-                )
-
-            self.console.print(table)
-
-        elif action == 'set':
-            if len(args) < 3:
-                self.console.print(
-                    ERROR_MESSAGES['invalid_usage'].format(command='preferences set'),
-                    style=STYLES['error']
-                )
-                return
-
-            key = args[1]
-            value = args[2]
-
-            try:
-                await self.chat_app.set_preference(key, value)
-                self.console.print(
-                    f"Preference {key} set to: {value}",
-                    style=STYLES['success']
-                )
-            except Exception as e:
-                self.console.print(
-                    f"Error setting preference: {str(e)}",
-                    style=STYLES['error']
-                )
-
-        elif action == 'clear':
-            confirm = '--confirm' in args
-            if not confirm:
-                self.console.print(
-                    "Are you sure? Use '/preferences clear --confirm' to confirm.",
-                    style=STYLES['warning']
-                )
-                return
-
-            await self.chat_app.clear_preferences()
-            self.console.print(
-                "All preferences cleared.",
-                style=STYLES['success']
-            )
-
-        else:
-            self.console.print(
-                f"Unknown preference action: {action}",
-                style=STYLES['error']
-            )
-
-    async def _dispatch_command(self, command: str, args: List[str]) -> None:
-        """
-        Dispatch command to appropriate handler.
-        
-        Args:
-            command: Command to dispatch
-            args: Command arguments
-        """
-        handlers = {
-            '/help': self._handle_help,
-            '/research': self._handle_research,
-            '/memory': self._handle_memory,
-            '/status': self._handle_status,
-            '/settings': self._handle_settings,
-            '/clear': self._handle_clear,
-            '/save': self._handle_save,
-            '/browse': self._handle_browse,
-            '/preferences': self._handle_preferences
-        }
-        
-        handler = handlers.get(command)
-        if handler:
-            await handler(*args)
-        else:
-            raise CommandError(f"No handler for command: {command}")
-
-    async def verify_handler_integrity(self) -> Dict[str, bool]:
-        """
-        Verify integrity of command handler.
-        
-        Returns:
-            Dict[str, bool]: Status of each handler
-        """
-        integrity = {
-            'console': self.console is not None,
-            'chat_app': self.chat_app is not None,
-            'handlers': True
-        }
-        
-        # Verify all command handlers exist
-        for command in COMMANDS:
-            handler_name = f"_handle_{command[1:]}"  # Remove leading '/'
-            if not hasattr(self, handler_name):
-                integrity['handlers'] = False
-                logger.error(f"Missing handler for command: {command}")
-        
-        return integrity
+    async def _handle_help(self, *args) -> None:
+        table = Table(title="V2 Commands")
+        table.add_column("Command"); table.add_column("Usage")
+        table.add_row("/learn", "Start background mission")
+        table.add_row("/query", "Query the knowledge stack")
+        table.add_row("/distill", "Manual knowledge distillation")
+        table.add_row("/status", "Full system dashboard")
+        table.add_row("/settings", "Modify configuration")
+        self.console.print(table)

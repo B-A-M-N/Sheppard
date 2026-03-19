@@ -127,11 +127,13 @@ class FirecrawlClient:
     async def _verify_api_connection(self) -> None:
         """Verify API connectivity."""
         try:
-            endpoint = f"{self.config.base_url}/v1/status"
+            # Check root endpoint for availability
+            endpoint = self.config.base_url
             async with self.session.get(endpoint) as response:
                 response.raise_for_status()
+                # Local firecrawl might return different messages
                 status = await response.json()
-                if status.get('status') != 'ok':
+                if not status or ('message' not in status and status.get('status') != 'ok'):
                     raise FirecrawlError("API status check failed")
         except Exception as e:
             raise FirecrawlError(f"API connection verification failed: {str(e)}")
@@ -156,17 +158,36 @@ class FirecrawlClient:
             default_options = {'formats': ['markdown']}
             scrape_options = {**default_options, **(options or {})}
             
-            # Create a separate thread for the synchronous API call
+            # Use AsyncV1FirecrawlApp directly
             try:
-                from firecrawl import FirecrawlApp
+                from firecrawl import AsyncV1FirecrawlApp
                 
-                # Use ThreadPoolExecutor to run the synchronous API call
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    firecrawl_app = FirecrawlApp(api_key=self.config.api_key)
-                    result = await asyncio.get_event_loop().run_in_executor(
-                        executor, 
-                        lambda: firecrawl_app.scrape_url(url, params=scrape_options)
-                    )
+                # Pass base_url as api_url to use local instance
+                firecrawl_app = AsyncV1FirecrawlApp(
+                    api_key=self.config.api_key, 
+                    api_url=self.config.base_url
+                )
+                
+                # Use Async SDK's scrape_url
+                scrape_result_obj = await firecrawl_app.scrape_url(url, **scrape_options)
+                
+                # Convert Pydantic model to dictionary
+                result = scrape_result_obj.model_dump()
+                
+                # Wrap in 'data' key if success, to match expected structure
+                if result.get('success') and 'data' not in result:
+                    # Move content fields to 'data'
+                    content_fields = [
+                        'markdown', 'html', 'rawHtml', 'links', 'extract', 
+                        'json_field', 'screenshot', 'metadata', 'actions', 
+                        'title', 'description', 'changeTracking'
+                    ]
+                    data = {k: result[k] for k in content_fields if k in result}
+                    return {
+                        'success': True,
+                        'data': data,
+                        'warning': result.get('warning')
+                    }
                 
                 return result
                 

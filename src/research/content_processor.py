@@ -34,8 +34,13 @@ class ContentProcessor:
         self.client = ollama_client
         self.firecrawl = None
         if firecrawl_config:
-            from firecrawl import FirecrawlApp
-            self.firecrawl = FirecrawlApp(api_key=firecrawl_config.api_key)
+            from firecrawl import AsyncV1FirecrawlApp
+            # Use api_url from config if available (base_url in our config)
+            api_url = getattr(firecrawl_config, 'base_url', None)
+            self.firecrawl = AsyncV1FirecrawlApp(
+                api_key=firecrawl_config.api_key,
+                api_url=api_url
+            )
         
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
@@ -326,7 +331,12 @@ class ContentProcessor:
                         findings.append(self._processed_urls[url])
                         continue
                     
-                    scrape_result = await self.firecrawl.scrape_url(url)
+                    scrape_result_obj = await self.firecrawl.scrape_url(
+                        url,
+                        formats=['markdown']
+                    )
+                    
+                    scrape_result = scrape_result_obj.model_dump()
                     
                     if not scrape_result.get('markdown'):
                         logger.warning(f"No markdown content for {url}")

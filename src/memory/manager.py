@@ -1,507 +1,367 @@
 """
-Enhanced memory manager with proper embedding generation and storage.
-File: src/memory/manager.py
+memory/manager.py — Sheppard V2 Memory Manager
+
+Central coordinator for knowledge persistence.
+Manages:
+  - Level A (Sources) in raw Postgres
+  - Level B, C, D in both Postgres (structured) and ChromaDB (semantic)
+  - Concept Graph (recursive relationships)
+  - Project Artifacts
+  - Meta-memory (system self-improvement)
 """
 
-import logging
-import uuid
 import asyncio
-from typing import Dict, Any, List, Optional, Union, Set
-from datetime import datetime
+import logging
+import os
+import hashlib
+import uuid
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Union
 
-from src.memory.stores.redis import RedisMemoryStore
-from src.memory.stores.chroma import ChromaMemoryStore
-from src.memory.models import Memory, MemorySearchResult
-from src.memory.exceptions import (
-    MemoryStoreConnectionError,
-    StorageError,
-    RetrievalError,
-    MemoryValidationError
-)
-from src.llm.client import OllamaClient
+import asyncpg
+from chromadb import PersistentClient
+from chromadb.config import Settings as ChromaSettings
+
 from src.config.settings import settings
+from src.memory.models import Memory, MemorySearchResult
+from src.llm.client import OllamaClient
 
 logger = logging.getLogger(__name__)
 
 class MemoryManager:
-    """Manages memory operations with enhanced embedding support."""
-    
-    def __init__(self):
-        """Initialize memory manager."""
-        self.redis_store = RedisMemoryStore()
-        self.chroma_store = ChromaMemoryStore()
-        self.ollama_client = None
-        self._initialized = False
-        self._active_conversations: Dict[str, Dict[str, Any]] = {}
-        self._stored_memories: Set[str] = set()
-        
-        # Configure embedding settings
-        self.embedding_dimension = settings.EMBEDDING_DIMENSION
-        self.embedding_batch_size = settings.EMBEDDING_BATCH_SIZE
-        
-        # Configure retry settings
-        self.max_retries = settings.MAX_RETRIES
-        self.retry_delay = settings.RETRY_DELAY
-        
-        # Fallback mode settings
-        self._fallback_mode = False
-        self._failed_embeddings: Set[str] = set()
+    """
+    Advanced multi-layered memory manager for Sheppard V2.
+    Uses Postgres for structured relational data and ChromaDB for semantic retrieval.
+    """
 
-    def set_ollama_client(self, client: OllamaClient) -> None:
-        """Set the Ollama client instance."""
-        self.ollama_client = client
-        logger.info("Ollama client set in memory manager")
+    def __init__(self):
+        self.pg_pool: Optional[asyncpg.Pool] = None
+        self.chroma: Optional[PersistentClient] = None
+        self.ollama: Optional[OllamaClient] = None
+        self._initialized = False
+        
+        # Collections map
+        self._collections = {}
 
     async def initialize(self) -> None:
-        """Initialize memory stores and load existing data."""
+        """Initialize Postgres and ChromaDB connections."""
         if self._initialized:
             return
 
         try:
-            # Verify Ollama client is set
-            if not self.ollama_client:
-                raise MemoryStoreConnectionError(
-                    "memory manager",
-                    "Ollama client not set. Call set_ollama_client() before initialize()"
+            # 1. Connect to Postgres
+            # Using PGPASSWORD env or settings
+            dsn = os.getenv("POSTGRES_DSN", "postgresql://sheppard:1234@localhost:5432/semantic_memory")
+            self.pg_pool = await asyncpg.create_pool(dsn=dsn, min_size=5, max_size=20)
+            
+            # 2. Connect to ChromaDB
+            persist_dir = settings.CHROMADB_PERSIST_DIRECTORY or "./data/chromadb"
+            self.chroma = PersistentClient(path=persist_dir)
+            
+            # 3. Pre-load collections
+            for name in ["knowledge_atoms", "thematic_syntheses", "advisory_briefs", "project_artifacts"]:
+                self._collections[name] = self.chroma.get_or_create_collection(
+                    name=name,
+                    metadata={"hnsw:space": "cosine"}
                 )
-            
-            # Initialize Redis store first for fast retrieval
-            await self.redis_store.initialize()
-            
-            # Initialize ChromaDB store with Ollama client for embeddings
-            await self.chroma_store.initialize(self.ollama_client)
-            
+
             self._initialized = True
-            logger.info("Memory manager initialized successfully")
-            
+            logger.info("[Memory] Sheppard V2 Memory Manager initialized")
         except Exception as e:
-            logger.error(f"Failed to initialize memory manager: {str(e)}")
-            await self.cleanup()
-            raise MemoryStoreConnectionError("memory manager", str(e))
+            logger.error(f"[Memory] Initialization failed: {e}")
+            raise
 
-    async def store(
-        self,
-        memory: Union[Memory, Dict[str, Any]],
-        generate_embedding: bool = True,
-        retry_on_failure: bool = True
-    ) -> str:
-        """Store a memory with embedding generation."""
-        if not self._initialized:
-            raise StorageError("Memory manager not initialized")
-            
-        try:
-            # Convert dict to Memory if needed
-            if isinstance(memory, dict):
-                memory = Memory(**memory)
-            
-            # Ensure memory content is a string
-            if not isinstance(memory.content, str):
-                if isinstance(memory.content, list):
-                    memory.content = "\n".join(str(item) for item in memory.content)
-                else:
-                    memory.content = str(memory.content)
-                    
-            # Check if we're in fallback mode
-            if self._fallback_mode and not generate_embedding:
-                logger.warning("Operating in fallback mode - skipping embedding generation")
-                memory_id = await self._store_without_embedding(memory)
-                return memory_id
-            
-            # Generate embedding if requested and not present
-            if generate_embedding and not memory.embedding and self.ollama_client:
-                try:
-                    memory.embedding = await self._generate_embedding_with_retries(
-                        memory.content,
-                        max_retries=self.max_retries if retry_on_failure else 1
-                    )
-                except Exception as e:
-                    if retry_on_failure:
-                        logger.error(f"Failed to generate embedding after retries: {str(e)}")
-                        # Switch to fallback mode
-                        self._fallback_mode = True
-                        self._failed_embeddings.add(memory.embedding_id)
-                        memory_id = await self._store_without_embedding(memory)
-                        return memory_id
-                    else:
-                        raise
-            
-            # Validate embedding if present
-            if memory.embedding:
-                self._validate_embedding(memory.embedding)
-            
-            # Store in both backends
-            memory_id = await self.chroma_store.store(memory)
-            await self.redis_store.store(memory)
-            
-            # Track stored memory
-            self._stored_memories.add(memory_id)
-            
-            # Update conversation tracking if applicable
-            conversation_id = memory.metadata.get('conversation_id')
-            if conversation_id and conversation_id in self._active_conversations:
-                self._active_conversations[conversation_id]['memories'].append(memory_id)
-            
-            return memory_id
-            
-        except Exception as e:
-            logger.error(f"Failed to store memory: {str(e)}")
-            raise StorageError(f"Failed to store memory: {str(e)}")
-
-    async def _store_without_embedding(self, memory: Memory) -> str:
-        """Store memory without embedding in fallback mode."""
-        try:
-            # Store in Redis only
-            memory_id = await self.redis_store.store(memory)
-            self._stored_memories.add(memory_id)
-            logger.info(f"Stored memory {memory_id} without embedding in fallback mode")
-            return memory_id
-        except Exception as e:
-            logger.error(f"Failed to store memory in fallback mode: {str(e)}")
-            raise StorageError(f"Failed to store memory in fallback mode: {str(e)}")
-
-    async def _generate_embedding_with_retries(
-        self,
-        content: str,
-        max_retries: int = 3
-    ) -> Optional[List[float]]:
-        """Generate embedding with retries and exponential backoff."""
-        for attempt in range(max_retries):
-            try:
-                embedding = await self.ollama_client.generate_embedding(content)
-                
-                # Validate embedding
-                self._validate_embedding(embedding)
-                return embedding
-                
-            except Exception as e:
-                delay = self.retry_delay * (2 ** attempt)  # Exponential backoff
-                logger.warning(
-                    f"Embedding generation failed (attempt {attempt + 1}): {str(e)}"
-                )
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(delay)
-                continue
-        
-        raise StorageError("Failed to generate valid embedding after retries")
-
-    def _validate_embedding(self, embedding: List[float]) -> None:
-        """Validate embedding dimension and values."""
-        if not isinstance(embedding, list):
-            raise MemoryValidationError("Embedding must be a list")
-        
-        if len(embedding) != self.embedding_dimension:
-            raise MemoryValidationError(
-                f"Embedding dimension mismatch: got {len(embedding)}, "
-                f"expected {self.embedding_dimension}"
-            )
-        
-        if not all(isinstance(x, (int, float)) for x in embedding):
-            raise MemoryValidationError("All embedding values must be numeric")
-        
-        # Check for NaN/Inf values and reasonable bounds
-        if any(not -1e6 <= x <= 1e6 for x in embedding):
-            raise MemoryValidationError("Invalid embedding values detected")
-
-    async def search(
-        self,
-        query: str,
-        limit: Optional[int] = None,
-        metadata_filter: Optional[Dict[str, Any]] = None,
-        min_relevance: float = 0.0,
-        include_embeddings: bool = False
-    ) -> List[MemorySearchResult]:
-        """Search for memories with semantic search."""
-        if not self._initialized:
-            raise RetrievalError("Memory manager not initialized")
-        try:
-            # Use text-based search if in fallback mode
-            if self._fallback_mode:
-                return await self._text_based_search(
-                    query,
-                    limit=limit,
-                    metadata_filter=metadata_filter
-                )
-            # Generate query embedding if available
-            query_embedding = None
-            if self.ollama_client and len(query.strip()) > 0:
-                try:
-                    query_embedding = await self._generate_embedding_with_retries(
-                        query,
-                        max_retries=1  # Don't retry for search queries
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to generate query embedding: {str(e)}")
-                    # Fallback to text-based search
-                    return await self._text_based_search(
-                        query,
-                        limit=limit,
-                        metadata_filter=metadata_filter
-                    )
-            
-            # Search using ChromaDB for semantic search
-            try:
-                results = await self.chroma_store.search(
-                    query=query,
-                    limit=limit,
-                    metadata_filter=metadata_filter,
-                    min_relevance=min_relevance
-                )
-            except Exception as e:
-                logger.warning(f"ChromaDB search failed: {str(e)}")
-                # Fallback to text-based search
-                return await self._text_based_search(
-                    query,
-                    limit=limit,
-                    metadata_filter=metadata_filter
-                )
-            
-            # Cache results in Redis for faster future retrieval
-            valid_results = []
-            for result in results:
-                # Validate that the result has necessary fields
-                if not hasattr(result, 'content') or not result.content:
-                    logger.warning(f"Skipping invalid search result: missing content")
-                    continue
-                    
-                valid_results.append(result)
-                
-                # Store in Redis cache
-                if isinstance(result, Memory):
-                    try:
-                        await self.redis_store.store(result)
-                    except Exception as e:
-                        logger.warning(f"Failed to cache result in Redis: {str(e)}")
-            
-            # Remove embeddings if not requested
-            if not include_embeddings:
-                for result in valid_results:
-                    if hasattr(result, 'embedding'):
-                        result.embedding = None
-            
-            return valid_results
-            
-        except Exception as e:
-            logger.error(f"Failed to search memories: {str(e)}")
-            # Return empty list instead of raising an exception
-            logger.warning("Returning empty search results due to error")
-            return []
-
-    async def _text_based_search(
-        self,
-        query: str,
-        limit: Optional[int] = None,
-        metadata_filter: Optional[Dict[str, Any]] = None
-    ) -> List[MemorySearchResult]:
-        """Perform text-based search when embeddings are unavailable."""
-        results = []
-        query_terms = query.lower().split() if query else []
-        
-        try:
-            # Get memories from Redis store
-            all_memories = []
-            
-            try:
-                # Try using get_all method if available
-                if hasattr(self.redis_store, 'get_all'):
-                    all_memories = await self.redis_store.get_all()
-                else:
-                    # Fallback: Get memory IDs and retrieve individually
-                    memory_keys = await self.redis_store.redis_client.keys(f"{settings.REDIS_PREFIX}memory:*")
-                    for key in memory_keys:
-                        memory_id = key.split(":", 2)[2]  # Extract memory ID
-                        memory = await self.retrieve(memory_id)
-                        if memory:
-                            all_memories.append(memory)
-            except Exception as e:
-                logger.warning(f"Failed to retrieve memories for search: {str(e)}")
-                return []  # Return empty results if retrieval fails
-            
-            # Search through memories
-            for memory in all_memories:
-                # Check metadata filter
-                if metadata_filter:
-                    matches_filter = True
-                    for k, v in metadata_filter.items():
-                        if memory.metadata.get(k) != v:
-                            matches_filter = False
-                            break
-                    
-                    if not matches_filter:
-                        continue
-                
-                # Simple text matching
-                content_lower = memory.content.lower()
-                
-                # Calculate relevance score
-                if query_terms:
-                    matches = sum(term in content_lower for term in query_terms)
-                    relevance = matches / len(query_terms) if matches > 0 else 0.0
-                else:
-                    # All memories match an empty query
-                    relevance = 1.0
-                
-                # Only include if there's a match or query is empty
-                if relevance > 0 or not query_terms:
-                    results.append(MemorySearchResult(
-                        content=memory.content,
-                        embedding_id=memory.embedding_id,
-                        relevance_score=relevance,
-                        timestamp=memory.metadata.get('timestamp', datetime.now().isoformat()),
-                        metadata=memory.metadata
-                    ))
-            
-            # Sort by relevance and apply limit
-            results.sort(key=lambda x: x.relevance_score, reverse=True)
-            if limit and limit > 0:
-                results = results[:limit]
-            
-            return results
-            
-        except Exception as e:
-            logger.error(f"Text-based search failed: {str(e)}")
-            return []  # Return empty results on error
-
-    async def retrieve(
-        self,
-        memory_id: str,
-        include_embedding: bool = False
-    ) -> Optional[Memory]:
-        """Retrieve a memory by ID."""
-        if not self._initialized:
-            raise RetrievalError("Memory manager not initialized")
-            
-        try:
-            # Try Redis first for fast retrieval
-            memory = await self.redis_store.retrieve(memory_id)
-            
-            # Try ChromaDB if not in Redis and not in fallback mode
-            if not memory and not self._fallback_mode:
-                memory = await self.chroma_store.retrieve(memory_id)
-                if memory:
-                    # Cache in Redis for future
-                    await self.redis_store.store(memory)
-            
-            if memory and not include_embedding:
-                memory.embedding = None
-                
-            return memory
-            
-        except Exception as e:
-            logger.error(f"Failed to retrieve memory {memory_id}: {str(e)}")
-            raise RetrievalError(f"Failed to retrieve memory: {str(e)}")
-
-    async def get_preferences(
-        self,
-        preference_type: Optional[str] = None
-    ) -> List[Memory]:
-        """
-        Get stored user preferences.
-        
-        Args:
-            preference_type: Optional specific preference type
-            
-        Returns:
-            List[Memory]: List of preference memories
-        """
-        try:
-            # Prepare metadata filter
-            metadata_filter = {"type": "preference"}
-            if preference_type:
-                metadata_filter["preference_type"] = preference_type
-            
-            # Search for preferences
-            return await self.search(
-                query="",  # Empty query to match all preferences
-                metadata_filter=metadata_filter,
-                limit=100  # Get all preferences
-            )
-        except Exception as e:
-            logger.error(f"Failed to get preferences: {str(e)}")
-            raise RetrievalError(f"Failed to get preferences: {str(e)}")
-
-    async def start_conversation(self) -> str:
-        """Start a new conversation and return its ID."""
-        conversation_id = f"conv_{uuid.uuid4().hex[:12]}"
-        
-        self._active_conversations[conversation_id] = {
-            "start_time": datetime.now().isoformat(),
-            "memories": [],
-            "metadata": {
-                "type": "conversation",
-                "status": "active"
-            }
-        }
-        
-        return conversation_id
-
-    async def end_conversation(self, conversation_id: str) -> None:
-        """End a conversation and store summary."""
-        if conversation_id not in self._active_conversations:
-            return
-            
-        try:
-            # Create end event memory
-            end_memory = Memory(
-                content=f"Ended conversation {conversation_id}",
-                metadata={
-                    "type": "conversation_event",
-                    "event": "end",
-                    "conversation_id": conversation_id,
-                    "timestamp": datetime.now().isoformat()
-                }
-            )
-            
-            await self.store(end_memory)
-            
-            # Clean up tracking
-            del self._active_conversations[conversation_id]
-            
-        except Exception as e:
-            logger.error(f"Error ending conversation: {str(e)}")
+    def set_ollama_client(self, client: OllamaClient) -> None:
+        self.ollama = client
 
     async def cleanup(self) -> None:
-        """Clean up memory stores and tracking."""
-        try:
-            # Clean up Redis store
-            if self.redis_store:
-                await self.redis_store.cleanup()
-            
-            # Clean up ChromaDB store
-            if self.chroma_store:
-                await self.chroma_store.cleanup()
-            
-            # Reset state
-            self._active_conversations.clear()
-            self._stored_memories.clear()
-            self._failed_embeddings.clear()
-            self._fallback_mode = False
-            self._initialized = False
-            
-            logger.info("Memory manager cleanup completed")
-            
-        except Exception as e:
-            logger.error(f"Error during cleanup: {str(e)}")
+        if self.pg_pool:
+            await self.pg_pool.close()
+        self._initialized = False
 
-    async def get_status(self) -> Dict[str, Any]:
-        """Get status information."""
-        return {
-            "initialized": self._initialized,
-            "fallback_mode": self._fallback_mode,
-            "failed_embeddings": len(self._failed_embeddings),
-            "active_conversations": len(self._active_conversations),
-            "stored_memories": len(self._stored_memories),
-            "stores": {
-                "redis": await self.redis_store.get_status(),
-                "chroma": await self.chroma_store.get_status()
-            },
-            "timestamp": datetime.now().isoformat()
-        }
+    # ────────────────────────────────────────────────────────────
+    # SECTION 1: TOPIC + SESSION
+    # ────────────────────────────────────────────────────────────
 
-    def __str__(self) -> str:
-        """Get string representation."""
-        status = "initialized" if self._initialized else "not initialized"
-        mode = "fallback" if self._fallback_mode else "normal"
-        return (
-            f"MemoryManager({status}, {mode} mode, "
-            f"memories={len(self._stored_memories)})"
+    async def create_topic(self, name: str, description: str) -> str:
+        """Create a new topic container. Returns topic_id (UUID)."""
+        async with self.pg_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "INSERT INTO topics (name, description) VALUES ($1, $2) "
+                "ON CONFLICT (name) DO UPDATE SET description = $2 "
+                "RETURNING id",
+                name, description
+            )
+            return str(row['id'])
+
+    async def update_topic_status(self, topic_id: str, status: str) -> None:
+        async with self.pg_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE topics SET crawl_status = $1, last_updated_at = NOW() WHERE id = $2",
+                status, uuid.UUID(topic_id)
+            )
+
+    async def create_session(self, topic_id: str, seed_query: str, ceiling_bytes: int, **kwargs) -> str:
+        async with self.pg_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "INSERT INTO crawl_sessions (topic_id, seed_query, ceiling_bytes, academic_only) "
+                "VALUES ($1, $2, $3, $4) RETURNING id",
+                uuid.UUID(topic_id), seed_query, ceiling_bytes, kwargs.get('academic_only', False)
+            )
+            return str(row['id'])
+
+    async def get_topic_size(self, topic_name: str) -> int:
+        """Get current raw bytes for a topic."""
+        async with self.pg_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT raw_bytes_total FROM topics WHERE name = $1",
+                topic_name
+            )
+            return row['raw_bytes_total'] if row else 0
+
+    # ────────────────────────────────────────────────────────────
+    # SECTION 2: LEVEL A — SOURCES
+    # ────────────────────────────────────────────────────────────
+
+    async def store_source(self, topic_id: str, **data) -> str:
+        """Store a raw crawled source."""
+        async with self.pg_pool.acquire() as conn:
+            # We use content_hash for dedup
+            content_hash = data.get('checksum') or hashlib.md5(data['content'].encode()).hexdigest()
+            
+            row = await conn.fetchrow(
+                """
+                INSERT INTO sources (topic_id, url, title, domain, source_type, raw_bytes, content_hash, raw_file_path)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                ON CONFLICT (topic_id, content_hash) DO UPDATE SET last_captured_at = NOW()
+                RETURNING id
+                """,
+                uuid.UUID(topic_id), data['url'], data.get('title'), data.get('domain'),
+                data.get('source_type', 'web'), data.get('raw_bytes', 0), content_hash, data.get('raw_file_path')
+            )
+            
+            # Update topic total
+            await conn.execute(
+                "UPDATE topics SET raw_bytes_total = raw_bytes_total + $1, source_count = source_count + 1 WHERE id = $2",
+                data.get('raw_bytes', 0), uuid.UUID(topic_id)
+            )
+            return str(row['id'])
+
+    async def get_uncondensed_sources(self, topic_id: str, limit: int = 10) -> List[Dict]:
+        async with self.pg_pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, topic_id, url, title, raw_file_path, raw_bytes FROM sources "
+                "WHERE topic_id = $1 AND condensed = FALSE LIMIT $2",
+                uuid.UUID(topic_id), limit
+            )
+            # Load content from disk
+            results = []
+            for r in rows:
+                d = dict(r)
+                if d['raw_file_path'] and os.path.exists(d['raw_file_path']):
+                    with open(d['raw_file_path'], 'r') as f:
+                        d['content'] = f.read()
+                results.append(d)
+            return results
+
+    async def mark_sources_condensed(self, source_ids: List[Union[str, Any]]) -> None:
+        async with self.pg_pool.acquire() as conn:
+            # asyncpg sometimes returns UUID objects directly, or strings
+            import uuid
+            uuids = []
+            for sid in source_ids:
+                if isinstance(sid, uuid.UUID):
+                    uuids.append(sid)
+                else:
+                    uuids.append(uuid.UUID(str(sid)))
+            await conn.execute("UPDATE sources SET condensed = TRUE WHERE id = ANY($1)", uuids)
+
+    # ────────────────────────────────────────────────────────────
+    # SECTION 3: LEVEL B — ATOMS
+    # ────────────────────────────────────────────────────────────
+
+    async def store_atom(self, topic_id: str, session_id: Optional[str], **data) -> str:
+        async with self.pg_pool.acquire() as conn:
+            import uuid
+            row = await conn.fetchrow(
+                """
+                INSERT INTO knowledge_atoms (topic_id, session_id, atom_type, content, source_ids, confidence)
+                VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
+                """,
+                uuid.UUID(str(topic_id)), 
+                uuid.UUID(str(session_id)) if session_id else None,
+                data['atom_type'], data['content'], 
+                [uuid.UUID(str(sid)) for sid in data['source_ids']],
+                data.get('confidence', 0.7)
+            )
+            atom_id = str(row['id'])
+            
+            # Update topic count
+            await conn.execute("UPDATE topics SET atom_count = atom_count + 1 WHERE id = $1", uuid.UUID(str(topic_id)))
+            return atom_id
+
+    async def update_atom_chroma_id(self, atom_id: str, chroma_id: str) -> None:
+        async with self.pg_pool.acquire() as conn:
+            await conn.execute("UPDATE knowledge_atoms SET chroma_chunk_id = $1 WHERE id = $2", chroma_id, uuid.UUID(str(atom_id)))
+
+    # ────────────────────────────────────────────────────────────
+    # SECTION 4: LEVEL C/D — SYNTHESIS & BRIEF
+    # ────────────────────────────────────────────────────────────
+
+    async def store_synthesis(self, topic_id: str, session_id: Optional[str], **data) -> str:
+        async with self.pg_pool.acquire() as conn:
+            import uuid
+            row = await conn.fetchrow(
+                """
+                INSERT INTO thematic_syntheses (topic_id, session_id, synthesis_type, title, content, source_atom_ids)
+                VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
+                """,
+                uuid.UUID(str(topic_id)), 
+                uuid.UUID(str(session_id)) if session_id else None,
+                data['synthesis_type'], data['title'], data['content'], 
+                [uuid.UUID(str(aid)) for aid in data.get('source_atom_ids', [])]
+            )
+            return str(row['id'])
+
+    async def update_synthesis_chroma_id(self, synthesis_id: str, chroma_id: str) -> None:
+        async with self.pg_pool.acquire() as conn:
+            await conn.execute("UPDATE thematic_syntheses SET chroma_chunk_id = $1 WHERE id = $2", chroma_id, uuid.UUID(synthesis_id))
+
+    async def store_advisory_brief(self, topic_id: str, session_id: Optional[str], **data) -> str:
+        async with self.pg_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO advisory_briefs (topic_id, session_id, what_matters, what_is_contested, what_is_likely_true, what_needs_testing, how_applies_to_projects, open_questions)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id
+                """,
+                uuid.UUID(topic_id), uuid.UUID(session_id) if session_id else None,
+                data.get('what_matters'), data.get('what_is_contested'), data.get('what_is_likely_true'),
+                data.get('what_needs_testing'), data.get('how_applies_to_projects'), data.get('open_questions')
+            )
+            return str(row['id'])
+
+    # ────────────────────────────────────────────────────────────
+    # SECTION 5: RETRIEVAL
+    # ────────────────────────────────────────────────────────────
+
+    async def lexical_search_atoms(self, terms: List[str], topic_id: Optional[str] = None, limit: int = 10) -> List[Dict]:
+        """PG_TRGM powered lexical search for exact terms."""
+        async with self.pg_pool.acquire() as conn:
+            query = """
+                SELECT content, atom_type, confidence, similarity(content, $1) as score
+                FROM knowledge_atoms
+                WHERE content % $1
+            """
+            params = [" ".join(terms)]
+            if topic_id:
+                query += " AND topic_id = $2::uuid"
+                params.append(uuid.UUID(topic_id))
+            
+            # Dynamically set the limit parameter index
+            limit_idx = 2 if not topic_id else 3
+            query += f" ORDER BY score DESC LIMIT ${limit_idx}"
+            params.append(limit)
+            
+            rows = await conn.fetch(query, *params)
+            return [dict(r) for r in rows]
+
+    async def chroma_query(self, collection: str, query_text: str, n_results: int = 5, where: Optional[Dict] = None) -> Dict:
+        coll = self._collections.get(collection)
+        if not coll:
+            # Try to get dynamically
+            coll = self.chroma.get_collection(name=collection)
+            self._collections[collection] = coll
+            
+        return coll.query(
+            query_texts=[query_text],
+            n_results=n_results,
+            where=where
         )
+
+    async def store_chunk(self, collection: str, topic_id: str, doc_id: str, content: str, embedding: List[float], metadata: Dict) -> str:
+        coll = self._collections.get(collection)
+        chunk_id = f"chk_{uuid.uuid4().hex[:12]}"
+        
+        # Ensure topic_id is in metadata for filtering
+        metadata['topic_id'] = topic_id
+        metadata['doc_id'] = doc_id
+        
+        coll.add(
+            ids=[chunk_id],
+            embeddings=[embedding],
+            documents=[content],
+            metadatas=[metadata]
+        )
+        return chunk_id
+
+    # ────────────────────────────────────────────────────────────
+    # META-MEMORY & LOGGING
+    # ────────────────────────────────────────────────────────────
+
+    async def record_meta_memory(self, **data) -> None:
+        async with self.pg_pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO meta_memory (entity_type, entity_id, observation_type, score, notes, topic_id, session_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                """,
+                data['entity_type'], data['entity_id'], data['observation_type'],
+                data.get('score'), data.get('notes'), 
+                uuid.UUID(data['topic_id']) if data.get('topic_id') else None,
+                uuid.UUID(data['session_id']) if data.get('session_id') else None
+            )
+
+    async def log_distillation(self, report: Any) -> None:
+        async with self.pg_pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO distillation_log (topic_id, session_id, trigger_type, level_b_atoms, level_c_syntheses, 
+                                            level_b_bytes, level_c_bytes, fidelity_estimate, duration_secs)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                """,
+                uuid.UUID(report.topic_id), uuid.UUID(report.session_id) if report.session_id else None,
+                report.priority.value, report.atoms_created, report.syntheses_created,
+                report.level_b_bytes, report.level_c_bytes, report.fidelity_estimate, report.duration_secs
+            )
+
+    # ────────────────────────────────────────────────────────────
+    # LEGACY / BACKWARD COMPAT (preserving existing functionality)
+    # ────────────────────────────────────────────────────────────
+
+    async def store(self, memory: Union[Memory, Dict[str, Any]], **kwargs) -> str:
+        """Original store method — redirects to V2 'general' flow."""
+        if isinstance(memory, dict):
+            memory = Memory(**memory)
+        
+        # For simple chitchat/generic data, we use a default topic
+        topic_id = await self.create_topic("General", "Generic chat and background knowledge")
+        
+        # If it has an embedding, use it; else generate
+        if not memory.embedding and self.ollama:
+            memory.embedding = await self.ollama.generate_embedding(memory.content)
+            
+        # Store as an 'atom' of type 'claim'
+        return await self.store_atom(
+            topic_id=topic_id,
+            session_id=None,
+            atom_type="claim",
+            content=memory.content,
+            source_ids=[],
+            confidence=0.8
+        )
+
+    async def search(self, query: str, limit: int = 5, **kwargs) -> List[MemorySearchResult]:
+        """Original search method — redirects to V2 hybrid retrieval."""
+        # Simple implementation for now to satisfy existing calls
+        results = await self.chroma_query("knowledge_atoms", query, n_results=limit)
+        
+        search_results = []
+        if results and results.get('documents'):
+            for doc, meta, dist in zip(results['documents'][0], results['metadatas'][0], results['distances'][0]):
+                search_results.append(MemorySearchResult(
+                    content=doc,
+                    relevance_score=1.0 - dist,
+                    timestamp=datetime.now().isoformat(),
+                    metadata=meta
+                ))
+        return search_results

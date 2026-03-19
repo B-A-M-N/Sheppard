@@ -11,8 +11,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Load environment variables
-load_dotenv()
+# Load environment variables with override=True to prioritize .env over shell env
+load_dotenv(override=True)
 
 # Get project root directory
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -23,7 +23,7 @@ class Settings:
     def __init__(self):
         """Initialize settings."""
         # Model Settings
-        self.OLLAMA_MODEL: str = os.getenv('OLLAMA_MODEL', 'mannix/dolphin-2.9-llama3-8b:latest')
+        self.OLLAMA_MODEL: str = os.getenv('OLLAMA_MODEL', 'rnj-1:8b-cloud')
         self.OLLAMA_EMBED_MODEL: str = os.getenv('OLLAMA_EMBED_MODEL', 'mxbai-embed-large:latest')
         
         # Embedding Settings
@@ -67,18 +67,18 @@ class Settings:
         # Model Configuration
         self.MODELS = {
             "chat": {
-                "default": "mannix/dolphin-2.9-llama3-8b:latest",
+                "default": "rnj-1:8b-cloud",
                 "alternatives": [
-                    "dolphin-2.9-llama3-8b",
-                    "mistral-nemo-instruct-2407-abliterated:IQ3_M",
-                    "llama-3.2-1b-instruct-abliterated.q8_0"
+                    "rnj-1:8b-cloud",
+                    "llama3:latest",
+                    "mistral-nemo-instruct-2407-abliterated:IQ3_M"
                 ]
             },
             "embedding": {
                 "default": "mxbai-embed-large:latest",
                 "alternatives": [
-                    "mxbai-embed-base",
-                    "all-minilm"
+                    "mxbai-embed-large:latest",
+                    "nomic-embed-text"
                 ]
             }
         }

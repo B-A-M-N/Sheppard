@@ -361,6 +361,7 @@ class ResearchType(str, Enum):
     URL_VALIDATION = "url_validation"
     WEB_SEARCH = "web_search"
     DEEP_ANALYSIS = "deep_analysis"
+    DEEP_RESEARCH = "deep_research"
     FACT_CHECK = "fact_check"
     MULTI_SOURCE = "multi_source"
     SUMMARY = "summary"
@@ -372,6 +373,7 @@ class ResearchType(str, Enum):
             self.URL_VALIDATION: 1,
             self.WEB_SEARCH: 3,
             self.DEEP_ANALYSIS: 5,
+            self.DEEP_RESEARCH: 7,
             self.FACT_CHECK: 4,
             self.MULTI_SOURCE: 4,
             self.SUMMARY: 2,
@@ -900,7 +902,7 @@ class FirecrawlConfig:
         "Accept": "application/json"
     })
     scrape_options: Dict[str, Any] = field(default_factory=lambda: {
-        "waitUntil": "networkidle0",
+        "waitFor": 2000,
         "timeout": 30000,
         "removeScripts": True,
         "removeStyles": True,

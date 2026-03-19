@@ -1,6 +1,5 @@
 """
-Enhanced wrapper for Ollama API with proper error handling.
-File: src/llm/client.py
+llm/client.py — Enhanced wrapper for Ollama API with Model Routing.
 """
 
 import json
@@ -11,335 +10,160 @@ from typing import AsyncGenerator, Optional, Dict, Any, List, Union
 from datetime import datetime
 
 from src.config.settings import settings
-from src.llm.models import ChatMessage, ChatResponse
+from src.llm.model_router import ModelRouter, TaskType
 from src.llm.exceptions import (
     ModelNotFoundError,
     APIError,
     TokenLimitError,
-    ValidationError,
     EmbeddingError,
     TimeoutError,
-    StreamError,
     ServiceUnavailableError
 )
 
 logger = logging.getLogger(__name__)
 
 class OllamaClient:
-    """Enhanced wrapper for Ollama API with schema validation and error handling."""
+    """Enhanced wrapper for Ollama API with ModelRouter and error handling."""
     
     def __init__(
         self, 
-        model_name: Optional[str] = None,
-        api_base: Optional[str] = None,
-        validate_schemas: bool = True
+        model_router: Optional[ModelRouter] = None,
+        api_base: Optional[str] = None
     ):
         """Initialize Ollama client."""
-        self.model_name = model_name or settings.OLLAMA_MODEL
-        self.embed_model = settings.OLLAMA_EMBED_MODEL
+        self.router = model_router or ModelRouter()
         self.api_base = api_base or settings.ollama_api_base
-        self.validate_schemas = validate_schemas
         self.session = None
-        self.embedding_dimension = settings.EMBEDDING_DIMENSION
-        self._retry_count = 0
         self.MAX_RETRIES = 3
         self.RETRY_DELAY = 1.0
 
+    async def initialize(self) -> None:
+        await self._ensure_session()
+
     async def _ensure_session(self) -> None:
-        """Ensure aiohttp session exists."""
-        if self.session is None:
+        """Ensure aiohttp session exists and is attached to the current loop."""
+        current_loop = asyncio.get_event_loop()
+        if self.session is None or self.session.closed or getattr(self, '_session_loop', None) != current_loop:
+            if self.session and not self.session.closed:
+                await self.session.close()
             timeout = aiohttp.ClientTimeout(total=settings.REQUEST_TIMEOUT)
             self.session = aiohttp.ClientSession(timeout=timeout)
+            self._session_loop = current_loop
 
-    async def _handle_api_error(self, response: aiohttp.ClientResponse, operation: str) -> None:
-        """Handle API error response."""
+    async def _handle_api_error(self, response: aiohttp.ClientResponse, operation: str, safe_text: str = "") -> None:
         try:
             error_text = await response.text()
             error_data = json.loads(error_text)
             error_msg = error_data.get('error', 'Unknown API error')
         except:
+            error_text = "Could not parse error response"
             error_msg = f"API call failed with status {response.status}"
         
         logger.error(f"{operation} failed: {error_msg}")
         
         if response.status == 404:
-            raise ModelNotFoundError(self.model_name)
-        elif response.status == 413:
-            raise TokenLimitError("Input too long")
-        elif response.status == 408:
-            raise TimeoutError("Request timed out")
-        elif response.status == 503:
-            raise ServiceUnavailableError("Service temporarily unavailable")
-        elif response.status >= 500:
-            if self._retry_count < self.MAX_RETRIES:
-                self._retry_count += 1
-                await asyncio.sleep(self.RETRY_DELAY * self._retry_count)
-                return await self._retry_operation(operation)
-            else:
-                raise APIError(f"Server error after {self.MAX_RETRIES} retries: {error_msg}")
+            raise ModelNotFoundError("Requested model not found")
+        elif response.status == 413 or "exceeds the context length" in error_msg.lower():
+            raise TokenLimitError(limit=2048, current=len(safe_text))
         else:
-            raise APIError(f"API error: {error_msg}")
+            raise APIError(f"API error ({response.status}): {error_msg}")
 
-    async def generate_embedding(
-        self,
-        text: str,
-        metadata: Optional[Dict[str, Any]] = None
-    ) -> List[float]:
-        """Generate embeddings using mxbai-embed-large model."""
+    async def generate_embedding(self, text: str) -> List[float]:
+        """Generate embeddings using the routing-defined embed model."""
+        model_name = self.router.get_model_name(TaskType.EMBEDDING)
+        last_error = None
+        
+        # Clip to 2000 chars for safety (mxbai has 512 token context)
+        safe_text = text.strip()[:2000]
+        
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                await self._ensure_session()
+                url = f"{self.api_base}/api/embeddings"
+                payload = {'model': model_name, 'prompt': safe_text}
+                
+                async with self.session.post(url, json=payload) as response:
+                    if response.status != 200:
+                        await self._handle_api_error(response, "embedding", safe_text)
+                    result = await response.json()
+                    return result.get('embedding', [])
+            except Exception as e:
+                last_error = e
+                await asyncio.sleep(self.RETRY_DELAY * (attempt + 1))
+        
+        raise EmbeddingError(f"Embedding failed after retries: {last_error}")
+
+    async def embed(self, text: str) -> List[float]:
+        """Legacy alias for generate_embedding."""
+        return await self.generate_embedding(text)
+
+    async def complete(self, task: TaskType, prompt: str, system_prompt: Optional[str] = None, max_tokens: int = 1000) -> str:
+        """Non-streaming completion for background tasks."""
+        config = self.router.get(task)
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        payload = {
+            'model': config.model_name,
+            'messages': messages,
+            'stream': False,
+            'options': {
+                'temperature': config.temperature,
+                'num_predict': max_tokens
+            }
+        }
+
         try:
             await self._ensure_session()
-            
-            # Handle empty text
-            if not text or not text.strip():
-                logger.debug("Empty text provided, returning zero vector")
-                return [0.0] * self.embedding_dimension
-            
-            # Prepare request
-            url = f"{self.api_base}/api/embeddings"
-            payload = {
-                'model': self.embed_model,
-                'prompt': text.strip()
-            }
-            
-            # Make request
-            async with self.session.post(url, json=payload) as response:
+            async with self.session.post(f"{self.api_base}/api/chat", json=payload) as response:
                 if response.status != 200:
-                    await self._handle_api_error(response, "embedding")
-                
+                    await self._handle_api_error(response, "completion")
                 result = await response.json()
-                
-                # Check for errors
-                if 'error' in result:
-                    error_msg = result.get('error', 'Unknown API error')
-                    logger.error(f"API returned error: {error_msg}")
-                    raise APIError(f"API returned error: {error_msg}")
-                
-                # Extract embedding
-                embedding = result.get('embedding')
-                if not embedding:
-                    raise APIError("No embedding field in API response")
-                
-                # Verify dimension
-                if len(embedding) != self.embedding_dimension:
-                    error_msg = (
-                        f"Generated embedding dimension {len(embedding)} does not match "
-                        f"expected dimension {self.embedding_dimension}"
-                    )
-                    logger.error(error_msg)
-                    raise ValidationError(error_msg)
-                
-                return embedding
-                
+                return result['message']['content']
         except Exception as e:
-            logger.error(f"Error generating embedding: {str(e)}")
-            raise EmbeddingError(f"Failed to generate embedding: {str(e)}")
+            logger.error(f"Completion failed: {e}")
+            return ""
 
-    async def embeddings(self, prompt: str, model: Optional[str] = None) -> List[float]:
-        """Generate embeddings using the specified model.
+    async def chat(self, messages: List[dict], stream: bool = True, **kwargs) -> AsyncGenerator[Any, None]:
+        """Backward compatibility wrapper for chat_stream."""
+        model = kwargs.get('model') or self.router.get_model_name(TaskType.CHAT)
         
-        This method provides backward compatibility with older code.
-        
-        Args:
-            prompt: Text to embed
-            model: Optional model override
-            
-        Returns:
-            List[float]: Embedding vector
-        """
-        return await self.generate_embedding(prompt)
+        # We need to return an object with a .content attribute to match legacy expectations
+        class ChunkWrap:
+            def __init__(self, content): self.content = content
 
-    async def chat(
-        self,
-        messages: Union[List[ChatMessage], List[Dict[str, Any]]],
-        stream: bool = True,
-        temperature: Optional[float] = None,
-        top_p: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        persona: Optional[Any] = None,  # Added persona parameter
-        metadata: Optional[Dict[str, Any]] = None  # Added metadata parameter
-    ) -> AsyncGenerator[ChatResponse, None]:
-        """Send a chat request to the Ollama API."""
+        async for token in self.chat_stream(model=model, messages=messages):
+            yield ChunkWrap(token)
+
+    async def chat_stream(self, model: str, messages: List[dict], system_prompt: Optional[str] = None) -> AsyncGenerator[str, None]:
+        """Streaming chat for CLI interaction."""
+        full_messages = []
+        if system_prompt:
+            full_messages.append({"role": "system", "content": system_prompt})
+        full_messages.extend(messages)
+
+        payload = {
+            'model': model,
+            'messages': full_messages,
+            'stream': True
+        }
+
         try:
             await self._ensure_session()
-            
-            # Convert messages to dict format
-            message_dicts = []
-            for msg in messages:
-                if isinstance(msg, ChatMessage):
-                    message_dicts.append(msg.model_dump())
-                elif hasattr(msg, 'model_dump'):  # For other Pydantic models
-                    message_dicts.append(msg.model_dump())
-                elif hasattr(msg, 'to_dict'):     # For classes with to_dict method
-                    message_dicts.append(msg.to_dict())
-                elif isinstance(msg, dict):       # Already a dictionary
-                    message_dicts.append(msg)
-                else:
-                    # Convert to a basic dict with role and content
-                    message_dicts.append({
-                        "role": getattr(msg, 'role', 'user'),
-                        "content": getattr(msg, 'content', str(msg))
-                    })
-            
-            # Prepare request
-            url = f"{self.api_base}/api/chat"
-            payload = {
-                'model': self.model_name,
-                'messages': message_dicts,
-                'stream': stream,
-                'options': {
-                    'temperature': temperature or settings.DEFAULT_TEMPERATURE,
-                    'top_p': top_p or settings.DEFAULT_TOP_P,
-                    'num_predict': max_tokens or settings.MAX_TOKENS
-                }
-            }
-            
-            # Make request
-            async with self.session.post(url, json=payload) as response:
+            async with self.session.post(f"{self.api_base}/api/chat", json=payload) as response:
                 if response.status != 200:
-                    await self._handle_api_error(response, "chat")
+                    await self._handle_api_error(response, "chat_stream")
                 
-                # Handle streamed response
                 async for line in response.content:
                     if line:
-                        try:
-                            chunk = json.loads(line)
-                            
-                            if 'error' in chunk:
-                                error_msg = chunk['error']
-                                if 'model not found' in error_msg.lower():
-                                    raise ModelNotFoundError(self.model_name)
-                                elif 'token limit' in error_msg.lower():
-                                    raise TokenLimitError(0, 0)
-                                else:
-                                    raise APIError(f"API returned error: {error_msg}")
-                            
-                            if 'message' in chunk and 'content' in chunk['message']:
-                                yield ChatResponse(
-                                    content=chunk['message']['content'],
-                                    role="assistant",
-                                    done=chunk.get('done', False),
-                                    metadata={
-                                        'eval_count': chunk.get('eval_count'),
-                                        'eval_duration': chunk.get('eval_duration'),
-                                        'total_duration': chunk.get('total_duration'),
-                                        'load_duration': chunk.get('load_duration')
-                                    }
-                                )
-                                
-                        except json.JSONDecodeError:
-                            continue
-                    
+                        chunk = json.loads(line)
+                        if 'message' in chunk and 'content' in chunk['message']:
+                            yield chunk['message']['content']
         except Exception as e:
-            logger.error(f"Error in chat request: {str(e)}")
-            raise
-
-    async def summarize_text(
-        self,
-        text: str,
-        max_length: Optional[int] = None
-    ) -> Optional[str]:
-        """
-        Summarize text content using chat completion.
-        
-        Args:
-            text: Text to summarize
-            max_length: Optional maximum summary length
-            
-        Returns:
-            Optional[str]: Generated summary
-        """
-        try:
-            # Create summarization prompt
-            prompt = f"""Please provide a concise summary of the following text, focusing on the key points and main ideas:
-
-{text}
-"""
-            if max_length:
-                prompt += f"\nLimit the summary to approximately {max_length} characters."
-
-            # Create message for chat
-            messages = [{"role": "user", "content": prompt}]
-            summary = ""
-
-            # Get summary through chat completion
-            async for response in self.chat(
-                messages=messages,
-                stream=True,
-                temperature=0.3,  # Lower temperature for more focused summary
-                max_tokens=max_length,
-            ):
-                if response and response.content:
-                    summary += response.content
-
-            return summary.strip() if summary else None
-
-        except Exception as e:
-            logger.warning(f"Summarization failed: {str(e)}")
-            raise
-
-    async def extract_keywords(
-        self,
-        text: str,
-        max_keywords: int = 10
-    ) -> List[str]:
-        """
-        Extract key terms and phrases from text.
-        
-        Args:
-            text: Text to analyze
-            max_keywords: Maximum number of keywords to extract
-            
-        Returns:
-            List[str]: Extracted keywords
-        """
-        try:
-            # Create keyword extraction prompt
-            prompt = f"""Please extract the most important keywords and key phrases from the following text.
-Return them as a Python list of strings, with no additional formatting or explanation.
-Limit the response to {max_keywords} most relevant terms.
-
-Text:
-{text}
-
-Format the response as a valid Python list like this: ["keyword1", "keyword2", ...]"""
-
-            # Create message for chat
-            messages = [{"role": "user", "content": prompt}]
-            keywords_text = ""
-
-            # Get keywords through chat completion
-            async for response in self.chat(
-                messages=messages,
-                stream=True,
-                temperature=0.3,
-                max_tokens=200
-            ):
-                if response and response.content:
-                    keywords_text += response.content
-
-            # Parse the response as a Python list
-            try:
-                # Clean up the response and evaluate it as a Python expression
-                keywords_text = keywords_text.strip()
-                if keywords_text.startswith("[") and keywords_text.endswith("]"):
-                    keywords = eval(keywords_text)
-                    if isinstance(keywords, list) and all(isinstance(k, str) for k in keywords):
-                        return keywords[:max_keywords]
-                return []
-            except Exception as e:
-                logger.error(f"Failed to parse keywords response: {str(e)}")
-                return []
-
-        except Exception as e:
-            logger.warning(f"Keyword extraction failed: {str(e)}")
-            raise
+            logger.error(f"Chat stream failed: {e}")
 
     async def cleanup(self) -> None:
-        """Clean up resources."""
         if self.session:
             await self.session.close()
-            self.session = None
-
-    def __str__(self) -> str:
-        """String representation."""
-        return f"OllamaClient(model={self.model_name}, embed_model={self.embed_model})"
