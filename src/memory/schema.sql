@@ -26,10 +26,23 @@ CREATE EXTENSION IF NOT EXISTS pg_stat_statements;  -- for query perf tracking
 -- ════════════════════════════════════════════════════════════
 
 -- ────────────────────────────────────────────────────────────
+-- DOMAIN PROFILES — Configures how the refinery handles a domain
+-- ────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS domain_profiles (
+    profile_id          TEXT PRIMARY KEY,
+    name                TEXT NOT NULL,
+    domain_type         TEXT NOT NULL,
+    description         TEXT,
+    config_json         JSONB DEFAULT '{}',
+    created_at          TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ────────────────────────────────────────────────────────────
 -- TOPICS — long-lived domain knowledge containers
 -- ────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS topics (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    profile_id          TEXT REFERENCES domain_profiles(profile_id) ON DELETE SET NULL,
     name                TEXT NOT NULL UNIQUE,
     description         TEXT,
     -- Budget tracking
@@ -225,6 +238,11 @@ CREATE TABLE IF NOT EXISTS knowledge_atoms (
     contesting_atom_ids UUID[],               -- IDs of contradicting atoms
     is_time_sensitive   BOOLEAN DEFAULT FALSE,
     valid_as_of         TIMESTAMPTZ,           -- for time-sensitive claims
+    -- Universal Schema Additions
+    scope_json          JSONB DEFAULT '{}',
+    qualifiers_json     JSONB DEFAULT '{}',
+    lineage_json        JSONB DEFAULT '{}',
+    reuse_json          JSONB DEFAULT '{}',
     -- Indexing
     chroma_chunk_id     TEXT,                  -- link back to ChromaDB for semantic retrieval
     importance          FLOAT DEFAULT 0.5,
@@ -376,6 +394,43 @@ CREATE TABLE IF NOT EXISTS advisory_briefs (
 CREATE INDEX IF NOT EXISTS idx_brief_topic ON advisory_briefs(topic_id);
 CREATE INDEX IF NOT EXISTS idx_brief_session ON advisory_briefs(session_id);
 
+CREATE TABLE IF NOT EXISTS brief_sections (
+    id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    brief_id            UUID REFERENCES advisory_briefs(id) ON DELETE CASCADE,
+    section_order       INT NOT NULL,
+    title               TEXT NOT NULL,
+    content             TEXT,
+    supporting_atom_ids UUID[] DEFAULT '{}',
+    contradiction_ids   UUID[] DEFAULT '{}',
+    unresolved_ambiguities TEXT[] DEFAULT '{}',
+    created_at          TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_brief_sections_brief ON brief_sections(brief_id);
+
+-- ────────────────────────────────────────────────────────────
+-- AUTHORITY SILOS — The Domain Capital Base (Layer D+)
+-- Maps the four strata into a single, queryable expert asset
+-- ────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS authority_silos (
+    id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    topic_id            UUID REFERENCES topics(id) ON DELETE CASCADE UNIQUE,
+    name                TEXT NOT NULL,
+    domain_boundaries   TEXT,                  -- what this covers and what it excludes
+    canonical_terminology JSONB DEFAULT '{}',  -- strict definitions mapping
+    -- Atom pointers categorized by operational utility
+    core_definitions    UUID[] DEFAULT '{}',
+    established_mechanisms UUID[] DEFAULT '{}',
+    high_confidence_truths UUID[] DEFAULT '{}',
+    known_contradictions UUID[] DEFAULT '{}',
+    failure_patterns    UUID[] DEFAULT '{}',
+    implementation_guidance UUID[] DEFAULT '{}',
+    -- Link back to the coherent narrative
+    linked_brief_id     UUID REFERENCES advisory_briefs(id) ON DELETE SET NULL,
+    created_at          TIMESTAMPTZ DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_authority_silos_topic ON authority_silos(topic_id);
+
 
 -- ════════════════════════════════════════════════════════════
 -- SECTION 7: CITATIONS
@@ -441,6 +496,15 @@ CREATE TABLE IF NOT EXISTS project_artifacts (
 
 CREATE INDEX IF NOT EXISTS idx_artifacts_project ON project_artifacts(project_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_type ON project_artifacts(artifact_type);
+
+CREATE TABLE IF NOT EXISTS application_queries (
+    id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    project_id          UUID REFERENCES projects(id) ON DELETE CASCADE,
+    query_type          TEXT NOT NULL,
+    title               TEXT NOT NULL,
+    payload_json        JSONB DEFAULT '{}',
+    created_at          TIMESTAMPTZ DEFAULT NOW()
+);
 
 -- Cross-links: external concept/atom ↔ internal project artifact
 -- This is where "external failure mode ↔ internal risk point" gets stored

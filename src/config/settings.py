@@ -23,7 +23,7 @@ class Settings:
     def __init__(self):
         """Initialize settings."""
         # Model Settings
-        self.OLLAMA_MODEL: str = os.getenv('OLLAMA_MODEL', 'rnj-1:8b-cloud')
+        self.OLLAMA_MODEL: str = os.getenv('OLLAMA_MODEL', 'rnj-1:8b')
         self.OLLAMA_EMBED_MODEL: str = os.getenv('OLLAMA_EMBED_MODEL', 'mxbai-embed-large:latest')
         
         # Embedding Settings
@@ -33,6 +33,7 @@ class Settings:
         
         # API Settings
         self.OLLAMA_API_HOST: str = os.getenv('OLLAMA_API_HOST', 'http://localhost')
+        self.OLLAMA_EMBED_HOST: str = os.getenv('OLLAMA_EMBED_HOST', self.OLLAMA_API_HOST)
         self.OLLAMA_API_PORT: str = os.getenv('OLLAMA_API_PORT', '11434')
         
         # Storage Settings
@@ -70,6 +71,7 @@ class Settings:
                 "default": "rnj-1:8b-cloud",
                 "alternatives": [
                     "rnj-1:8b-cloud",
+                    "rnj-1:8b",
                     "llama3:latest",
                     "mistral-nemo-instruct-2407-abliterated:IQ3_M"
                 ]
@@ -95,11 +97,11 @@ class Settings:
         self.NUM_GPU: int = int(os.getenv('NUM_GPU', '1'))
         self.F16: bool = os.getenv('F16', 'true').lower() == 'true'
         
-        # Timeouts and Limits
-        self.REQUEST_TIMEOUT: int = int(os.getenv('REQUEST_TIMEOUT', 300))  # seconds
-        self.CONNECTION_TIMEOUT: int = int(os.getenv('CONNECTION_TIMEOUT', 30))  # seconds
-        self.MAX_RETRIES: int = int(os.getenv('MAX_RETRIES', 3))
-        self.RETRY_DELAY: float = float(os.getenv('RETRY_DELAY', '1.0'))  # seconds
+        # Timeouts and Limits (Optimized for slow local inference)
+        self.REQUEST_TIMEOUT: int = int(os.getenv('REQUEST_TIMEOUT', 900))  # 15 minutes
+        self.CONNECTION_TIMEOUT: int = int(os.getenv('CONNECTION_TIMEOUT', 120))  # 2 minutes
+        self.MAX_RETRIES: int = int(os.getenv('MAX_RETRIES', 5))
+        self.RETRY_DELAY: float = float(os.getenv('RETRY_DELAY', '5.0'))  # seconds
     
     def get(self, key: str, default: Any = None) -> Any:
         """Get a setting value by key with optional default."""

@@ -184,33 +184,30 @@ class HybridRetriever:
     async def _stage1_lexical(self, query: RetrievalQuery) -> List[RetrievedItem]:
         """
         Exact and near-exact text search against knowledge_atoms content.
-        Critical for: library names, error strings, acronyms, version numbers,
-        project names (SOLLOL, FlockParser), specific algorithm names.
-
-        Uses Postgres pg_trgm full-text search — much faster than embedding
-        for exact/near-exact lookups.
         """
         try:
-            # Extract likely exact-match terms (capitalized, quoted, or hyphenated)
+            # Extract likely exact-match terms
             exact_terms = self._extract_exact_terms(query.text)
-            if not exact_terms:
-                return []
+            
+            # FALLBACK: If no complex terms, just use the query text
+            search_terms = exact_terms if exact_terms else [query.text]
 
             # Validate topic_id is a UUID if provided
             topic_id = None
             if query.topic_filter:
-                import uuid
                 try:
-                    if len(str(query.topic_filter)) == 36:
-                        topic_id = str(uuid.UUID(str(query.topic_filter)))
-                except (ValueError, AttributeError):
+                    topic_id = str(query.topic_filter)
+                except:
                     pass
 
             results = await self.memory.lexical_search_atoms(
-                terms=exact_terms,
+                terms=search_terms,
                 topic_id=topic_id,
                 limit=10,
             )
+
+            if results:
+                logger.info(f"[Stage1] Lexical search found {len(results)} matches for '{search_terms}'.")
 
             items = []
             for r in results:
@@ -220,10 +217,10 @@ class HybridRetriever:
                     strategy="lexical",
                     knowledge_level="B",
                     item_type=r.get("atom_type", "claim"),
-                    relevance_score=r.get("similarity", 0.9),   # lexical gets high base relevance
+                    relevance_score=r.get("score", 0.9),
                     trust_score=r.get("trust_score", 0.5),
-                    recency_days=r.get("recency_days", 999),
-                    tech_density=0.8,                            # lexical hits are usually technical
+                    recency_days=999,
+                    tech_density=0.8,
                     citation_key=r.get("citation_key"),
                     metadata=r,
                 ))
@@ -289,6 +286,13 @@ class HybridRetriever:
             if isinstance(result, Exception):
                 logger.debug(f"[Stage2] Level {level} query failed: {result}")
                 continue
+            
+            # DEBUG
+            if result and result.get("documents") and result["documents"][0]:
+                logger.info(f"[Stage2] Level {level} found {len(result['documents'][0])} semantic matches.")
+            else:
+                logger.info(f"[Stage2] Level {level} returned 0 semantic matches.")
+
             try:
                 for doc, meta, distance in zip(
                     result["documents"][0],

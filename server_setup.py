@@ -150,8 +150,8 @@ def setup_redis():
         appendonly yes
         appendfilename "appendonly.aof"
         
-        protected-mode yes
-        bind 127.0.0.1
+        protected-mode no
+        bind 127.0.0.1 10.9.66.198
         """
         
         with open("temp_redis.conf", "w") as f:

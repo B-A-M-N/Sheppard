@@ -16,7 +16,7 @@ import os
 import hashlib
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, Set
 
 import asyncpg
 from chromadb import PersistentClient
@@ -100,6 +100,50 @@ class MemoryManager:
                 "UPDATE topics SET crawl_status = $1, last_updated_at = NOW() WHERE id = $2",
                 status, uuid.UUID(topic_id)
             )
+
+    async def update_topic_policy(self, topic_id: str, policy_data: Dict) -> None:
+        """Persist the generated research policy."""
+        async with self.pg_pool.acquire() as conn:
+            import json
+            await conn.execute(
+                "UPDATE topics SET policy = $1 WHERE id = $2",
+                json.dumps(policy_data), uuid.UUID(topic_id)
+            )
+
+    async def get_topic_policy(self, topic_id: str) -> Optional[Dict]:
+        """Load the research policy for a topic."""
+        async with self.pg_pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT policy FROM topics WHERE id = $1", uuid.UUID(topic_id))
+            return row['policy'] if row and row['policy'] else None
+
+    async def upsert_frontier_node(self, topic_id: str, **data) -> None:
+        """Save/Update a research node in the persistent queue."""
+        async with self.pg_pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO frontier_nodes (topic_id, concept, status, exhausted_modes, yield_history)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (topic_id, concept) DO UPDATE 
+                SET status = $3, exhausted_modes = $4, yield_history = $5
+                """,
+                uuid.UUID(topic_id), data['concept'], data.get('status', 'underexplored'),
+                list(data.get('exhausted_modes', [])), list(data.get('yield_history', []))
+            )
+
+    async def get_frontier_nodes(self, topic_id: str) -> List[Dict]:
+        """Load the persistent research queue."""
+        async with self.pg_pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT concept, status, exhausted_modes, yield_history FROM frontier_nodes WHERE topic_id = $1",
+                uuid.UUID(topic_id)
+            )
+            return [dict(r) for r in rows]
+
+    async def get_visited_urls(self, topic_id: str) -> Set[str]:
+        """Get all URLs already ingested for this topic to prevent re-crawling."""
+        async with self.pg_pool.acquire() as conn:
+            rows = await conn.fetch("SELECT url FROM sources WHERE topic_id = $1", uuid.UUID(topic_id))
+            return {r['url'] for r in rows}
 
     async def create_session(self, topic_id: str, seed_query: str, ceiling_bytes: int, **kwargs) -> str:
         async with self.pg_pool.acquire() as conn:
@@ -185,17 +229,27 @@ class MemoryManager:
             import uuid
             row = await conn.fetchrow(
                 """
-                INSERT INTO knowledge_atoms (topic_id, session_id, atom_type, content, source_ids, confidence)
-                VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
+                INSERT INTO knowledge_atoms (topic_id, session_id, atom_type, content, source_ids, confidence, is_contested)
+                VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id
                 """,
                 uuid.UUID(str(topic_id)), 
                 uuid.UUID(str(session_id)) if session_id else None,
                 data['atom_type'], data['content'], 
                 [uuid.UUID(str(sid)) for sid in data['source_ids']],
-                data.get('confidence', 0.7)
+                data.get('confidence', 0.7),
+                True if data['atom_type'] == 'contradiction' else False
             )
             atom_id = str(row['id'])
             
+            # If it's a contradiction, register it in the contradictions table for the courtroom
+            if data['atom_type'] == 'contradiction':
+                # For extraction-time contradictions, we mark the atom itself as the clash record
+                # In a full pass, we'd link to atom_a and atom_b, but here we just register the event
+                await conn.execute(
+                    "INSERT INTO contradictions (topic_id, description, resolved) VALUES ($1, $2, FALSE)",
+                    uuid.UUID(str(topic_id)), data['content']
+                )
+
             # Update topic count
             await conn.execute("UPDATE topics SET atom_count = atom_count + 1 WHERE id = $1", uuid.UUID(str(topic_id)))
             return atom_id
@@ -203,6 +257,74 @@ class MemoryManager:
     async def update_atom_chroma_id(self, atom_id: str, chroma_id: str) -> None:
         async with self.pg_pool.acquire() as conn:
             await conn.execute("UPDATE knowledge_atoms SET chroma_chunk_id = $1 WHERE id = $2", chroma_id, uuid.UUID(str(atom_id)))
+
+    async def get_unresolved_contradictions(self, topic_id: str, limit: int = 5) -> List[Dict]:
+        """Fetch contradictions that haven't been resolved yet."""
+        async with self.pg_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT c.id as contra_id, c.description, 
+                       a.id as atom_a_id, a.content as atom_a_content, a.confidence as conf_a,
+                       b.id as atom_b_id, b.content as atom_b_content, b.confidence as conf_b
+                FROM contradictions c
+                JOIN knowledge_atoms a ON a.id = c.atom_a_id
+                JOIN knowledge_atoms b ON b.id = c.atom_b_id
+                WHERE c.topic_id = $1 AND c.resolved = FALSE
+                LIMIT $2
+                """,
+                uuid.UUID(str(topic_id)), limit
+            )
+            return [dict(r) for r in rows]
+
+    async def resolve_contradiction(self, contra_id: str, resolution: str, obsolete_atom_ids: List[str] = []) -> None:
+        """Mark a contradiction as resolved and deprecate the losing atoms."""
+        async with self.pg_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE contradictions SET resolved = TRUE, resolution = $1 WHERE id = $2",
+                resolution, uuid.UUID(str(contra_id))
+            )
+            if obsolete_atom_ids:
+                await conn.execute(
+                    "UPDATE knowledge_atoms SET is_obsolete = TRUE, is_contested = FALSE WHERE id = ANY($1)",
+                    [uuid.UUID(str(aid)) for aid in obsolete_atom_ids]
+                )
+
+    async def get_atoms_for_consolidation(self, topic_id: str, limit: int = 100) -> List[Dict]:
+        """Fetch active atoms that haven't been consolidated yet."""
+        async with self.pg_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, atom_type, content, source_ids
+                FROM knowledge_atoms
+                WHERE topic_id = $1 AND is_golden = FALSE AND is_obsolete = FALSE
+                ORDER BY created_at DESC
+                LIMIT $2
+                """,
+                uuid.UUID(str(topic_id)), limit
+            )
+            return [dict(r) for r in rows]
+
+    async def merge_atoms_into_golden(self, topic_id: str, obsolete_ids: List[str], golden_atom: Dict) -> str:
+        """Create a golden atom and mark the old ones obsolete."""
+        # 1. Create golden
+        golden_id = await self.store_atom(
+            topic_id=topic_id,
+            session_id=None,
+            atom_type=golden_atom['type'],
+            content=golden_atom['content'],
+            source_ids=golden_atom['source_ids'],
+            confidence=0.95
+        )
+        # 2. Mark golden
+        async with self.pg_pool.acquire() as conn:
+            await conn.execute("UPDATE knowledge_atoms SET is_golden = TRUE WHERE id = $1", uuid.UUID(str(golden_id)))
+            # 3. Obsolete old ones
+            if obsolete_ids:
+                await conn.execute(
+                    "UPDATE knowledge_atoms SET is_obsolete = TRUE WHERE id = ANY($1)",
+                    [uuid.UUID(str(aid)) for aid in obsolete_ids]
+                )
+        return golden_id
 
     # ────────────────────────────────────────────────────────────
     # SECTION 4: LEVEL C/D — SYNTHESIS & BRIEF
@@ -248,9 +370,9 @@ class MemoryManager:
         """PG_TRGM powered lexical search for exact terms."""
         async with self.pg_pool.acquire() as conn:
             query = """
-                SELECT content, atom_type, confidence, similarity(content, $1) as score
+                SELECT content, atom_type, confidence, similarity(content, $1) as score, is_obsolete
                 FROM knowledge_atoms
-                WHERE content % $1
+                WHERE content % $1 AND is_obsolete = FALSE
             """
             params = [" ".join(terms)]
             if topic_id:

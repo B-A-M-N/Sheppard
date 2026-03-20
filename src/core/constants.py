@@ -74,6 +74,14 @@ COMMANDS = {
         ],
         'category': 'research'
     },
+    '/report': {
+        'description': 'Generate a Tier 4 Master Brief from extracted Knowledge Atoms.',
+        'usage': '/report <topic_keyword>',
+        'examples': [
+            '/report "AI Orchestration"'
+        ],
+        'category': 'research'
+    },
     '/distill': {
         'description': 'Manually trigger a distillation pass to refine raw sources into Knowledge Atoms.',
         'usage': '/distill <topic_id> [--priority=low|high|critical]',
