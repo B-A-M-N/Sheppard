@@ -345,3 +345,40 @@ def strip_markdown(text: str) -> str:
     text = re.sub(r'^\s*[-*_]{3,}\s*$', '', text, flags=re.MULTILINE)
     
     return normalize_whitespace(text)
+
+def repair_json(bad_json: str) -> dict:
+    """
+    Aggressive repair for common LLM JSON failures.
+    Handles missing commas, trailing commas, and conversational noise.
+    """
+    import json
+    import re
+    
+    # 1. Basic extraction: find the first { and last }
+    match = re.search(r'\{.*\}', bad_json, re.DOTALL)
+    if not match:
+        raise ValueError("No JSON object found in response")
+    content = match.group(0)
+    
+    # 2. Fix missing commas between fields (e.g., "key": "val" "next": ...)
+    content = re.sub(r'(":[^,}\]]+)\s+"', r'\1,\n"', content)
+    
+    # 3. Fix missing commas after objects/arrays (e.g., { ... } "next": ... or [ ... ] "next": ...)
+    content = re.sub(r'([}\]]+)\s+"', r'\1,\n"', content)
+    
+    # 4. Fix unquoted property names (e.g., key: "value")
+    content = re.sub(r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":', content)
+    
+    # 5. Fix trailing commas before closing braces/brackets
+    content = re.sub(r',\s*([}\]])', r'\1', content)
+    
+    # 5. Try to parse
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        # Last resort cleanup: remove non-printable chars
+        try:
+            cleaned = "".join(c for c in content if c.isprintable() or c in "\n\r\t")
+            return json.loads(cleaned)
+        except:
+            raise

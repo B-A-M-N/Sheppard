@@ -23,10 +23,21 @@ from src.research.acquisition.frontier import AdaptiveFrontier
 from src.research.condensation.pipeline import DistillationPipeline
 # V2 Reasoning
 from src.research.reasoning.retriever import HybridRetriever, RetrievalQuery
+from src.research.reasoning.assembler import EvidenceAssembler
+from src.research.reasoning.synthesis_service import SynthesisService
 # LLM & Memory
 from src.llm.client import OllamaClient
 from src.llm.model_router import ModelRouter, TaskType
 from src.memory.manager import MemoryManager
+
+# V3 Storage
+import asyncpg
+import redis.asyncio as redis
+import chromadb
+from src.memory.storage_adapter import SheppardStorageAdapter
+from src.memory.adapters.postgres import PostgresStoreImpl
+from src.memory.adapters.redis import RedisStoresImpl
+from src.memory.adapters.chroma import ChromaSemanticStoreImpl
 
 from src.config.settings import settings
 
@@ -40,15 +51,19 @@ class SystemManager:
 
     def __init__(self):
         self.memory: Optional[MemoryManager] = None
+        self.adapter: Optional[SheppardStorageAdapter] = None
         self.ollama: Optional[OllamaClient] = None
         self.model_router = ModelRouter()
         self.budget: Optional[BudgetMonitor] = None
         self.crawler: Optional[FirecrawlLocalClient] = None
         self.condenser: Optional[DistillationPipeline] = None
         self.retriever: Optional[HybridRetriever] = None
+        self.synthesis_service: Optional[SynthesisService] = None
 
         self._crawl_tasks: Dict[str, asyncio.Task] = {}
+        self.active_frontiers: Dict[str, AdaptiveFrontier] = {}
         self._monitor_task: Optional[asyncio.Task] = None
+        self._vampire_tasks: List[asyncio.Task] = []
         self._initialized = False
 
     async def initialize(self) -> Tuple[bool, Optional[str]]:
@@ -59,7 +74,30 @@ class SystemManager:
         try:
             logger.info("[System] Initializing Sheppard Infrastructure...")
 
-            # 1. Memory (ChromaDB + Postgres V2)
+            # 0. Boot V3 Triad Adapters
+            from src.config.database import DatabaseConfig
+            pg_dsn = DatabaseConfig.DB_URLS.get("semantic_memory")
+            
+            self.pg_pool = await asyncpg.create_pool(
+                pg_dsn,
+                min_size=2, max_size=10
+            )
+            self.redis_client = redis.Redis.from_url("redis://localhost:6379", decode_responses=False)
+            self.chroma_client = chromadb.PersistentClient(path=settings.CHROMADB_PERSIST_DIRECTORY)
+
+            pg_store = PostgresStoreImpl(self.pg_pool)
+            redis_store = RedisStoresImpl(self.redis_client)
+            chroma_store = ChromaSemanticStoreImpl(self.chroma_client)
+
+            self.adapter = SheppardStorageAdapter(
+                pg=pg_store,
+                redis_runtime=redis_store,
+                redis_cache=redis_store,
+                redis_queue=redis_store,
+                chroma=chroma_store
+            )
+
+            # 1. Memory (ChromaDB + Postgres V2 - Legacy Support)
             self.memory = MemoryManager()
             await self.memory.initialize()
 
@@ -79,6 +117,7 @@ class SystemManager:
                 ollama=self.ollama,
                 memory=self.memory,
                 budget=self.budget,
+                adapter=self.adapter
             )
 
             # 5. Crawler
@@ -88,11 +127,19 @@ class SystemManager:
             )
             await self.crawler.initialize()
 
-            # 6. Retriever
+            # 6. Retriever & Synthesis
             self.retriever = HybridRetriever(memory_manager=self.memory)
+            
+            assembler = EvidenceAssembler(self.ollama, self.memory, self.retriever, self.adapter)
+            self.synthesis_service = SynthesisService(self.ollama, self.memory, assembler, self.adapter)
 
             # 7. Start background tasks
             self._monitor_task = asyncio.create_task(self.budget.run_monitor_loop())
+            
+            # 8. Unleash Local Vampires
+            num_vampires = 8 # Balanced greed for Ryzen 9
+            for i in range(num_vampires):
+                self._vampire_tasks.append(asyncio.create_task(self._vampire_loop(i)))
 
             self._initialized = True
             logger.info("[System] Sheppard V2 ready")
@@ -111,9 +158,38 @@ class SystemManager:
     ) -> str:
         """Starts a background accretive learning mission."""
         self._check_initialized()
+        import uuid
+        from src.research.domain_schema import ResearchMission, DomainProfile, SourcePreferences
 
+        # Keep legacy topic creation for now to satisfy budget monitor
         topic_id = await self.memory.create_topic(name=topic_name, description=query)
         await self.memory.update_topic_status(topic_id, "active")
+
+        mission_id = str(uuid.uuid4())
+        
+        # 1. Create Domain Profile
+        profile_id = f"profile_{mission_id[:8]}"
+        profile = DomainProfile(
+            profile_id=profile_id,
+            name=f"Profile for {topic_name}",
+            description=query,
+            domain_type="mixed",
+            source_preferences=SourcePreferences(
+                preferred_classes=["official_docs", "academic_paper"] if academic_only else []
+            )
+        )
+        await self.adapter.upsert_domain_profile(profile.to_pg_row())
+
+        # 2. Create Mission
+        mission = ResearchMission(
+            mission_id=mission_id,
+            topic_id=topic_id,
+            domain_profile_id=profile.profile_id,
+            title=topic_name,
+            objective=query,
+            budget_bytes=int(ceiling_gb * 1024**3)
+        )
+        await self.adapter.create_mission(mission.to_pg_row())
         
         self.budget.register_topic(
             topic_id=topic_id,
@@ -123,10 +199,10 @@ class SystemManager:
 
         self.crawler.academic_only = academic_only
 
-        task = asyncio.create_task(self._crawl_and_store(topic_id, topic_name, query))
+        task = asyncio.create_task(self._crawl_and_store(topic_id, topic_name, query, mission_id))
         self._crawl_tasks[topic_id] = task
         
-        logger.info(f"[System] Learning mission '{topic_name}' started (ID: {topic_id})")
+        logger.info(f"[System] Learning mission '{topic_name}' started (Mission ID: {mission_id})")
         return topic_id
 
     async def query(
@@ -190,40 +266,157 @@ class SystemManager:
         }
 
     async def cleanup(self) -> None:
-        """Graceful shutdown of all tasks."""
+        """Graceful shutdown of all tasks and network sessions."""
         if self._monitor_task:
             self._monitor_task.cancel()
         for task in self._crawl_tasks.values():
             if not task.done():
                 task.cancel()
+        
+        for vt in self._vampire_tasks:
+            if not vt.done(): vt.cancel()
+        
+        # Close network sessions
         if self.crawler:
             await self.crawler.cleanup()
+        if self.ollama:
+            await self.ollama.cleanup()
         if self.memory:
             await self.memory.cleanup()
+        
+        # Close V3 Triad connections
+        if getattr(self, 'pg_pool', None):
+            await self.pg_pool.close()
+        if getattr(self, 'redis_client', None):
+            await self.redis_client.aclose()
+            
         logger.info("[System] Sheppard shut down cleanly")
 
     # ──────────────────────────────────────────────────
     # Internal Helpers
     # ──────────────────────────────────────────────────
 
-    async def _crawl_and_store(self, topic_id: str, topic_name: str, query: str) -> None:
+    async def _vampire_loop(self, vampire_id: int):
+        """Greedy consumer loop: Eats URLs from Redis and stores technical ore."""
+        logger.info(f"[Vampire-{vampire_id}] Unleashed.")
+        while True:
+            try:
+                # Dequeue next job
+                job = await self.adapter.dequeue_job("queue:scraping", timeout_s=10)
+                if not job: continue
+                
+                url = job.get("url")
+                topic_id = job.get("topic_id")
+                # Defensive fallback for legacy tasks
+                mission_id = job.get("mission_id") or topic_id
+                
+                # Check if already processed (Greedy de-duplication)
+                existing = await self.adapter.get_source_by_url_hash(job.get("url_hash", ""))
+                if existing and existing.get("status") == "fetched":
+                    logger.debug(f"[Vampire-{vampire_id}] Already fetched: {url}")
+                    continue
+
+                # Check budget before eating
+                if not self.budget.can_crawl(topic_id):
+                    # Re-queue for later
+                    await self.adapter.enqueue_job("queue:scraping", job)
+                    await asyncio.sleep(30); continue
+
+                # Scrape
+                result = await self.crawler._scrape_with_retry(url)
+                if result:
+                    # Atomic Ingestion via V3 Adapter
+                    source_meta = {
+                        "mission_id": mission_id,
+                        "topic_id": topic_id,
+                        "url": url,
+                        "normalized_url": url,
+                        "normalized_url_hash": result.checksum,
+                        "title": result.title,
+                        "source_class": result.source_type,
+                        "domain": result.domain,
+                        "metadata": result.metadata
+                    }
+                    await self.adapter.ingest_source(source_meta, result.markdown)
+                    
+                    # Legacy support for existing refinery/budget hooks
+                    await self.memory.store_source(
+                        topic_id=topic_id,
+                        url=url,
+                        content=result.markdown,
+                        raw_bytes=result.raw_bytes,
+                        checksum=result.checksum,
+                        title=result.title,
+                        domain=result.domain
+                    )
+                    
+                    logger.info(f"[Vampire-{vampire_id}] Consumed: {url}")
+                
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[Vampire-{vampire_id}] Indigestion on {job.get('url') if 'job' in locals() else 'unknown'}: {e}")
+                await asyncio.sleep(2)
+
+    async def _crawl_and_store(self, topic_id: str, topic_name: str, query: str, mission_id: str = None) -> None:
         """Background task: adaptive frontier research mission."""
         from src.utils.console import console
         try:
             console.print(f"\n[bold yellow][System][/bold yellow] Starting Deep Accretive Mission: [cyan]{topic_name}[/cyan]")
             
-            frontier = AdaptiveFrontier(self, topic_id, topic_name)
+            if not mission_id:
+                mission_id = topic_id
+            
+            # Pass mission_id to AdaptiveFrontier to use V3 schema
+            frontier = AdaptiveFrontier(self, topic_id, topic_name, mission_id=mission_id)
+            self.active_frontiers[topic_id] = frontier
             total_ingested = await frontier.run()
             
             console.print(f"[bold blue][DONE][/bold blue] Mission complete. [green]{total_ingested}[/green] total sources ingested.")
             await self.memory.update_topic_status(topic_id, "done")
+            await self.adapter.update_mission_status(mission_id, "completed")
 
         except Exception as e:
             console.print(f"[bold red][FAIL][/bold red] Mission error: {e}")
             logger.error(f"[System] Mission error: {e}", exc_info=True)
             await self.memory.update_topic_status(topic_id, "failed")
+            await self.adapter.update_mission_status(mission_id, "failed", stop_reason=str(e))
         finally:
             self._crawl_tasks.pop(topic_id, None)
+            self.active_frontiers.pop(topic_id, None)
+
+    async def nudge_mission(self, topic_id: str, instruction: str) -> bool:
+        """Apply a human-in-the-loop steering correction to an active mission."""
+        frontier = self.active_frontiers.get(topic_id)
+        if not frontier:
+            return False
+        await frontier.apply_nudge(instruction)
+        return True
+
+    async def cancel_mission(self, topic_id: str) -> bool:
+        """Gracefully stop a running research mission."""
+        task = self._crawl_tasks.get(topic_id)
+        if not task:
+            return False
+        
+        # 1. Cancel the task
+        task.cancel()
+        
+        # 2. Cleanup state
+        self._crawl_tasks.pop(topic_id, None)
+        self.active_frontiers.pop(topic_id, None)
+        
+        # 3. Update DB status
+        await self.memory.update_topic_status(topic_id, "stopped")
+        
+        logger.info(f"[System] Mission {topic_id} cancelled by user.")
+        return True
+
+    async def generate_report(self, topic_id: str) -> Optional[str]:
+        """Trigger Tier 4 Selective Synthesis for a specific topic."""
+        if not self.synthesis_service:
+            return None
+        return await self.synthesis_service.generate_master_brief(topic_id)
 
     async def _condensation_callback(self, topic_id: str, priority: CondensationPriority) -> None:
         await self.condenser.run(topic_id, priority)

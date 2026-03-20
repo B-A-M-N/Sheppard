@@ -1,13 +1,9 @@
 """
 acquisition/crawler.py
 
-Firecrawl-local client wrapper.
-Wraps your self-hosted firecrawl instance with:
-  - Per-page byte tracking (feeds BudgetMonitor)
-  - Semantic dedup pre-check before expensive crawl
-  - Retry logic with exponential backoff
-  - Academic whitelist mode (Archivist's Ivory Tower filter)
-  - Raw file persistence to disk for condensation pipeline
+Firecrawl-local client wrapper with Asynchronous Dual-Lane Metabolism.
+- Fast Lane (Host): Direct, high-priority Playwright scrapes.
+- Slow Lane (Laptop): Non-blocking, pull-based background tasks (PDFs, static, retries).
 """
 
 import asyncio
@@ -17,21 +13,21 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import AsyncGenerator, Callable, List, Optional, Set
+from typing import AsyncGenerator, Callable, List, Optional, Set, Dict, Any, Union
 from urllib.parse import urlparse
 
 import aiohttp
+from src.utils.console import console
 
 logger = logging.getLogger(__name__)
 
-# Archivist's "Ivory Tower" whitelist — academic & high-fidelity sources
+# Archivist's "Ivory Tower" whitelist
 ACADEMIC_WHITELIST_DOMAINS: Set[str] = {
     ".edu", ".gov", "arxiv.org", "pubmed.ncbi.nlm.nih.gov",
     "scholar.google.com", "semanticscholar.org", "acm.org",
     "ieee.org", "nature.com", "science.org", "springer.com",
     "researchgate.net", "ssrn.com",
 }
-
 
 @dataclass
 class CrawlResult:
@@ -41,32 +37,32 @@ class CrawlResult:
     raw_bytes: int
     checksum: str
     domain: str
-    source_type: str = "web"   # web | academic | pdf
+    source_type: str = "web"
     raw_file_path: Optional[str] = None
     metadata: dict = field(default_factory=dict)
 
-
 @dataclass
 class CrawlerConfig:
-    firecrawl_url: str = os.getenv("FIRECRAWL_BASE_URL", "http://localhost:3002")
+    firecrawl_url: str = os.getenv("FIRECRAWL_BASE_URL", "http://127.0.0.1:3002")
+    searxng_urls: List[str] = field(default_factory=lambda: [
+        "http://127.0.0.1:8080",
+        "http://10.9.66.45:8080",
+        "http://10.9.66.154:8080"
+    ])
+    # Redis queues for Two-Lane Pipeline
+    fast_lane_queue: str = "firecrawl:fast"
+    slow_lane_queue: str = "firecrawl:slow"
+
     firecrawl_api_key: str = os.getenv("FIRECRAWL_API_KEY", "local")
     raw_data_dir: str = os.getenv("RAW_DATA_DIR", "./data/raw_docs")
     max_retries: int = 3
     retry_base_delay: float = 1.0
     request_timeout: int = 60
-    max_depth: int = 5          # Increased from 3 to 5 for deeper discovery
-    rate_limit_delay: float = 0.5  # seconds between requests
-
+    max_depth: int = 5
+    rate_limit_delay: float = 0.5
+    slow_lane_domains: Set[str] = field(default_factory=set)
 
 class FirecrawlLocalClient:
-    """
-    Async wrapper for the self-hosted firecrawl-local API.
-    
-    Yields CrawlResult objects as pages are scraped.
-    Calls on_bytes_crawled after each page so BudgetMonitor
-    can track storage and trigger condensation as needed.
-    """
-
     def __init__(
         self,
         config: Optional[CrawlerConfig] = None,
@@ -74,17 +70,30 @@ class FirecrawlLocalClient:
         academic_only: bool = False,
     ):
         self.config = config or CrawlerConfig()
-        self.on_bytes_crawled = on_bytes_crawled  # (topic_id, bytes) callback
+        self.on_bytes_crawled = on_bytes_crawled
         self.academic_only = academic_only
         self._session: Optional[aiohttp.ClientSession] = None
         self._seen_checksums: Set[str] = set()
-        self._queue_size = 0 # Track discovery queue size
+        self._queue_size = 0
+        self._search_index = 0
+        
+        # Domains that are fast/stable enough for the i5 "Slow Lane"
+        self.slow_lane_domains = {
+            "wikipedia.org", "arxiv.org", "github.com", "nature.com", 
+            "science.org", "ieee.org", "docs.python.org"
+        }
 
         Path(self.config.raw_data_dir).mkdir(parents=True, exist_ok=True)
 
     @property
     def queue_size(self) -> int:
         return self._queue_size
+
+    @property
+    def current_searxng_url(self) -> str:
+        url = self.config.searxng_urls[self._search_index % len(self.config.searxng_urls)]
+        self._search_index += 1
+        return url
 
     async def initialize(self) -> None:
         self._session = aiohttp.ClientSession(
@@ -100,6 +109,28 @@ class FirecrawlLocalClient:
         if self._session:
             await self._session.close()
 
+    def _route_url(self, url: str) -> str:
+        """Architecture decision: Is this Fast Lane or Slow Lane?"""
+        parsed = urlparse(url)
+        domain = parsed.netloc.lower()
+        
+        # 1. Heavy files (PDFs) -> Slow Lane
+        if url.lower().endswith(".pdf"): return "slow"
+        
+        # 2. Known static/low-complexity or high-latency domains -> Slow Lane
+        generic_domains = [
+            "dictionary.com", "merriam-webster.com", "wiktionary.org", 
+            "definitions.net", "oxfordlearnersdictionaries.com",
+            "support.google.com", "stackexchange.com", "stackoverflow.com",
+            "wikipedia.org", "britannica.com"
+        ]
+        # Convert set to list before concatenation
+        slow_list = list(self.slow_lane_domains) if isinstance(self.slow_lane_domains, set) else self.slow_lane_domains
+        if any(d in domain for d in generic_domains + slow_list): return "slow"
+        
+        # 3. Everything else (JS-heavy, technical docs, unknowns) -> Fast Lane
+        return "fast"
+
     async def crawl_topic(
         self,
         topic_id: str,
@@ -107,217 +138,252 @@ class FirecrawlLocalClient:
         seed_query: str,
         can_crawl_fn: Optional[Callable[[str], bool]] = None,
         visited_urls: Optional[Set[str]] = None,
+        mission_id: str = None
     ) -> AsyncGenerator[CrawlResult, None]:
-        """
-        Recursive Accretive Crawler. 
-        Follows links and maintains a discovery queue until budget is reached.
-        """
-        if not self._session:
-            await self.initialize()
-
-        from src.utils.console import console
-        logger.info(f"[Crawler] Starting accretive mission for '{topic_name}'")
+        """Parallel researcher: Fetches high-value data using multiple concurrent workers."""
+        if not self._session: await self.initialize()
         
-        # 1. Discovery Queue
         discovery_queue = asyncio.Queue()
-        if visited_urls is None:
-            visited_urls = set()
+        results_queue = asyncio.Queue()
+        if visited_urls is None: visited_urls = set()
 
-        # 2. Initial Search
+        # Initial discovery
         seed_urls = await self._search(seed_query)
-        for url in seed_urls:
-            await discovery_queue.put((url, 0)) # (url, depth)
+        for url in seed_urls: await discovery_queue.put((url, 0))
         
         self._queue_size = discovery_queue.qsize()
-
-        while not discovery_queue.empty():
-            # Check budget
-            if can_crawl_fn and not can_crawl_fn(topic_id):
-                console.print("[yellow][Crawler] Budget backpressure — waiting...[/yellow]")
-                await asyncio.sleep(30)
-                continue
-
-            url, depth = await discovery_queue.get()
-            self._queue_size = discovery_queue.qsize()
-            
-            if url in visited_urls or depth > self.config.max_depth:
-                continue
-            
-            visited_urls.add(url)
-
-            # Apply academic filter
-            if self.academic_only and not self._is_academic(url):
-                continue
-
-            result = await self._scrape_with_retry(url)
-            if result is None:
-                continue
-
-            # Dedup by content
-            if result.checksum in self._seen_checksums:
-                continue
-            self._seen_checksums.add(result.checksum)
-
-            # Extract new links for deeper crawling
-            if depth < self.config.max_depth:
-                new_links = self._extract_links(result.metadata.get('html', ''), url)
-                for link in new_links:
-                    if link not in visited_urls:
-                        await discovery_queue.put((link, depth + 1))
-                self._queue_size = discovery_queue.qsize()
-
-            # Persist and yield
-            result.raw_file_path = await self._persist_raw(topic_id, url, result.markdown)
-            if self.on_bytes_crawled:
-                await self.on_bytes_crawled(topic_id, result.raw_bytes)
-
-            yield result
-            await asyncio.sleep(self.config.rate_limit_delay)
-
-    def _extract_links(self, html: str, base_url: str) -> List[str]:
-        """Surgically extract high-quality links to follow."""
-        if not html: return []
-        from bs4 import BeautifulSoup
-        from urllib.parse import urljoin
         
-        soup = BeautifulSoup(html, 'html.parser')
-        base_domain = urlparse(base_url).netloc
-        links = []
+        num_workers = 8  # Balanced for Ryzen 9
+        active_workers = 0
         
-        for a in soup.find_all('a', href=True):
-            url = urljoin(base_url, a['href'])
-            parsed = urlparse(url)
-            # Only follow links on the same domain or relevant subdomains
-            if parsed.netloc == base_domain and parsed.scheme in ['http', 'https']:
-                # Skip common junk paths
-                if not any(x in url.lower() for x in ['/tag/', '/category/', '/login', '/signup', '/search']):
-                    links.append(url)
+        async def worker():
+            nonlocal active_workers
+            active_workers += 1
+            try:
+                while not discovery_queue.empty() or active_workers > 1:
+                    if can_crawl_fn and not can_crawl_fn(topic_id):
+                        await asyncio.sleep(5); continue
+
+                    try:
+                        url, depth = await asyncio.wait_for(discovery_queue.get(), timeout=2)
+                    except asyncio.TimeoutError:
+                        if discovery_queue.empty(): break
+                        continue
+
+                    if url in visited_urls or depth > self.config.max_depth:
+                        discovery_queue.task_done(); continue
+                    
+                    visited_urls.add(url)
+
+                    # --- ROUTING ---
+                    lane = self._route_url(url)
+                    if lane == "slow":
+                        await self._offload_to_slow_lane(topic_id, url, mission_id)
+                        discovery_queue.task_done(); continue
+
+                    # --- FAST LANE SCRAPE ---
+                    if self.academic_only and not self._is_academic(url): 
+                        discovery_queue.task_done(); continue
+
+                    result = await self._scrape_with_retry(url)
+                    if result:
+                        if result.checksum not in self._seen_checksums:
+                            self._seen_checksums.add(result.checksum)
+                            
+                            # Recursive link discovery
+                            if depth < self.config.max_depth:
+                                new_links = self._extract_links(result.metadata.get('html', ''), url)
+                                for link in new_links:
+                                    if link not in visited_urls:
+                                        await discovery_queue.put((link, depth + 1))
+                            
+                            result.raw_file_path = await self._persist_raw(topic_id, url, result.markdown)
+                            if self.on_bytes_crawled:
+                                await self.on_bytes_crawled(topic_id, result.raw_bytes)
+                            
+                            await results_queue.put(result)
+                    
+                    discovery_queue.task_done()
+                    await asyncio.sleep(self.config.rate_limit_delay)
+            finally:
+                active_workers -= 1
+
+        # Start workers
+        worker_tasks = [asyncio.create_task(worker()) for _ in range(num_workers)]
+
+        # Generator loop
+        while active_workers > 0 or not results_queue.empty():
+            try:
+                # Polling results queue
+                res = await asyncio.wait_for(results_queue.get(), timeout=0.5)
+                yield res
+                results_queue.task_done()
+            except asyncio.TimeoutError:
+                continue
+
+        # Ensure all workers are cleaned up
+        for t in worker_tasks:
+            if not t.done(): t.cancel()
+        await asyncio.gather(*worker_tasks, return_exceptions=True)
+
+    async def _offload_to_slow_lane(self, topic_id: str, url: str, mission_id: str = None):
+        """Asynchronous handoff to the Slow Lane (Laptop) worker via Redis Queue."""
+        try:
+            from src.core.system import system_manager
+            payload = {
+                "topic_id": topic_id,
+                "mission_id": mission_id or topic_id,
+                "url": url,
+                "priority": 0,
+                "requires_js": False
+            }
+            await system_manager.adapter.enqueue_job("queue:acquisition", payload)
+            logger.info(f"[Crawler] Offloaded to SLOW-LANE queue: {url}")
+        except Exception as e:
+            logger.debug(f"[Crawler] Slow-lane offload failed: {e}")
+
+    async def _search(self, query: str, pageno: int = 1) -> List[str]:
+        """Discovery Race: Hits all SearXNG nodes in parallel. First success wins."""
+        import aiohttp
+        import random
         
-        return list(set(links))[:5] # Limit per page to avoid spider traps
-
-    async def crawl_url(
-        self,
-        url: str,
-        topic_id: str,
-        can_crawl_fn: Optional[Callable[[str], bool]] = None,
-    ) -> Optional[CrawlResult]:
-        """Crawl a single specific URL."""
-        if not self._session:
-            await self.initialize()
-
-        if can_crawl_fn and not can_crawl_fn(topic_id):
-            logger.warning(f"[Crawler] Budget full, cannot crawl {url}")
+        async def fetch_one(url):
+            try:
+                payload = {
+                    "q": query, 
+                    "format": "json",
+                    "pageno": pageno,
+                    "engines": "google,bing,brave,duckduckgo,qwant"
+                }
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as session:
+                    async with session.get(f"{url}/search", params=payload) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            results = data.get("results", [])
+                            return [r["url"] for r in results if isinstance(r, dict) and "url" in r]
+            except:
+                pass
             return None
 
-        return await self._scrape_with_retry(url)
+        urls = list(self.config.searxng_urls)
+        random.shuffle(urls)
+        tasks = [asyncio.create_task(fetch_one(url)) for url in urls]
+        
+        for task in asyncio.as_completed(tasks):
+            res = await task
+            if res and len(res) > 0:
+                for t in tasks:
+                    if not t.done(): t.cancel()
+                return res
+        return []
 
-    async def _search(self, query: str) -> List[str]:
-        """Use firecrawl's /v1/search to get seed URLs."""
-        from src.utils.console import console
-        console.print(f"[dim][Crawler] Searching for: {query}...[/dim]")
-        logger.info(f"[Crawler] Sending search request for: '{query}'")
-        try:
-            async with self._session.post(
-                f"{self.config.firecrawl_url}/v1/search",
-                json={"query": query, "limit": 20},
-            ) as resp:
-                logger.info(f"[Crawler] Search response status: {resp.status}")
-                if resp.status != 200:
-                    console.print(f"[bold red][Crawler] Search failed (HTTP {resp.status})[/bold red]")
-                    return []
+    async def discover_and_enqueue(
+        self, 
+        topic_id: str, 
+        topic_name: str, 
+        query: str, 
+        mission_id: str = None,
+        visited_urls: Optional[Set[str]] = None
+    ) -> int:
+        """Producer: Finds URLs and dumps them into the global Redis queue. 
+        Deep Mines up to Page 5 if no new URLs are found.
+        """
+        from src.core.system import system_manager
+        total_enqueued = 0
+        
+        for page in range(1, 6): # Deep Mine: Page 1 to 5
+            urls = await self._search(query, pageno=page)
+            if not urls:
+                break
                 
-                data = await resp.json()
-                # Local Firecrawl returns list directly in 'data'
-                results = data.get("data", [])
+            page_new_count = 0
+            for url in urls:
+                if visited_urls is not None and url in visited_urls:
+                    continue
+                    
+                lane = self._route_url(url)
+                payload = {
+                    "topic_id": topic_id,
+                    "mission_id": mission_id or topic_id,
+                    "url": url,
+                    "url_hash": hashlib.md5(url.encode()).hexdigest(),
+                    "lane": lane,
+                    "priority": 1 if lane == "fast" else 0
+                }
+                await system_manager.adapter.enqueue_job("queue:scraping", payload)
                 
-                if not isinstance(results, list):
-                    # Fallback for cloud structure
-                    results = results.get("web", [])
-                
-                urls = [r["url"] for r in results if isinstance(r, dict) and "url" in r]
-                console.print(f"[dim][Crawler] Found {len(urls)} results.[/dim]")
-                logger.info(f"[Crawler] Extracted {len(urls)} valid URLs")
-                return urls
-        except Exception as e:
-            console.print(f"[bold red][Crawler] Search error: {e}[/bold red]")
-            logger.error(f"[Crawler] Search failed for '{query}': {e}")
-            return []
+                if visited_urls is not None:
+                    visited_urls.add(url)
+                page_new_count += 1
+                total_enqueued += 1
+            
+            # If we found at least one new thing on this page, we can stop or continue.
+            # Let's be greedy: if we found new things, we've fulfilled the node for now.
+            # If we found NOTHING new, we go to the next page.
+            if page_new_count > 0:
+                if page > 1:
+                    console.print(f"[dim][Crawler] Deep Mine successful on Page {page}. Found {page_new_count} new targets.[/dim]")
+                break
+            else:
+                # Page was all duplicates, try deeper
+                continue
+            
+        return total_enqueued
+
+    _search_lock = asyncio.Lock()
 
     async def _scrape_with_retry(self, url: str) -> Optional[CrawlResult]:
-        """Scrape a URL with exponential backoff retry."""
         for attempt in range(self.config.max_retries):
             try:
                 async with self._session.post(
                     f"{self.config.firecrawl_url}/v1/scrape",
-                    json={
-                        "url": url,
-                        "formats": ["markdown", "html"],
-                        "onlyMainContent": True,
-                    },
+                    json={"url": url, "formats": ["markdown", "html"], "onlyMainContent": True},
                 ) as resp:
-                    if resp.status != 200:
-                        logger.warning(f"[Crawler] HTTP {resp.status} for {url}")
-                        return None
-
+                    if resp.status != 200: return None
                     data = await resp.json()
-                    if not data.get("success"):
-                        return None
-
+                    if not data.get("success"): return None
                     doc = data.get("data", {})
                     markdown = doc.get("markdown", "")
-                    if not markdown:
-                        return None
-
-                    raw_bytes = len(markdown.encode("utf-8"))
-                    checksum = hashlib.md5(markdown.encode()).hexdigest()
-                    domain = urlparse(url).netloc
-                    source_type = "academic" if self._is_academic(url) else "web"
-                    if url.endswith(".pdf"):
-                        source_type = "pdf"
+                    if not markdown: return None
 
                     return CrawlResult(
-                        url=url,
-                        title=doc.get("metadata", {}).get("title", ""),
-                        markdown=markdown,
-                        raw_bytes=raw_bytes,
-                        checksum=checksum,
-                        domain=domain,
-                        source_type=source_type,
+                        url=url, title=doc.get("metadata", {}).get("title", ""),
+                        markdown=markdown, raw_bytes=len(markdown.encode("utf-8")),
+                        checksum=hashlib.md5(markdown.encode()).hexdigest(),
+                        domain=urlparse(url).netloc,
+                        source_type="academic" if self._is_academic(url) else "web",
                         metadata=doc.get("metadata", {}),
                     )
-
-            except aiohttp.ClientError as e:
-                wait = self.config.retry_base_delay * (2 ** attempt)
-                logger.warning(f"[Crawler] Attempt {attempt+1} failed for {url}: {e}. Retrying in {wait}s")
-                await asyncio.sleep(wait)
-
-        logger.error(f"[Crawler] All retries exhausted for {url}")
+            except:
+                await asyncio.sleep(self.config.retry_base_delay * (2 ** attempt))
         return None
 
-    async def _persist_raw(
-        self,
-        topic_id: str,
-        url: str,
-        content: str,
-    ) -> str:
-        """Save raw markdown to disk for condensation pipeline."""
+    def _extract_links(self, html: str, base_url: str) -> List[str]:
+        if not html: return []
+        from bs4 import BeautifulSoup
+        from urllib.parse import urljoin
+        soup = BeautifulSoup(html, 'html.parser')
+        base_domain = urlparse(base_url).netloc
+        links = []
+        for a in soup.find_all('a', href=True):
+            url = urljoin(base_url, a['href'])
+            parsed = urlparse(url)
+            if parsed.netloc == base_domain and parsed.scheme in ['http', 'https']:
+                if not any(x in url.lower() for x in ['/tag/', '/category/', '/login', '/signup']):
+                    links.append(url)
+        return list(set(links))[:5]
+
+    async def _persist_raw(self, topic_id: str, url: str, content: str) -> str:
         topic_dir = Path(self.config.raw_data_dir) / topic_id
         topic_dir.mkdir(parents=True, exist_ok=True)
-
-        # Use URL hash as filename to avoid path issues
         url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
         file_path = topic_dir / f"{url_hash}.md"
-
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(f"<!-- SOURCE: {url} -->\n\n{content}")
-
         return str(file_path)
 
     def _is_academic(self, url: str) -> bool:
-        """Check if URL belongs to a whitelisted academic domain."""
-        parsed = urlparse(url)
-        domain = parsed.netloc.lower()
-        return any(
-            domain.endswith(whitelist) or whitelist in domain
-            for whitelist in ACADEMIC_WHITELIST_DOMAINS
-        )
+        domain = urlparse(url).netloc.lower()
+        return any(domain.endswith(whitelist) or whitelist in domain for whitelist in ACADEMIC_WHITELIST_DOMAINS)
+
+import uuid

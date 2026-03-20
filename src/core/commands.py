@@ -38,10 +38,15 @@ class CommandHandler:
             handlers = {
                 '/help': self._handle_help, '/h': self._handle_help,
                 '/learn': self._handle_learn,
+                '/stop': self._handle_stop,
+                '/missions': self._handle_missions,
+                '/nudge': self._handle_nudge,
                 '/query': self._handle_query,
+                '/report': self._handle_report,
                 '/research': self._handle_research, '/r': self._handle_research,
                 '/status': self._handle_status,
                 '/distill': self._handle_distill,
+                '/consolidate': self._handle_consolidate,
                 '/settings': self._handle_settings, '/setting': self._handle_settings,
                 '/preferences': self._handle_preferences, '/pref': self._handle_preferences,
                 '/memory': self._handle_memory, '/mem': self._handle_memory,
@@ -84,6 +89,41 @@ class CommandHandler:
         with self.console.status("[bold cyan]Retrieving knowledge..."):
             ctx = await system_manager.query(text=text)
         if ctx: self.console.print(Panel(Markdown(ctx), title="Retrieval Results", border_style="cyan"))
+
+    async def _handle_report(self, *args) -> None:
+        """/report <topic_keyword>"""
+        if not args:
+            self.console.print("Usage: /report <topic_keyword>", style=STYLES['warning'])
+            return
+            
+        keyword = args[0].lower()
+        
+        # We need to find the topic ID. Let's ask DB via memory manager.
+        # Quick and dirty fuzzy match against topics in DB.
+        async with system_manager.memory.pg_pool.acquire() as conn:
+            topics = await conn.fetch("SELECT id, name FROM topics")
+            
+        matches = [t for t in topics if keyword in t['name'].lower()]
+        
+        if not matches:
+            self.console.print(f"[bold red]No topic found matching: '{keyword}'[/bold red]")
+            return
+        elif len(matches) > 1:
+            self.console.print("[bold yellow]Multiple topics found. Please be more specific:[/bold yellow]")
+            for i, t in enumerate(matches):
+                self.console.print(f" [{i+1}] {t['name']}")
+            return
+            
+        topic_id = str(matches[0]['id'])
+        topic_name = matches[0]['name']
+        
+        self.console.print(f"[bold cyan]Triggering Tier 4 Synthesis for: '{topic_name}'[/bold cyan]")
+        report = await system_manager.generate_report(topic_id)
+        
+        if report:
+            self.console.print(Panel(Markdown(report), title=f"Master Brief: {topic_name[:30]}...", border_style="magenta"))
+        else:
+            self.console.print("[bold red]Synthesis failed or returned empty.[/bold red]")
 
     async def _handle_research(self, *args) -> None:
         """Legacy research — uses V2 query."""
@@ -150,6 +190,95 @@ class CommandHandler:
         self.console.print(f"[bold cyan][Distillery][/bold cyan] Manually triggering {priority_str} distillation for topic: {topic_id}")
         await system_manager.condenser.run(topic_id, priority)
         self.console.print("[bold green][DONE][/bold green] Distillation pass completed.")
+
+    async def _handle_stop(self, *args) -> None:
+        """/stop <topic_id>"""
+        if not args:
+            self.console.print("Usage: /stop <topic_id>", style=STYLES['warning'])
+            return
+        topic_id = args[0]
+        success = await system_manager.cancel_mission(topic_id)
+        if success:
+            self.console.print(f"[bold green]Mission {topic_id} stopped.[/bold green]")
+        else:
+            self.console.print(f"[bold red]Mission {topic_id} not found or already stopped.[/bold red]")
+
+    async def _handle_missions(self, *args) -> None:
+        """/missions"""
+        status = system_manager.status()
+        missions = status.get('missions', {})
+        
+        table = Table(title="Knowledge Missions")
+        table.add_column("ID", style="dim")
+        table.add_column("Topic", style="cyan")
+        table.add_column("State", style="yellow")
+        table.add_column("Raw Data", style="green")
+        
+        for tid, info in missions.items():
+            table.add_row(tid, info['name'], "Running" if info['crawling'] else "Idle", f"{info['raw_mb']} MB")
+        
+        self.console.print(table)
+
+    async def _handle_nudge(self, *args) -> None:
+        """/nudge [topic_keyword] \"<instruction>\""""
+        if not args:
+            self.console.print("Usage: /nudge [topic_keyword] \"<instruction>\"", style=STYLES['warning'])
+            return
+        
+        status = system_manager.status()
+        active_missions = {tid: info for tid, info in status.get('missions', {}).items() if info['crawling']}
+        
+        if not active_missions:
+            self.console.print("[bold red]No active missions found to nudge.[/bold red]")
+            return
+
+        # 1. Identify Target Topic and Instruction
+        target_tid = None
+        instruction = ""
+
+        if len(args) == 1:
+            # Global nudge (if only one mission active, otherwise ask)
+            if len(active_missions) == 1:
+                target_tid = list(active_missions.keys())[0]
+                instruction = args[0].strip('"\'')
+            else:
+                instruction = args[0].strip('"\'')
+                self.console.print(f"[bold cyan][System][/bold cyan] Applying global nudge to {len(active_missions)} missions.")
+                for tid in active_missions:
+                    await system_manager.nudge_mission(tid, instruction)
+                return
+        else:
+            # Fuzzy match topic_keyword
+            keyword = args[0].lower()
+            instruction = " ".join(args[1:]).strip('"\'')
+            
+            matches = [tid for tid, info in active_missions.items() if keyword in info['name'].lower()]
+            
+            if not matches:
+                self.console.print(f"[bold red]No active mission matches keyword: '{keyword}'[/bold red]")
+                return
+            elif len(matches) == 1:
+                target_tid = matches[0]
+            else:
+                self.console.print("[bold yellow]Multiple missions found. Please be more specific:[/bold yellow]")
+                for i, tid in enumerate(matches):
+                    self.console.print(f" [{i+1}] {active_missions[tid]['name']} (ID: {tid[:8]}...)")
+                return
+
+        if target_tid:
+            success = await system_manager.nudge_mission(target_tid, instruction)
+            if success:
+                self.console.print(f"[bold green]Steering applied to: {active_missions[target_tid]['name']}[/bold green]")
+
+    async def _handle_consolidate(self, *args) -> None:
+        """/consolidate <topic_id>"""
+        if not args:
+            self.console.print("Usage: /consolidate <topic_id>", style=STYLES['warning'])
+            return
+        topic_id = args[0]
+        self.console.print(f"[bold cyan][Forgetting Curve][/bold cyan] Running consolidation pass on topic: {topic_id}")
+        await system_manager.condenser.consolidate_atoms(topic_id)
+        self.console.print("[bold green][DONE][/bold green] Consolidation complete.")
 
     async def _handle_settings(self, *args) -> None:
         settings = await self.chat_app.get_settings()

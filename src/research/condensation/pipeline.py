@@ -21,6 +21,9 @@ from src.llm.client import OllamaClient
 from src.llm.model_router import TaskType
 from src.memory.manager import MemoryManager
 
+from src.utils.console import console
+from src.utils.json_validator import JSONValidator, extract_technical_atoms
+
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -31,61 +34,114 @@ class ExtractionCluster:
     atoms: List[Dict] = field(default_factory=list)
 
 class DistillationPipeline:
-    def __init__(self, ollama: OllamaClient, memory: MemoryManager, budget: BudgetMonitor):
+    def __init__(self, ollama: OllamaClient, memory: MemoryManager, budget: BudgetMonitor, adapter=None):
         self.ollama = ollama
         self.memory = memory
         self.budget = budget
+        self.adapter = adapter
         self._semaphore = asyncio.Semaphore(2)
 
-    async def run(self, topic_id: str, priority: CondensationPriority):
-        """Metabolic Distillation pass."""
+    async def run(self, mission_id: str, priority: CondensationPriority):
+        """Metabolic Distillation pass using V3 Triad (Sequential-Atomic)."""
+        topic_id = mission_id # Bridge for budget hooks
         async with self._semaphore:
-            # 1. Fetch raw sources that haven't been distilled
-            sources = await self.memory.get_uncondensed_sources(topic_id, limit=20)
+            # 1. Fetch raw technical ore from V3 Corpus
+            # We process a small batch sequentially to ensure high quality with 8B models
+            sources = await self.adapter.pg.fetch_many(
+                "corpus.sources", 
+                where={"mission_id": mission_id, "status": "fetched"},
+                limit=5
+            )
             if not sources: return
 
-            # 2. Semantic Clustering (Grouping similar material)
-            clusters = await self._cluster_sources(sources)
+            import uuid
+            from src.research.domain_schema import KnowledgeAtom, AtomLineage
             
             total_atoms = 0
-            for cluster in clusters:
-                # 3. Differential Extraction (Mining the signal)
-                atoms = await self._mine_differentials(cluster)
+            for s in sources:
+                # Get the content
+                text_ref = s.get("canonical_text_ref")
+                if not text_ref: 
+                    # Mark as failed/skipped if no text ref
+                    await self.adapter.pg.update_row("corpus.sources", "source_id", {"source_id": s["source_id"], "status": "error"})
+                    continue
                 
-                # 4. Storage & Indexing
-                for atom in atoms:
-                    atom_id = await self.memory.store_atom(
-                        topic_id=topic_id,
-                        session_id=None,
-                        atom_type=atom.get('type', 'claim'),
-                        content=atom.get('content', ''),
-                        source_ids=[s['id'] for s in cluster.sources],
-                        confidence=atom.get('confidence', 0.7)
-                    )
+                ref = await self.adapter.get_text_ref(text_ref)
+                if not ref or not ref.get("inline_text"):
+                    await self.adapter.pg.update_row("corpus.sources", "source_id", {"source_id": s["source_id"], "status": "error"})
+                    continue
+                
+                content = ref["inline_text"]
+                source_id = s["source_id"]
+                
+                # 2. Extract technical atoms (Robust Validation Loop)
+                mission_row = await self.adapter.get_mission(mission_id)
+                topic_name = mission_row.get("title", "AI Research") if mission_row else "AI Research"
+                
+                console.print(f"[dim][Distillery] Smelting: {s.get('url', source_id)[:60]}...[/dim]")
+                
+                try:
+                    atoms_data = await extract_technical_atoms(self.ollama, content, topic_name)
                     
-                    # Semantic Indexing
-                    emb = await self.ollama.embed(atom.get('content', ''))
-                    await self.memory.store_chunk(
-                        collection="knowledge_atoms",
-                        topic_id=topic_id,
-                        doc_id=atom_id,
-                        content=atom.get('content', ''),
-                        embedding=emb,
-                        metadata={"type": atom.get('type'), "topic": topic_id}
-                    )
-                    total_atoms += 1
+                    # 3. Storage & Indexing
+                    for atom_dict in atoms_data:
+                        if not isinstance(atom_dict, dict): continue
+                        
+                        atom_id = str(uuid.uuid4())
+                        profile_id = mission_row.get("domain_profile_id") if mission_row else f"profile_{mission_id[:8]}"
+                        
+                        atom = KnowledgeAtom(
+                            atom_id=atom_id,
+                            topic_id=mission_row.get("topic_id") if mission_row else mission_id,
+                            domain_profile_id=profile_id,
+                            atom_type=atom_dict.get('type', 'claim'),
+                            title=atom_dict.get('content', '')[:50] + "...",
+                            statement=atom_dict.get('content', ''),
+                            summary=atom_dict.get('content', ''),
+                            confidence=atom_dict.get('confidence', 0.7),
+                            importance=0.8 if atom_dict.get('type') == 'contradiction' else 0.5,
+                            lineage=AtomLineage(
+                                mission_id=mission_id,
+                                extraction_mode="atomic_distillation"
+                            ),
+                            metadata={"type": atom_dict.get('type'), "source_id": source_id}
+                        )
+                        
+                        # Store via V3 Adapter
+                        await self.adapter.upsert_atom(atom.to_pg_row())
+                        
+                        # 4. Bind Evidence
+                        await self.adapter.bind_atom_evidence(atom_id, [{
+                            "source_id": source_id,
+                            "evidence_strength": 0.9,
+                            "supports_statement": True
+                        }])
 
-            # 5. Mark sources as distilled
-            await self.memory.mark_sources_condensed([s['id'] for s in sources])
+                        total_atoms += 1
+
+                    # 5. Mark individual source as condensed immediately
+                    await self.adapter.pg.update_row(
+                        "corpus.sources", 
+                        "source_id", 
+                        {"source_id": source_id, "status": "condensed"}
+                    )
+                except Exception as e:
+                    logger.error(f"[Distillery] Smelting failed for {source_id}: {e}")
+                    await self.adapter.pg.update_row("corpus.sources", "source_id", {"source_id": source_id, "status": "error"})
+
+            console.print(f"[bold green][Refinery][/bold green] Batch complete. Smelted technical atoms: [white]{total_atoms}[/white]")
             
-            # 6. Budget Feedback
+            # 6. Higher-Order Refinement
+            if total_atoms > 0:
+                if priority in [CondensationPriority.HIGH, CondensationPriority.CRITICAL]:
+                    await self.resolve_contradictions(mission_id)
+            
+            # 7. Budget Feedback
             await self.budget.record_condensation_result(
                 topic_id=topic_id,
-                raw_bytes_freed=sum(s.get('raw_bytes', 0) for s in sources),
+                raw_bytes_freed=sum(len(str(s).encode()) for s in sources), # Approximated
                 condensed_bytes_added=total_atoms * 500 # Estimate
             )
-            
-            logger.info(f"[Distillery] Topic {topic_id} Distilled: {len(sources)} sources -> {total_atoms} atoms.")
 
     async def _cluster_sources(self, sources: List[Dict]) -> List[ExtractionCluster]:
         """Group sources by concept proximity."""
@@ -93,59 +149,12 @@ class DistillationPipeline:
         clusters = [ExtractionCluster(topic_id=sources[0]['topic_id'], concept="batch_general", sources=sources)]
         return clusters
 
-    async def _mine_differentials(self, cluster: ExtractionCluster) -> List[Dict]:
-        """
-        Extract unique signal and contradictions from a group of similar sources.
-        """
-        from src.utils.console import console
-        combined_text = "\n\n---\n\n".join([f"SOURCE {i}: {s['content'][:4000]}" for i, s in enumerate(cluster.sources)])
-        
-        prompt = f"""
-Compare the following sources and extract a list of unique Knowledge Atoms.
-An atom is a single, precise factual assertion, technical specification, or event.
+    async def resolve_contradictions(self, topic_id: str):
+        """The Courtroom: Actively resolves open contradictions."""
+        # Implementation pending V3 migration...
+        pass
 
-CRITICAL:
-- If multiple sources agree, extract it once.
-- If sources provide different details (names, versions, specs), extract all variants.
-- If sources contradict, mark as contradiction.
-
-Output your response as a single valid JSON object with this structure:
-{{
-  "thought": "your internal reasoning for this batch",
-  "atoms": [
-    {{
-      "type": "claim|evidence|event|procedure|contradiction",
-      "content": "the precise statement",
-      "citations": ["[S0]", "[S1]"],
-      "confidence": 0.9
-    }}
-  ]
-}}
-
-SOURCES:
-{combined_text}
-"""
-        console.print(f"[dim][Distillery] Mining differentials from {len(cluster.sources)} sources...[/dim]")
-        resp = await self.ollama.complete(
-            task=TaskType.EXTRACT_ATOMS, 
-            prompt=prompt,
-            system_prompt="You are a Technical Knowledge Extractor. You MUST output ONLY valid JSON. Start with {{ and end with }}."
-        )
-        
-        try:
-            # Look for the last JSON block if multiple exist
-            json_match = re.search(r'\{.*\}', resp, re.DOTALL)
-            if json_match:
-                # Clean up whitespace and potential markdown artifacts
-                clean_json = json_match.group(0).strip()
-                data = json.loads(clean_json)
-                atoms = data.get('atoms', [])
-                if atoms:
-                    console.print(f"[bold blue][Distillery][/bold blue] Extracted [green]{len(atoms)}[/green] knowledge atoms.")
-                return atoms
-            else:
-                logger.error(f"[Distillery] No JSON found in response: {resp[:200]}...")
-                return []
-        except Exception as e:
-            logger.error(f"[Distillery] JSON parse failed: {e}. Raw: {resp[:200]}")
-            return []
+    async def consolidate_atoms(self, topic_id: str):
+        """The Forgetting Curve: Merges redundant atoms into Golden Atoms."""
+        # Implementation pending V3 migration...
+        pass

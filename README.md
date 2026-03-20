@@ -33,80 +33,68 @@ Overall System Performance (82.0/100):
 *On an i9-12900k 32gb 6000mhz DDR5, a4000 16gb GPU, running PopOS! on 4tb gen 4 silicone power m2.
 ______________________________________________________________
 
-# Sheppard Agency V2
+# Sheppard Agency V3: Universal Domain Authority Foundry
 
 ## Overview
-Sheppard Agency is a **Recursive Knowledge Distillery** and agentic research engine. It is designed to act as a permanent, local-only research institute that "eats" subjects by recursively searching, ingesting, and distilling vast amounts of web data into high-fidelity technical memory.
+Sheppard Agency V3 is a **Universal Domain Authority Foundry**. It is an agentic research institute that recursively "eats" complex technical subjects, distilling vast amounts of distributed web data into high-fidelity, structured Knowledge Atoms. 
 
-Unlike thin search agents, Sheppard V2 uses an **Adaptive Research Metabolism** to saturate its understanding of a domain until it reaches a state of expertise.
+V3 introduces a **Distributed Triple-Engine Architecture** designed for non-blocking, asynchronous research at massive scales.
 
-## Core Architecture
+## Core Architecture (V3 Triad)
+
+Sheppard V3 enforces a strict **Triad Memory Stack** to ensure canonical truth, semantic speed, and operational heat:
+1.  **Postgres (The Truth):** The immutable system of record for all identity, structure, and lineage.
+2.  **Chroma (The Proximity):** Semantic projections used exclusively for discovery and RAG.
+3.  **Redis (The Motion):** Volatile state, distributed locks, and the global scraping queue.
 
 ### 1. The Adaptive Frontier (Intelligence)
-The system no longer follows a fixed search pattern. At the start of every mission, it asks itself: *"What counts as Authority and Evidence for this specific subject?"*
-- **Taxonomic Decomposition:** Generates 20-30 granular technical nodes per mission.
-- **Epistemic Modes:** Dynamically selects between **Grounding** (facts), **Verification** (proof), **Dialectic** (disputes), and **Expansion** (context).
-- **Agentic Growth:** Spawns new research nodes automatically when it detects high-density information pockets.
+- **Taxonomic Decomposition:** Generates deep technical research trees (15-50 nodes) to exhaustively map a subject.
+- **Epistemic Modes:** Dynamically selects between **Grounding**, **Verification**, **Dialectic**, and **Expansion**.
+- **Deep Mine Discovery:** Automatically scans multiple search pages (Page 1-5) via a **Parallel Discovery Race** to find obscure technical ore.
 
-### 2. Local Research Stack (Acquisition)
-Bypasses cloud latencies and rate limits with a fully local acquisition pipeline:
-- **SearXNG:** Private discovery at `http://localhost:8080`.
-- **Firecrawl-Local:** Precision extraction at `http://localhost:3002`.
-- **Playwright Stealth:** High-evasion browsing at `http://localhost:3003`.
-- **Recursive Depth:** Follows links up to 5 levels deep into technical documentation and bibliographies.
+### 2. Distributed "Vampire" Metabolism (Acquisition)
+Bypasses hardware bottlenecks and rate limits with a decentralized scraping swarm:
+- **Global Redis Queue:** Discovered URLs are pushed to `queue:scraping` for distributed consumption.
+- **Parallel Vampires:** 8-12 concurrent local workers on the main machine feast on the queue.
+- **Scout Offloaders:** Passive nodes (Laptops, remote servers) pull from the same queue to "vampire" slow PDFs and static sites on separate IPs.
 
-### 3. The 5-Layer Cognitive Stack (Memory)
-Data is refined through five distinct layers, each with its own **Redis (6370-6374)** and **PostgreSQL** instance:
-- **Ephemeral:** Working memory for the current task.
-- **Contextual:** Session-based conversational memory.
-- **Episodic:** Chronological history of research cycles.
-- **Semantic:** Knowledge Atoms, technical facts, and cited claims.
-- **Abstracted:** The "10% Signal"—Master reports and high-level syntheses.
+### 3. The Smelter (Refinery)
+- **Atomic Distillation:** Sources are smelted sequentially into standalone **Knowledge Atoms** (Facts, Claims, Tradeoffs).
+- **Native JSON Recovery:** Nuclear repair logic for malformed local LLM responses ensures zero-crash extraction.
+- **Lineage First:** Every atom maintains an immutable link back to its source research mission and evidence.
 
-### 4. Differential Distillery (Condensation)
-- **10% Rule:** Designed to ingest 10GB of raw data and distill it into ~1GB of Knowledge Atoms.
-- **Differential Mining:** Compares similar sources to extract unique technical claims rather than just summarizing.
-- **Conflict First:** Explicitly identifies and preserves contradictions between sources.
+## Distributed Topology
+
+| Node | Role | Hardware Profile |
+| :--- | :--- | :--- |
+| **Main Brain** | Orchestrator / DBs | Ryzen 5900X, 64GB, RTX 3090 |
+| **Reasoning Rig** | Heavy Inference / Extraction | Remote Node (.90) - Uncensored 8B Models |
+| **Vampire Scout** | High-Core Scraper / Summarizer | 20-Core Node (.154) - Scraping Swarm |
+| **Lazy Scout** | Stealth / Slow-Lane Offloader | i5 Laptop (.45) - PDF/Static Processing |
 
 ## Installation
 
 ### Requirements
 - Python 3.10+
-- PostgreSQL 14+
+- PostgreSQL 14+ (with `btree_gin` extension)
 - Redis 6.2+
-- Ollama (Local)
-- Firecrawl-Local & SearXNG (Local)
+- Ollama (Distributed or Local)
+- Firecrawl-Local & SearXNG
 
-### Local Services Setup
-Run the unified research stack:
-```bash
-./start_research_stack.sh
-```
-
-### Sheppard Setup
-1. Install dependencies: `pip install -r requirements.txt`
-2. Initialize memory stores: `sudo python3 server_setup.py`
-3. Configure `.env` (Default model: `rnj-1:8b-cloud`)
+### Quick Start
+1.  **Start Services:** `./start_research_stack.sh`
+2.  **Initialize V3 Memory:** `python3 src/memory/setup_v3.py` (Applies `schema_v3.sql`)
+3.  **Launch Brain:** `python3 main.py`
+4.  **Unleash Workers:** `python3 scout_worker.py` (On all auxiliary nodes)
 
 ## Commands
-
-### Accretive Research
-- `/learn <topic> [--ceiling=GB] [--academic]` - Start a recursive background mission to exhaust a subject.
-- `/status` - View the full dashboard, mission quotas, and **Scout Queue**.
-- `/distill <id>` - Manually trigger a distillation pass on ingested data.
-
-### Interaction & Query
-- `/query <text>` - Search the 4-tier knowledge stack with hybrid Lexical/Semantic retrieval.
-- `/r <topic> --deep` - Perform a single-shot agentic research dive (Archivist-style).
-- `/memory search <query>` - Direct search into your persistent life-history.
-
-### System Control
-- `/settings` - Configure models, temperatures, and timeouts.
-- `/clear` - Wipe current conversation context.
-- `/exit` - Graceful shutdown of all background tasks.
+- `/learn <topic>` - Trigger a Deep Accretive Mission.
+- `/status` - View the smelting backlog and vampire health.
+- `/nudge <instruction>` - Steer the frontier in real-time.
+- `/report <id>` - Generate a Tier 4 Master Brief from extracted atoms.
 
 ## Design Principle
-> *Coverage before compression, diversity before certainty, contradiction before consensus, and lineage before deletion.*
+> *Postgres is Truth. Chroma is a projection. Redis is motion. Lineage is permanent.*
 
 ## Licensing
-Core functionality is licensed under the Mozilla Public License 2.0. Enterprise features require a commercial license. Contact benevolentjoker@gmail.com for inquiries.
+Core functionality is licensed under the Mozilla Public License 2.0.

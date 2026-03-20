@@ -1,183 +1,68 @@
-# Sheppard V2 — Architecture & Implementation Roadmap
+# Sheppard V3 — Architectural Blueprint
 
-## What's Built (Scaffolded)
+Sheppard V3 is a **Universal Domain Authority Foundry**. It is designed to transform raw, unstructured web data into verified technical authority records through a strict multi-layer processing pipeline.
 
-```
-sheppard_v2/
-├── main.py                        ✅ CLI entry point + command handler
-├── core/
-│   └── system.py                  ✅ System orchestrator (ties everything together)
-├── acquisition/
-│   ├── budget.py                  ✅ Pressure-valve budget monitor
-│   └── crawler.py                 ✅ Firecrawl-local async wrapper
-├── condensation/
-│   └── pipeline.py                ✅ 4-phase on-the-fly condensation
-├── reasoning/
-│   └── retriever.py               ✅ Multi-strategy hybrid retriever
-├── llm/
-│   └── model_router.py            ✅ Task → model mapping
-└── memory/
-    └── schema.sql                 ✅ Full Postgres schema (concepts, graph, citations)
-```
+## 1. The V3 Triad (Memory Hierarchy)
 
-## What Needs to Be Built Next (Priority Order)
+V3 abandons monolithic memory in favor of a **Responsibility-Driven Triad**. Every piece of data has a canonical owner and a projected purpose.
 
-### 1. `memory/manager.py`  ← BUILD THIS FIRST
-The MemoryManager is the most-depended-on component.
-Everything calls into it.
+### **Layer 1: Postgres (Canonical Truth)**
+- **Schema Namespaces:** `config`, `mission`, `corpus`, `knowledge`, `authority`, `application`.
+- **Role:** Owns identity (UUIDs), structural relationships (Foreign Keys), temporal lineage (`created_at`), and the "Gold Record."
+- **Constraint:** If it's not in Postgres, it doesn't exist.
 
-Methods needed:
-- `initialize()` — connect ChromaDB + Postgres
-- `create_topic(name, description)` → topic_id
-- `update_topic_status(topic_id, status)`
-- `store_source(topic_id, url, title, content, raw_bytes, checksum, domain, source_type, raw_file_path)`
-- `get_uncondensed_sources(topic_id, limit)` → list of source dicts
-- `mark_sources_condensed(source_ids)`
-- `store_chunk(topic_id, source_id, source_url, chunk_index, summary, embedding, metadata)` → chunk_id
-- `store_synthesis(topic_id, content, embedding, source_chunk_ids)`
-- `upsert_concept(topic_id, name, concept_type, definition, importance)` → concept_id
-- `upsert_relationship(topic_id, source_concept_name, target_concept_name, relationship, weight)`
-- `find_concepts_by_text(query_text, topic_id, limit)` → list of concept dicts
-- `traverse_concept_graph(concept_id, max_depth)` → list (uses recursive CTE from schema.sql)
-- `search_citations(query_text, topic_id, limit)` → list
-- `get_project_concept_applications(project_name, query_text, limit)` → list
-- `create_project(name, local_path, repo_url)` → project_id
-- `index_project_files(project_id, project_name, local_path)` — walks dir, chunks, embeds
-- `log_condensation(report)`
-- `chroma_query(collection, query_text, n_results, where)` → ChromaDB result dict
-- `cleanup()`
+### **Layer 2: Chroma (Semantic Discovery)**
+- **Collections:** `corpus_chunks`, `knowledge_atoms`, `authority_records`.
+- **Role:** Purely for high-speed semantic proximity. Used for RAG retrieval and deduplication.
+- **Invariant:** Chroma is a **Projection** of Postgres. It can be wiped and reconstructed from Postgres rows at any time.
 
-### 2. `llm/client.py`
-Async Ollama wrapper.
-
-Methods needed:
-- `initialize()` — verify Ollama running + models available
-- `embed(text)` → List[float]
-- `complete(model, prompt, max_tokens)` → str
-- `chat_stream(model, messages, system_prompt)` → AsyncGenerator[str]
-
-Note: model name is passed in from model_router, client is model-agnostic.
-
-### 3. `core/commands.py` (optional enhancement)
-Richer command parsing, history, autocompletion.
-Can use `prompt_toolkit` for this.
-
-### 4. `acquisition/scheduler.py`
-Job queue for multiple concurrent topic crawls.
-Useful once you're running 3-4 topics simultaneously.
+### **Layer 3: Redis (Operational Heat)**
+- **Role:** Owns volatile state, the **Global Scraping Queue**, distributed locks, and hot-caching of active research nodes.
+- **Distributed:** Nodes (.45, .90, .154) all communicate via the Main PC's Redis instances.
 
 ---
 
-## Key Design Decisions Already Made
+## 2. Distributed "Vampire" Metabolism
 
-| Decision | Choice | Reason |
-|---|---|---|
-| Storage budget | Condense on-the-fly | Never stop crawling |
-| Condensation trigger | 3 thresholds (70/85/95%) | Graduated response |
-| Graph database | Postgres recursive CTEs | No Neo4j dependency |
-| Vector store | ChromaDB | Already in Sheppard |
-| Hot cache | Redis (existing) | Sheppard already uses it |
-| Academic filter | Ivory Tower whitelist | From Archivist |
-| Project context | Separate ChromaDB collection per project | Clean isolation |
+Acquisition is decoupled from orchestration to allow for massive parallel ingestion.
 
----
-
-## Condensation Compression Targets
-
-| Phase | What it does | Typical reduction |
-|---|---|---|
-| Phase 1: Dedup | Removes near-identical content | 30-40% |
-| Phase 2: Chunk summarize | 2000-word chunks → 200-word summaries | 85-90% of remainder |
-| Phase 3: Synthesis | Cross-source integration | Minor additional reduction |
-| Phase 4: Concept extract | Structured knowledge to Postgres | Supplementary |
-
-Combined target: **~10% of original raw size** stored as condensed knowledge.
+1.  **The Producer (Frontier):**
+    - Runs on the Main PC.
+    - Designs the research tree (15-50 nodes).
+    - Performs **Discovery Races** (hitting all SearXNG nodes in parallel).
+    - Pushes unique URLs to Redis `queue:scraping`.
+2.  **The Consumers (Vampire Swarm):**
+    - Workers run on any available hardware.
+    - Each node runs its own local **Firecrawl** instance to bypass IP rate limits.
+    - Workers "vampire" URLs from the Redis queue and push finished Markdown back to the Main PC's Postgres.
 
 ---
 
-## Model Assignment
+## 3. The Sequential Smelter (Refinery)
 
-| Task | Default Model | Env Var |
-|---|---|---|
-| Embedding | mxbai-embed-large | OLLAMA_EMBED_MODEL |
-| Chunk summarization | llama3.2:1b | OLLAMA_SUMMARIZE_MODEL |
-| Synthesis + concept extraction | llama3.1:8b | OLLAMA_SYNTHESIS_MODEL |
-| Chat (main) | mannix/dolphin-2.9-llama3-8b | OLLAMA_MODEL |
+Distillation is performed via a sequential-atomic smelting process to ensure the highest possible extraction quality from 8B models.
 
----
-
-## Retrieval Strategy Weights
-
-When retrieving for a reasoning conversation, results are scored as:
-
-```
-project_context × 1.1   ← highest (most actionable)
-semantic_search × 1.0
-citation_lookup × 0.9
-concept_graph   × 0.85  ← weighted lower, useful for discovery
-```
+- **Atomic Extraction:** Documents are processed one-by-one to minimize context window noise.
+- **Validated Smelting:** Every extracted fact is passed through the `JSONValidator` for schema compliance and iterative repair.
+- **Lineage Binding:** Every **Knowledge Atom** is permanently linked to its `source_id` and `mission_id` in the relational tables.
 
 ---
 
-## Environment Variables
+## 4. Multi-Model Hardware Topology
 
-```env
-# Ollama
-OLLAMA_MODEL=mannix/dolphin-2.9-llama3-8b:latest
-OLLAMA_EMBED_MODEL=mxbai-embed-large
-OLLAMA_SUMMARIZE_MODEL=llama3.2:1b
-OLLAMA_SYNTHESIS_MODEL=llama3.1:8b
-OLLAMA_API_BASE=http://localhost:11434
+Tasks are routed based on hardware suitability:
 
-# Firecrawl-local
-FIRECRAWL_LOCAL_URL=http://localhost:3002
-FIRECRAWL_API_KEY=local
-
-# Postgres
-POSTGRES_DSN=postgresql://user:password@localhost:5432/sheppard_v2
-
-# ChromaDB
-CHROMADB_PERSIST_DIRECTORY=./data/chromadb
-CHROMADB_DISTANCE_FUNC=cosine
-
-# Redis
-REDIS_HOST=localhost
-REDIS_PORT=6379
-
-# Budget
-BUDGET_CEILING_GB=5
-BUDGET_THRESHOLD_LOW=0.70
-BUDGET_THRESHOLD_HIGH=0.85
-BUDGET_THRESHOLD_CRITICAL=0.95
-BUDGET_POLL_SECS=10
-
-# Storage
-RAW_DATA_DIR=./data/raw
-DATA_DIR=./data
-LOG_DIR=./logs
-```
+| Task | Model | Hardware |
+| :--- | :--- | :--- |
+| **Reasoning / Chat** | `llama3.1-8b-lexi` | Remote Brain (.90) - Uncensored |
+| **Smelting (Extraction)** | `llama3.1-8b-lexi` | Remote Brain (.90) - High Precision |
+| **Summarization** | `llama3.2:latest` | Scouter Node (.154) - Parallel Muscle |
+| **Embeddings** | `mxbai-embed-large` | Main PC - Local Vector Math |
 
 ---
 
-## Project Indexing (Future DB Connection)
+## 5. Development Philosophy
 
-When you're ready to connect SOLLOL, FlockParser, etc.:
-
-```
-/project index SOLLOL /path/to/sollol
-/project index FlockParser /path/to/flockparser
-```
-
-This will:
-1. Walk the directory tree for .py, .md, .txt, .json files
-2. Chunk each file by function/class boundaries
-3. Embed chunks into `project_sollol` ChromaDB collection
-4. Create a Postgres project record for cross-referencing
-
-Then in chat:
-```
-How does consistent hashing apply to SOLLOL's routing? --project=SOLLOL
-```
-
-Sheppard will retrieve both generic knowledge about consistent hashing
-AND SOLLOL-specific code context, synthesizing across both.
+- **Conflict over Consensus:** Preserve contradictory technical claims as first-class objects rather than averaging them out.
+- **Depth over Breadth:** Dig up to 5 pages deep into search results to find technical "Long Tail" content.
+- **Auditability:** Every claim made by the LLM in chat must be back-traceable to a Knowledge Atom, which must be back-traceable to a Source PDF/Doc.

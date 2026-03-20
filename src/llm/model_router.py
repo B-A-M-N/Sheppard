@@ -22,24 +22,37 @@ class TaskType(Enum):
 @dataclass
 class ModelConfig:
     model_name: str
+    api_host: str
     temperature: float = 0.4
 
 class ModelRouter:
     def __init__(self):
-        # Default mapping using your local models
         from src.config.settings import settings
-        chat_model = settings.OLLAMA_MODEL
+        
+        # Define the physical locations of your hardware
+        remote_host = "http://10.9.66.90:11434"
+        local_host = "http://127.0.0.1:11434"
+        lazy_scout_host = "http://10.9.66.45:11434"
+        vampire_scout_host = "http://10.9.66.154:11434"
+        
+        # Explicit Task-to-Model Taxonomy
+        chat_model = "mannix/llama3.1-8b-lexi:latest"  # The new uncensored reasoner
+        synth_model = "mannix/llama3.1-8b-lexi:latest" # VRAM accelerated extraction
+        summarize_model = "llama3.2:latest"            # Fast summarization
         embed_model = settings.OLLAMA_EMBED_MODEL
         
         self._map: Dict[TaskType, ModelConfig] = {
-            TaskType.CHAT: ModelConfig(chat_model, 0.7),
-            TaskType.EMBEDDING: ModelConfig(embed_model, 0),
-            TaskType.SUMMARIZATION: ModelConfig(chat_model, 0.3),
-            TaskType.SYNTHESIS: ModelConfig(chat_model, 0.4),
-            TaskType.CONTRADICTION_DETECTION: ModelConfig(chat_model, 0.1),
-            TaskType.EXTRACT_ATOMS: ModelConfig(chat_model, 0.2),
-            TaskType.DECOMPOSITION: ModelConfig(chat_model, 0.2),
-            TaskType.QUERY_EXPANSION: ModelConfig(chat_model, 0.5),
+            # Heavy reasoning goes to the powerful remote brain (.90)
+            TaskType.CHAT: ModelConfig(chat_model, remote_host, 0.7),
+            TaskType.SYNTHESIS: ModelConfig(synth_model, remote_host, 0.4),
+            TaskType.CONTRADICTION_DETECTION: ModelConfig(synth_model, remote_host, 0.1),
+            TaskType.EXTRACT_ATOMS: ModelConfig(synth_model, remote_host, 0.1),
+            TaskType.DECOMPOSITION: ModelConfig(chat_model, remote_host, 0.2),
+            TaskType.QUERY_EXPANSION: ModelConfig(chat_model, remote_host, 0.5),
+            
+            # Fast, distributed tasks
+            TaskType.SUMMARIZATION: ModelConfig(summarize_model, vampire_scout_host, 0.3),
+            TaskType.EMBEDDING: ModelConfig(embed_model, local_host, 0.0),
         }
 
     def get(self, task: TaskType) -> ModelConfig:

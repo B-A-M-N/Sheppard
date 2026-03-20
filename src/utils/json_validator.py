@@ -262,106 +262,79 @@ class JSONValidator:
         
         return fallback
 
-# Update extract_key_information function to use the correct OllamaClient.chat method
-async def extract_key_information(
+# Technical Atom Extraction Logic
+async def extract_technical_atoms(
     llm_client,
     text: str,
-    topic: str,
-    schema: Dict[str, Any] = None
-) -> Dict[str, Any]:
+    topic: str
+) -> List[Dict[str, Any]]:
     """
-    Extract and validate key information from content.
-    
-    Args:
-        llm_client: Ollama client instance
-        text: Content to analyze
-        topic: Topic of research
-        schema: Expected structure (default: key findings schema)
-        
-    Returns:
-        Dict[str, Any]: Validated key information
+    Extract technical facts (atoms) from content using robust validation.
+    Returns a list of dicts: {"type": "...", "content": "...", "confidence": 0.9}
     """
-    try:
-        # Use default schema if none provided
-        if schema is None:
-            schema = {
-                "type": "object",
-                "required": ["summary", "key_takeaways"],
-                "properties": {
-                    "summary": {
-                        "type": "string",
-                        "minLength": 10
-                    },
-                    "key_takeaways": {
-                        "type": "array",
-                        "items": {
-                            "type": "string"
-                        },
-                        "minItems": 1
-                    },
-                    "detailed_analysis": {
-                        "type": "string"
-                    },
-                    "limitations": {
-                        "type": "string"
-                    },
-                    "actionable_insights": {
-                        "type": "string"
+    schema = {
+        "type": "object",
+        "required": ["atoms"],
+        "properties": {
+            "atoms": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["type", "content", "confidence"],
+                    "properties": {
+                        "type": {"type": "string", "enum": ["claim", "evidence", "event", "procedure", "contradiction"]},
+                        "content": {"type": "string", "minLength": 10},
+                        "confidence": {"type": "number"}
                     }
-                }
+                },
+                "minItems": 1
             }
-        
-        # Build extraction prompt
-        prompt = f"""
-Analyze this content about "{topic}" and extract the most important information.
-Output a valid JSON object with these exact keys:
-- "summary": A brief summary of the content
-- "key_takeaways": An array of key points (1-5 items)
-- "detailed_analysis": A more thorough analysis
-- "limitations": Any limitations or cautions
-- "actionable_insights": Practical advice based on the content
-The response MUST be valid JSON that can be parsed with json.loads().
-Format the response as:
+        }
+    }
+
+    prompt = f"""
+Analyze this technical document about "{topic}".
+Extract a list of Knowledge Atoms (standalone technical facts, claims, or procedures).
+
+Output ONLY a valid JSON object matching this schema:
 {{
-  "summary": "...",
-  "key_takeaways": ["point 1", "point 2"],
-  "detailed_analysis": "...",
-  "limitations": "...",
-  "actionable_insights": "..."
+  "atoms": [
+    {{
+      "type": "claim|evidence|event|procedure|contradiction",
+      "content": "the precise technical statement",
+      "confidence": 0.9
+    }}
+  ]
 }}
-Content to analyze:
-{text[:3000]}
+
+DOCUMENT CONTENT:
+{text[:4000]}
 """
-        
-        # Use the client's API properly - handle the async generator
+    try:
         messages = [{"role": "user", "content": prompt}]
         response_content = ""
         
-        # Process the async generator correctly using the correct parameters
         async for chunk in llm_client.chat(
             messages=messages,
             stream=True,
-            temperature=0.3
+            temperature=0.2
         ):
             if hasattr(chunk, 'content') and chunk.content:
                 response_content += chunk.content
             elif isinstance(chunk, dict) and 'content' in chunk:
                 response_content += chunk['content']
         
-        # Validate and fix if needed
-        validator = JSONValidator()
-        return await validator.validate_and_fix_json(
+        validator = JSONValidator(max_attempts=2)
+        validated_data = await validator.validate_and_fix_json(
             llm_client,
             response_content,
             schema
         )
+        
+        atoms = validated_data.get('atoms', [])
+        # Filter out fallbacks
+        return [a for a in atoms if "Fallback" not in a.get("content", "")]
+        
     except Exception as e:
-        logger.error(f"Key information extraction failed: {str(e)}")
-        # Return a minimal valid fallback
-        return {
-            "summary": f"Information about {topic}",
-            "key_takeaways": [f"Content related to {topic}"],
-            "detailed_analysis": "",
-            "limitations": "",
-            "actionable_insights": ""
-        }
+        logger.error(f"Technical atom extraction failed: {str(e)}")
+        return []
