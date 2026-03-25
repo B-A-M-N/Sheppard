@@ -47,37 +47,37 @@ class DatabaseConfig:
 
     # PostgreSQL database URLs
     DB_URLS = {
-        "episodic_memory": "postgresql://sheppard:1234@localhost:5432/episodic_memory",
-        "semantic_memory": "postgresql://sheppard:1234@localhost:5432/semantic_memory",
-        "contextual_memory": "postgresql://sheppard:1234@localhost:5432/contextual_memory",
-        "general_memory": "postgresql://sheppard:1234@localhost:5432/general_memory",
-        "abstracted_memory": "postgresql://sheppard:1234@localhost:5432/abstracted_memory"
+        "episodic_memory": "postgresql://sheppard:1234@10.9.66.198:5432/episodic_memory",
+        "semantic_memory": "postgresql://sheppard:1234@10.9.66.198:5432/semantic_memory",
+        "contextual_memory": "postgresql://sheppard:1234@10.9.66.198:5432/contextual_memory",
+        "general_memory": "postgresql://sheppard:1234@10.9.66.198:5432/general_memory",
+        "abstracted_memory": "postgresql://sheppard:1234@10.9.66.198:5432/abstracted_memory"
     }
 
     # Redis configuration for different memory layers
     REDIS_CONFIG = {
         "ephemeral": {
-            "host": "localhost",
+            "host": "10.9.66.198",
             "port": 6370,
             "db": 0
         },
         "contextual": {
-            "host": "localhost", 
+            "host": "10.9.66.198", 
             "port": 6371,
             "db": 0
         },
         "episodic": {
-            "host": "localhost",
+            "host": "10.9.66.198",
             "port": 6372,
             "db": 0
         },
         "semantic": {
-            "host": "localhost",
+            "host": "10.9.66.198",
             "port": 6373,
             "db": 0
         },
         "abstracted": {
-            "host": "localhost",
+            "host": "10.9.66.198",
             "port": 6374,
             "db": 0
         }
