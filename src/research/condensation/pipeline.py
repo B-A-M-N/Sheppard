@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ExtractionCluster:
-    topic_id: str
+    mission_id: str
     concept: str
     sources: List[Dict] = field(default_factory=list)
     atoms: List[Dict] = field(default_factory=list)
@@ -42,7 +42,6 @@ class DistillationPipeline:
 
     async def run(self, mission_id: str, priority: CondensationPriority):
         """Metabolic Distillation pass using V3 Triad (Sequential-Atomic)."""
-        topic_id = mission_id # Bridge for budget hooks
         async with self._semaphore:
             # 1. Fetch raw technical ore from V3 Corpus
             # We process a small batch sequentially to ensure high quality with 8B models
@@ -136,7 +135,7 @@ class DistillationPipeline:
             
             # 7. Budget Feedback
             await self.budget.record_condensation_result(
-                topic_id=topic_id,
+                mission_id=mission_id,
                 raw_bytes_freed=sum(len(str(s).encode()) for s in sources), # Approximated
                 condensed_bytes_added=total_atoms * 500 # Estimate
             )
@@ -144,15 +143,15 @@ class DistillationPipeline:
     async def _cluster_sources(self, sources: List[Dict]) -> List[ExtractionCluster]:
         """Group sources by concept proximity."""
         # Simple clustering for the scaffold
-        clusters = [ExtractionCluster(topic_id=sources[0]['topic_id'], concept="batch_general", sources=sources)]
+        clusters = [ExtractionCluster(mission_id=sources[0].get('mission_id', sources[0].get('topic_id', '')), concept="batch_general", sources=sources)]
         return clusters
 
-    async def resolve_contradictions(self, topic_id: str):
+    async def resolve_contradictions(self, mission_id: str):
         """The Courtroom: Actively resolves open contradictions."""
         # Implementation pending V3 migration...
         pass
 
-    async def consolidate_atoms(self, topic_id: str):
+    async def consolidate_atoms(self, mission_id: str):
         """The Forgetting Curve: Merges redundant atoms into Golden Atoms."""
         # Implementation pending V3 migration...
         pass

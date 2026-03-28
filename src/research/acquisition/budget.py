@@ -31,7 +31,7 @@ class CondensationPriority(str, Enum):
 
 @dataclass
 class TopicBudget:
-    topic_id: str
+    mission_id: str
     topic_name: str
     ceiling_bytes: int          # user-configured max (default 5GB)
     raw_bytes: int = 0
@@ -73,7 +73,7 @@ class BudgetMonitor:
     """
     Central storage budget manager.
     
-    The condensation_callback is called with (topic_id, priority) when a
+    The condensation_callback is called with (mission_id, priority) when a
     threshold is crossed. It's the pipeline's responsibility to actually
     run the condensation — the monitor just fires the signal.
     
@@ -93,40 +93,40 @@ class BudgetMonitor:
 
     def register_topic(
         self,
-        topic_id: str,
+        mission_id: str,
         topic_name: str,
         ceiling_gb: Optional[float] = None,
     ) -> TopicBudget:
         """Register a topic for budget tracking."""
         ceiling_bytes = int((ceiling_gb or self.config.default_ceiling_gb) * 1024 ** 3)
         budget = TopicBudget(
-            topic_id=topic_id,
+            mission_id=mission_id,
             topic_name=topic_name,
             ceiling_bytes=ceiling_bytes,
         )
-        self._budgets[topic_id] = budget
+        self._budgets[mission_id] = budget
         logger.info(
             f"[Budget] Registered topic '{topic_name}' with {ceiling_gb or self.config.default_ceiling_gb}GB ceiling"
         )
         return budget
 
-    async def record_bytes(self, topic_id: str, raw_bytes: int) -> None:
+    async def record_bytes(self, mission_id: str, raw_bytes: int) -> None:
         """
         Called by the crawler each time a page is ingested.
         Updates raw byte count and checks thresholds immediately.
         """
         async with self._lock:
-            if topic_id not in self._budgets:
-                logger.warning(f"[Budget] Unknown topic_id: {topic_id}")
+            if mission_id not in self._budgets:
+                logger.warning(f"[Budget] Unknown mission_id: {mission_id}")
                 return
-            budget = self._budgets[topic_id]
+            budget = self._budgets[mission_id]
             budget.raw_bytes += raw_bytes
 
-        await self._check_thresholds(topic_id)
+        await self._check_thresholds(mission_id)
 
     async def record_condensation_result(
         self,
-        topic_id: str,
+        mission_id: str,
         raw_bytes_freed: int,
         condensed_bytes_added: int,
     ) -> None:
@@ -135,9 +135,9 @@ class BudgetMonitor:
         Frees raw budget headroom so crawling can continue.
         """
         async with self._lock:
-            if topic_id not in self._budgets:
+            if mission_id not in self._budgets:
                 return
-            budget = self._budgets[topic_id]
+            budget = self._budgets[mission_id]
             budget.raw_bytes = max(0, budget.raw_bytes - raw_bytes_freed)
             budget.condensed_bytes += condensed_bytes_added
             budget.condensation_running = False
@@ -149,31 +149,31 @@ class BudgetMonitor:
                 f"Effective usage: {budget.usage_ratio:.1%}"
             )
 
-    def get_status(self, topic_id: str) -> Optional[TopicBudget]:
-        return self._budgets.get(topic_id)
+    def get_status(self, mission_id: str) -> Optional[TopicBudget]:
+        return self._budgets.get(mission_id)
 
     def all_statuses(self) -> Dict[str, TopicBudget]:
         return dict(self._budgets)
 
-    def can_crawl(self, topic_id: str) -> bool:
+    def can_crawl(self, mission_id: str) -> bool:
         """
         Returns True unless at 95%+ with condensation already running
         (temporary backpressure to avoid runaway storage).
         """
-        budget = self._budgets.get(topic_id)
+        budget = self._budgets.get(mission_id)
         if not budget:
             return True
         if budget.is_near_ceiling and budget.condensation_running:
             return False
         return True
 
-    async def _check_thresholds(self, topic_id: str) -> None:
+    async def _check_thresholds(self, mission_id: str) -> None:
         """
         Evaluate current usage ratio against thresholds.
         Only fires each threshold once per condensation cycle.
         """
         async with self._lock:
-            budget = self._budgets[topic_id]
+            budget = self._budgets[mission_id]
 
             if budget.condensation_running:
                 return  # Already condensing, wait for it to finish
@@ -204,7 +204,7 @@ class BudgetMonitor:
         if self.condensation_callback:
             # Fire and forget — condensation runs alongside crawling
             asyncio.create_task(
-                self.condensation_callback(topic_id, priority)
+                self.condensation_callback(mission_id, priority)
             )
 
     async def run_monitor_loop(self) -> None:
@@ -216,8 +216,8 @@ class BudgetMonitor:
         logger.info("[Budget] Monitor loop started")
         while self._running:
             await asyncio.sleep(self.config.poll_interval_secs)
-            for topic_id in list(self._budgets.keys()):
-                await self._check_thresholds(topic_id)
+            for mission_id in list(self._budgets.keys()):
+                await self._check_thresholds(mission_id)
 
     def stop(self) -> None:
         self._running = False
