@@ -81,6 +81,13 @@ async def test_v11_exhausted_modes_persistence():
 
     mission_id = "test-mission-v11"
 
+    # Cleanup any previous run data (idempotent test start)
+    try:
+        await adapter.pg.delete_where("mission.mission_nodes", {"mission_id": mission_id})
+        await adapter.pg.delete_where("mission.research_missions", {"mission_id": mission_id})
+    except Exception:
+        pass  # Ignore if tables don't exist or rows absent
+
     # Insert mission row
     mission_row = {
         "mission_id": mission_id,
