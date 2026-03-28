@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 from typing import Any, Literal, Protocol, Sequence, Union
 import logging
 import json
+import hashlib
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -395,10 +397,12 @@ class RedisCacheStore(Protocol):
     async def invalidate_hot_object(self, kind: str, object_id: str) -> None: ...
 
 class ChromaSemanticStore(Protocol):
-    async def index_document(self, collection: str, object_id: str, document: str, metadata: JsonDict) -> None: ...
-    async def index_documents(self, collection: str, rows: Sequence[tuple[str, str, JsonDict]]) -> None: ...
+    async def index_document(self, collection: str, object_id: str, document: str, metadata: JsonDict, embedding: list[float] | None = None) -> None: ...
+    async def index_documents(self, collection: str, rows: Sequence[tuple[str, str, JsonDict]], embeddings: list[list[float]] | None = None) -> None: ...
     async def search(self, collection: str, query_text: str, where: JsonDict | None = None, limit: int = 20) -> list[SearchHit]: ...
+    async def query(self, collection: str, query_text: str | None = None, query_embeddings: list[float] | None = None, where: JsonDict | None = None, limit: int = 20) -> Dict: ...
     async def delete_document(self, collection: str, object_id: str) -> None: ...
+    async def clear_collection(self, name: str) -> None: ...
 
 # =========================================================
 # Concrete adapter (Async)
@@ -597,6 +601,64 @@ class SheppardStorageAdapter(StorageAdapter):
         rows = [dict(row, atom_id=atom_id) for row in evidence_rows]
         await self.pg.bulk_upsert("knowledge.atom_evidence", ["atom_id", "source_id", "chunk_id"], rows)
 
+    async def store_atom_with_evidence(self, atom: JsonDict, evidence_rows: Sequence[JsonDict]) -> None:
+        """
+        Atomically store an atom and its evidence in a single transaction.
+        Guarantees: either both atom and evidence are persisted, or neither.
+        Indexing and caching are performed after transaction commit.
+        """
+        if not evidence_rows:
+            raise ValueError("Atom must have at least one evidence row to satisfy V3 integrity invariant")
+
+        atom_id = atom["atom_id"]
+        rows_with_atom = [dict(row, atom_id=atom_id) for row in evidence_rows]
+
+        async with self.pg.pool.acquire() as conn:
+            async with conn.transaction():
+                # --- Upsert atom ---
+                columns = list(atom.keys())
+                values = self.pg._prepare_values(atom)
+                col_str = ", ".join(columns)
+                val_str = ", ".join(f"${i+1}" for i in range(len(values)))
+                key_fields = ["atom_id"]
+                update_parts = [f"{col} = EXCLUDED.{col}" for col in columns if col not in key_fields]
+                update_str = ", ".join(update_parts)
+                query = f"INSERT INTO knowledge.knowledge_atoms ({col_str}) VALUES ({val_str})"
+                key_str = ", ".join(key_fields)
+                if update_parts:
+                    query += f" ON CONFLICT ({key_str}) DO UPDATE SET {update_str}"
+                else:
+                    query += f" ON CONFLICT ({key_str}) DO NOTHING"
+                await conn.execute(query, *values)
+
+                # --- Bulk upsert evidence ---
+                ev_columns = list(rows_with_atom[0].keys())
+                ev_col_str = ", ".join(ev_columns)
+                # Build multi-row values
+                placeholders = []
+                ev_flat_values = []
+                for row in rows_with_atom:
+                    prepared = self.pg._prepare_values(row)
+                    start_idx = len(ev_flat_values) + 1
+                    row_ph = ", ".join(f"${i}" for i in range(start_idx, start_idx + len(prepared)))
+                    placeholders.append(f"({row_ph})")
+                    ev_flat_values.extend(prepared)
+
+                ev_query = f"INSERT INTO knowledge.atom_evidence ({ev_col_str}) VALUES " + ", ".join(placeholders)
+                ev_key_fields = ["atom_id", "source_id", "chunk_id"]
+                ev_update_parts = [f"{col} = EXCLUDED.{col}" for col in ev_columns if col not in ev_key_fields]
+                if ev_update_parts:
+                    ev_update_str = ", ".join(ev_update_parts)
+                    ev_query += f" ON CONFLICT ({', '.join(ev_key_fields)}) DO UPDATE SET {ev_update_str}"
+                else:
+                    ev_query += f" ON CONFLICT ({', '.join(ev_key_fields)}) DO NOTHING"
+
+                await conn.execute(ev_query, *ev_flat_values)
+
+        # Index and cache after successful commit
+        await self.index_atom(atom)
+        await self.redis_cache.cache_hot_object("atom", atom_id, atom, ttl_s=3600)
+
     async def replace_atom_relationships(self, atom_id: str, relationships: Sequence[JsonDict]) -> None:
         await self.pg.delete_where("knowledge.atom_relationships", {"atom_id": atom_id})
         if relationships:
@@ -704,9 +766,8 @@ class SheppardStorageAdapter(StorageAdapter):
 
     async def ingest_source(self, source: JsonDict, text_content: str) -> str:
         """Atomic ingestion of a source across the V3 triad."""
-        import uuid
-        import hashlib
-        
+        # uuid and hashlib imported at module level
+
         # 1. Create Text Reference (The Blob)
         blob_id = str(uuid.uuid4())
         await self.pg.insert_row("corpus.text_refs", {
@@ -720,7 +781,7 @@ class SheppardStorageAdapter(StorageAdapter):
         source["source_id"] = source_id
         source["content_hash"] = hashlib.md5(text_content.encode()).hexdigest()
         source["status"] = "fetched"
-        
+
         # Map fields to match V3 schema in a single complete row
         pg_row = {
             "source_id": source_id,
@@ -737,12 +798,38 @@ class SheppardStorageAdapter(StorageAdapter):
             "status": "fetched",
             "metadata_json": json.dumps(source.get("metadata", {}))
         }
-        
+
         await self.pg.upsert_row("corpus.sources", ["mission_id", "normalized_url_hash"], pg_row)
-        
-        # 3. Hot Cache
+
+        # 3. Create Chunks (V3 Lineage Bridge)
+        # Import chunking function lazily to avoid circular imports
+        from src.research.archivist.chunker import chunk_text
+        chunk_strings = chunk_text(text_content)
+
+        chunk_rows = []
+        for idx, chunk_text_str in enumerate(chunk_strings):
+            chunk_id = str(uuid.uuid4())
+            chunk_hash = hashlib.md5(chunk_text_str.encode()).hexdigest()
+            chunk_rows.append({
+                "chunk_id": chunk_id,
+                "source_id": source_id,
+                "mission_id": source["mission_id"],
+                "topic_id": source["topic_id"],
+                "chunk_index": idx,
+                "chunk_hash": chunk_hash,
+                "inline_text": chunk_text_str,
+                "text_ref": blob_id,
+                "metadata_json": json.dumps({
+                    "token_count": len(chunk_text_str.split()),  # approximate
+                    "chunk_size": len(chunk_text_str)
+                })
+            })
+
+        await self.create_chunks(chunk_rows)
+
+        # 4. Hot Cache
         await self.redis_cache.cache_hot_object("source", source_id, pg_row, ttl_s=3600)
-        
+
         return source_id
 
     # =====================================================

@@ -1,11 +1,27 @@
 import json
 import concurrent.futures
-from .index import get_collection
 from .llm import generate, extract_json
 from fastembed import TextEmbedding
+from src.memory.storage_adapter import ChromaSemanticStore
 
 # Initialize Reranker (Lazy Load)
 _RERANKER_INSTANCE = None
+
+# Chroma store injection
+_chroma_store: ChromaSemanticStore | None = None
+
+
+def init(chroma_store: ChromaSemanticStore) -> None:
+    """Initialize with the shared ChromaSemanticStore."""
+    global _chroma_store
+    _chroma_store = chroma_store
+
+
+def _get_store() -> ChromaSemanticStore:
+    if _chroma_store is None:
+        raise RuntimeError("Archivist retriever not initialized. Call init() first.")
+    return _chroma_store
+
 
 def get_reranker():
     global _RERANKER_INSTANCE
@@ -22,11 +38,12 @@ def get_reranker():
                 return None
     return _RERANKER_INSTANCE
 
-def search(query_embedding: list[float], top_k: int = 5, collection_name="archivist_research"):
-    collection = get_collection(collection_name)
-    results = collection.query(query_embeddings=[query_embedding], n_results=top_k)
+
+async def search(query_embedding: list[float], top_k: int = 5, collection_name="archivist_research") -> list[dict]:
+    store = _get_store()
+    results = await store.query(collection=collection_name, query_embeddings=query_embedding, limit=top_k)
     hits = []
-    if results['documents']:
+    if results.get('documents') and results['documents'][0]:
         for i in range(len(results['documents'][0])):
             hits.append({
                 "text": results['documents'][0][i],

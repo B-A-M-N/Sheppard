@@ -21,27 +21,36 @@ class ChromaSemanticStoreImpl:
             )
         return self._collections[name]
 
-    async def index_document(self, collection: str, object_id: str, document: str, metadata: JsonDict) -> None:
+    async def index_document(self, collection: str, object_id: str, document: str, metadata: JsonDict, embedding: list[float] | None = None) -> None:
         coll = await self._get_collection(collection)
-        await asyncio.to_thread(
-            coll.upsert,
-            ids=[object_id],
-            documents=[document],
-            metadatas=[metadata]
-        )
+        if embedding is not None:
+            await asyncio.to_thread(
+                coll.upsert,
+                ids=[object_id],
+                documents=[document],
+                metadatas=[metadata],
+                embeddings=[embedding]
+            )
+        else:
+            await asyncio.to_thread(
+                coll.upsert,
+                ids=[object_id],
+                documents=[document],
+                metadatas=[metadata]
+            )
 
-    async def index_documents(self, collection: str, rows: Sequence[tuple[str, str, JsonDict]]) -> None:
+    async def index_documents(self, collection: str, rows: Sequence[tuple[str, str, JsonDict]], embeddings: list[list[float]] | None = None) -> None:
         if not rows: return
         coll = await self._get_collection(collection)
         ids = [r[0] for r in rows]
         docs = [r[1] for r in rows]
         metas = [r[2] for r in rows]
-        await asyncio.to_thread(
-            coll.upsert,
-            ids=ids,
-            documents=docs,
-            metadatas=metas
-        )
+        kwargs = {"ids": ids, "documents": docs, "metadatas": metas}
+        if embeddings is not None:
+            if len(embeddings) != len(rows):
+                raise ValueError("embeddings length must match rows")
+            kwargs["embeddings"] = embeddings
+        await asyncio.to_thread(coll.upsert, **kwargs)
 
     async def search(self, collection: str, query_text: str, where: Optional[JsonDict] = None, limit: int = 20) -> list[SearchHit]:
         coll = await self._get_collection(collection)
@@ -51,22 +60,52 @@ class ChromaSemanticStoreImpl:
         }
         if where:
             kwargs["where"] = where
-            
+
         results = await asyncio.to_thread(coll.query, **kwargs)
-        
+
         hits = []
         if results and results.get('ids') and results['ids'][0]:
             ids = results['ids'][0]
             distances = results.get('distances', [[0.0] * len(ids)])[0]
             metadatas = results.get('metadatas', [[{}] * len(ids)])[0]
-            
+
             for doc_id, dist, meta in zip(ids, distances, metadatas):
                 # Cosine distance to relevance score
                 score = 1.0 - dist
                 hits.append(SearchHit(object_id=doc_id, score=score, metadata=meta))
-                
+
         return hits
+
+    async def query(self, collection: str, query_text: str | None = None, query_embeddings: list[float] | None = None, where: Optional[JsonDict] = None, limit: int = 20) -> Dict:
+        """
+        Raw query to Chroma collection. Returns full result dict with
+        documents, metadatas, distances, ids.
+        """
+        if query_text is None and query_embeddings is None:
+            raise ValueError("Must provide either query_text or query_embeddings")
+        coll = await self._get_collection(collection)
+        kwargs = {
+            "n_results": limit
+        }
+        if query_embeddings is not None:
+            kwargs["query_embeddings"] = [query_embeddings]
+        else:
+            kwargs["query_texts"] = [query_text]
+        if where:
+            kwargs["where"] = where
+
+        results = await asyncio.to_thread(coll.query, **kwargs)
+        return results
 
     async def delete_document(self, collection: str, object_id: str) -> None:
         coll = await self._get_collection(collection)
         await asyncio.to_thread(coll.delete, ids=[object_id])
+
+    async def clear_collection(self, name: str) -> None:
+        """Delete the entire collection. Ignores error if it doesn't exist."""
+        try:
+            await asyncio.to_thread(self.client.delete_collection, name)
+        except Exception:
+            pass  # Collection may not exist
+        if name in self._collections:
+            del self._collections[name]

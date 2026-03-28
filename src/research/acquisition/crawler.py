@@ -237,7 +237,7 @@ class FirecrawlLocalClient:
                 "priority": 0,
                 "requires_js": False
             }
-            await system_manager.adapter.enqueue_job("queue:acquisition", payload)
+            await system_manager.adapter.enqueue_job("queue:scraping", payload)
             logger.info(f"[Crawler] Offloaded to SLOW-LANE queue: {url}")
         except Exception as e:
             logger.debug(f"[Crawler] Slow-lane offload failed: {e}")

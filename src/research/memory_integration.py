@@ -7,7 +7,6 @@ import logging
 from typing import Dict, Any, List, Optional, Set
 from datetime import datetime
 
-from src.memory.manager import MemoryManager
 from src.memory.models import Memory, MemorySearchResult
 from src.research.models import ResearchTask, TaskStatus, ResearchType, ResearchFinding
 from src.research.exceptions import ProcessingError
@@ -31,7 +30,7 @@ class MemoryIntegrator:
     async def integrate(
         self,
         memory: Memory,
-        memory_manager: MemoryManager,
+        memory_manager,  # V2 MemoryManager removed; type disabled
         metadata: Optional[Dict[str, Any]] = None
     ) -> None:
         """
@@ -70,7 +69,7 @@ class MemoryIntegrator:
     async def integrate_finding(
         self,
         finding: ResearchFinding,
-        memory_manager: MemoryManager,
+        memory_manager,  # V2 MemoryManager removed; type disabled
         task_id: Optional[str] = None
     ) -> str:
         """

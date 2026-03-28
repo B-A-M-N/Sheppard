@@ -19,7 +19,6 @@ from dataclasses import dataclass, field
 from src.research.acquisition.budget import BudgetMonitor, CondensationPriority
 from src.llm.client import OllamaClient
 from src.llm.model_router import TaskType
-from src.memory.manager import MemoryManager
 
 from src.utils.console import console
 from src.utils.json_validator import JSONValidator, extract_technical_atoms
@@ -34,9 +33,9 @@ class ExtractionCluster:
     atoms: List[Dict] = field(default_factory=list)
 
 class DistillationPipeline:
-    def __init__(self, ollama: OllamaClient, memory: MemoryManager, budget: BudgetMonitor, adapter=None):
+    def __init__(self, ollama: OllamaClient, memory, budget: BudgetMonitor, adapter=None):
         self.ollama = ollama
-        self.memory = memory
+        self.memory = memory  # V2 removed; expected None in V3
         self.budget = budget
         self.adapter = adapter
         self._semaphore = asyncio.Semaphore(2)
@@ -107,15 +106,14 @@ class DistillationPipeline:
                             metadata={"type": atom_dict.get('type'), "source_id": source_id}
                         )
                         
-                        # Store via V3 Adapter
-                        await self.adapter.upsert_atom(atom.to_pg_row())
-                        
-                        # 4. Bind Evidence
-                        await self.adapter.bind_atom_evidence(atom_id, [{
+                        # Store atom and evidence atomically via V3 Adapter
+                        atom_row = atom.to_pg_row()
+                        evidence_rows = [{
                             "source_id": source_id,
                             "evidence_strength": 0.9,
                             "supports_statement": True
-                        }])
+                        }]
+                        await self.adapter.store_atom_with_evidence(atom_row, evidence_rows)
 
                         total_atoms += 1
 

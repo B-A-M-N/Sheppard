@@ -36,24 +36,24 @@ class PostgresStoreImpl:
     async def upsert_row(self, table: str, key_fields: Union[str, Sequence[str]], row: JsonDict) -> None:
         if isinstance(key_fields, str):
             key_fields = [key_fields]
-            
+
         async with self.pool.acquire() as conn:
             columns = list(row.keys())
             values = self._prepare_values(row)
-            
+
             col_str = ", ".join(columns)
             val_str = ", ".join(f"${i+1}" for i in range(len(values)))
-            
+
             update_parts = [f"{col} = EXCLUDED.{col}" for col in columns if col not in key_fields]
             update_str = ", ".join(update_parts)
-            
+
             query = f"INSERT INTO {table} ({col_str}) VALUES ({val_str})"
             key_str = ", ".join(key_fields)
             if update_parts:
                 query += f" ON CONFLICT ({key_str}) DO UPDATE SET {update_str}"
             else:
                 query += f" ON CONFLICT ({key_str}) DO NOTHING"
-                
+
             await conn.execute(query, *values)
 
     async def insert_row(self, table: str, row: JsonDict) -> None:

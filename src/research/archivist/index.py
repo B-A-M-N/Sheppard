@@ -1,48 +1,46 @@
-import os
-os.environ["ANONYMIZED_TELEMETRY"] = "False"
-import chromadb
-from chromadb.config import Settings
-import logging
-import warnings
+"""
+Archivist index management using injected ChromaSemanticStore.
 
-# warnings.filterwarnings("ignore", message=".*model_fields.*")
-from .config import INDEX_DIR
-import uuid
-
-# Initialize persistent client
-client = chromadb.PersistentClient(path=INDEX_DIR, settings=Settings(anonymized_telemetry=False))
-
-def get_collection(name="archivist_research"):
-    """
-    Get or create the ChromaDB collection.
-    """
-    return client.get_or_create_collection(name=name)
-
+This module provides Chroma operations for Archivist's research collection
+without direct client creation.
+"""
+from typing import Sequence
+from src.memory.storage_adapter import ChromaSemanticStore
 import hashlib
 
-def clear_index(collection_name="archivist_research"):
-    """
-    Deletes the collection to clear all previous data.
-    """
-    try:
-        client.delete_collection(name=collection_name)
-    except:
-        pass
+_chroma_store: ChromaSemanticStore | None = None
 
-def add_chunks(chunks: list[str], embeddings: list[list[float]], metadatas: list[dict], collection_name="archivist_research"):
+
+def init(chroma_store: ChromaSemanticStore) -> None:
+    """Initialize the Archivist index with a shared ChromaSemanticStore."""
+    global _chroma_store
+    _chroma_store = chroma_store
+
+
+def _get_store() -> ChromaSemanticStore:
+    """Get the initialized ChromaSemanticStore, raising if not set."""
+    if _chroma_store is None:
+        raise RuntimeError("Archivist index not initialized. Call init() first.")
+    return _chroma_store
+
+
+async def clear_index(collection_name: str = "archivist_research") -> None:
+    """Deletes the collection to clear all previous data."""
+    store = _get_store()
+    await store.clear_collection(collection_name)
+
+
+async def add_chunks(
+    chunks: list[str],
+    embeddings: list[list[float]],
+    metadatas: list[dict],
+    collection_name: str = "archivist_research"
+) -> None:
     """
     Add chunks with their embeddings and metadata to the index.
     Uses hash of text as ID to prevent duplicates.
     """
-    collection = get_collection(collection_name)
-    
-    # Use deterministic IDs based on content hash to avoid duplicates
+    store = _get_store()
     ids = [hashlib.md5(c.encode()).hexdigest() for c in chunks]
-    
-    collection.upsert(
-        documents=chunks,
-        embeddings=embeddings,
-        metadatas=metadatas,
-        ids=ids
-    )
-    # print(f"Added {len(chunks)} chunks to collection '{collection_name}'")
+    rows = [(id, chunk, meta) for id, chunk, meta in zip(ids, chunks, metadatas)]
+    await store.index_documents(collection_name, rows, embeddings=embeddings)

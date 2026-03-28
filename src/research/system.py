@@ -35,6 +35,7 @@ from src.research.exceptions import ResearchError, TaskError, ProcessingError
 from src.memory.models import Memory
 from src.research.base_system import BaseResearchSystem
 from src.research.archivist import run_research
+from src.memory.storage_adapter import ChromaSemanticStore
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -48,10 +49,12 @@ class ResearchSystem(BaseResearchSystem):
         self,
         memory_manager=None,
         ollama_client=None,
-        config=None
+        config=None,
+        chroma_store: ChromaSemanticStore = None
     ):
         """Initialize research system with required components."""
         super().__init__(memory_manager, ollama_client, config)
+        self.chroma_store = chroma_store
         self.TRUSTED_DOMAINS = {
             "wikipedia.org": 0.9,
             "nationalgeographic.com": 0.85,
@@ -232,40 +235,34 @@ class ResearchSystem(BaseResearchSystem):
             if research_type == ResearchType.DEEP_RESEARCH:
                 if progress_callback:
                     progress_callback(0.1)
-                
-                # Use Archivist for Deep Research
+
+                # Use Archivist for Deep Research (requires chroma_store)
+                if not self.chroma_store:
+                    raise RuntimeError("DEEP_RESEARCH requires chroma_store to be set on ResearchSystem")
+
                 console.print(Panel(
                     f"[bold green]INITIATING DEEP RESEARCH PROTOCOL:[/bold green] [cyan]{topic}[/cyan]",
                     border_style="green"
                 ))
-                
-                # run_research is a blocking call in Archivist, 
-                # we wrap it in an executor if needed, but for now we'll run it directly 
-                # as Sheppard's research_topic is already called in a way that handles async
-                # or we can use asyncio.to_thread if available (Python 3.9+)
-                # Archivist uses print() internally, we might want to capture or redirect it
-                
-                loop = asyncio.get_event_loop()
-                result = await loop.run_in_executor(
-                    None, 
-                    run_research, 
-                    f"Objective: {topic}",
-                    self.memory_manager,
-                    self.ollama_client,
-                    self.browser,
-                    topic # Pass topic explicitly
+
+                result = await run_research(
+                    objective=f"Objective: {topic}",
+                    chroma_store=self.chroma_store,
+                    memory_manager=self.memory_manager,
+                    ollama_client=self.ollama_client,
+                    browser_manager=self.browser,
+                    topic=topic
                 )
-                
+
                 final_results = {
                     'topic': topic,
                     'report': result['answer'],
                     'sources': result['sources'],
                     'steps': result['steps'],
                     'timestamp': datetime.now().isoformat(),
-                    'findings': [] # For compatibility
+                    'findings': []  # For compatibility
                 }
-                
-                # Create a finding for the final report to match standard structure
+
                 final_results['findings'].append({
                     'url': 'internal://archivist-report',
                     'title': f"Deep Research Report: {topic}",
@@ -273,7 +270,6 @@ class ResearchSystem(BaseResearchSystem):
                     'key_takeaways': ["See full report for details"]
                 })
 
-                # Store in memory
                 if self.memory_manager:
                     memory = Memory(
                         content=result['answer'],
@@ -284,13 +280,12 @@ class ResearchSystem(BaseResearchSystem):
                             'timestamp': datetime.now().isoformat()
                         }
                     )
-                    # Generate embedding
                     memory.embedding = await self.safe_generate_embedding(result['answer'])
                     await self.memory_manager.store(memory)
-                
+
                 if progress_callback:
                     progress_callback(1.0)
-                
+
                 return final_results
 
             if progress_callback:

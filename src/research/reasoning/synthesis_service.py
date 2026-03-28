@@ -10,16 +10,15 @@ import uuid
 from typing import Optional
 
 from src.llm.client import OllamaClient
-from src.memory.manager import MemoryManager
 from src.research.reasoning.assembler import EvidenceAssembler
 from src.research.archivist.synth_adapter import ArchivistSynthAdapter
 
 logger = logging.getLogger(__name__)
 
 class SynthesisService:
-    def __init__(self, ollama: OllamaClient, memory: MemoryManager, assembler: EvidenceAssembler, adapter=None):
+    def __init__(self, ollama: OllamaClient, memory, assembler: EvidenceAssembler, adapter=None):
         self.ollama = ollama
-        self.memory = memory
+        self.memory = memory  # V2 MemoryManager deprecated; should be None in V3
         self.assembler = assembler
         self.adapter = adapter
         self.archivist = ArchivistSynthAdapter(ollama)

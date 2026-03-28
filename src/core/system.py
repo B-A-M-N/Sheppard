@@ -343,7 +343,10 @@ class SystemManager:
                         "metadata": result.metadata
                     }
                     await self.adapter.ingest_source(source_meta, result.markdown)
-                    
+
+                    # Trigger budget accounting to enable distillation
+                    await self.budget.record_bytes(mission_id, result.raw_bytes)
+
                     logger.info(f"[Vampire-{vampire_id}] Consumed: {url}")
                 
             except asyncio.CancelledError:
