@@ -34,6 +34,7 @@ from src.llm.model_router import ModelRouter, TaskType
 from src.research.system import ResearchSystem
 
 # V3 Storage
+import aiohttp
 import asyncpg
 import redis.asyncio as redis
 import chromadb
@@ -197,9 +198,9 @@ class SystemManager:
         )
         await self.adapter.create_mission(mission.to_pg_row())
 
-        # 3. Register with Budget Monitor (will be migrated to mission_id in Phase 03)
+        # 3. Register with Budget Monitor
         self.budget.register_topic(
-            topic_id=mission_id,  # Bridge: use mission_id as topic_id until BudgetMonitor migrates
+            mission_id=mission_id,
             topic_name=topic_name,
             ceiling_gb=ceiling_gb,
         )
@@ -301,6 +302,39 @@ class SystemManager:
     # Internal Helpers
     # ──────────────────────────────────────────────────
 
+    # ──────────────────────────────────────────────────────────────────────
+    # RETRY POLICY INVENTORY — Pipeline-Wide Summary
+    # ──────────────────────────────────────────────────────────────────────
+    #
+    # Layer 1 — Fetch (crawler._scrape_with_retry):
+    #   Scope:      Per URL, fast-lane scrapes only.
+    #   Attempts:   3 (CrawlerConfig.max_retries default).
+    #   Backoff:    Exponential — delay = retry_base_delay * 2^attempt (1s, 2s, 4s).
+    #   Trigger:    Any exception during aiohttp POST to firecrawl-local.
+    #   Terminal:   Returns None after 3 failures; caller receives None and skips ingestion.
+    #   Non-retryable: HTTP non-200 and empty markdown are treated as immediate None
+    #                  (no retry on 4xx — firecrawl returns 200 on most errors).
+    #
+    # Layer 2 — Distillation (pipeline.py per-source try/except):
+    #   Scope:      Per source in a condensation batch.
+    #   Attempts:   1 (no retry — each source is processed once per batch run).
+    #   Backoff:    N/A.
+    #   Trigger:    Any exception during LLM extraction or atom storage.
+    #   Terminal:   Source status set to "error" in corpus.sources; batch continues.
+    #   Non-retryable: All failures are terminal at this layer (rely on job-level retry
+    #                  to re-present the source in a future batch if needed).
+    #
+    # Layer 3 — Job (this loop, _vampire_loop):
+    #   Scope:      Per job dequeued from queue:scraping.
+    #   Attempts:   3 (job["retry_count"] field, default 0).
+    #   Backoff:    Exponential — delay = 2^retry_count seconds (1s, 2s, 4s).
+    #   Retryable:  All exceptions retry up to the cap (retry_count < 3).
+    #               aiohttp.ClientError / asyncio.TimeoutError / ConnectionError /
+    #               TimeoutError are additionally labelled "transient" in log output.
+    #   Non-retryable / Terminal: retry_count >= 3 → dead-lettered (terminal log, NOT re-enqueued).
+    #   Budget-hold: Jobs that exceed the crawl budget are re-enqueued unconditionally
+    #               (not counted against retry_count — this is a hold, not a failure).
+    # ──────────────────────────────────────────────────────────────────────
     async def _vampire_loop(self, vampire_id: int):
         """Greedy consumer loop: Eats URLs from Redis and stores technical ore."""
         logger.info(f"[Vampire-{vampire_id}] Unleashed.")
@@ -328,6 +362,17 @@ class SystemManager:
                     await self.adapter.enqueue_job("queue:scraping", job)
                     await asyncio.sleep(30); continue
 
+                # Distributed lock: prevent redundant concurrent scraping of the same URL.
+                # Two vampires can both pass get_source_by_url_hash simultaneously (TOCTOU).
+                # acquire_lock uses Redis SET NX internally; only one caller proceeds.
+                # The other skips without data loss — the DB unique constraint on url_hash
+                # would reject the duplicate anyway.
+                lock_key = f"lock:scraping:{job.get('url_hash', '')}"
+                acquired = await self.adapter.acquire_lock(lock_key, ttl_s=300)
+                if not acquired:
+                    logger.debug(f"[Vampire-{vampire_id}] Skipping already-processing URL: {url}")
+                    continue
+
                 # Scrape
                 result = await self.crawler._scrape_with_retry(url)
                 if result:
@@ -352,8 +397,34 @@ class SystemManager:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"[Vampire-{vampire_id}] Indigestion on {job.get('url') if 'job' in locals() else 'unknown'}: {e}")
-                await asyncio.sleep(2)
+                # Resolve job reference safely (may not exist if dequeue itself failed)
+                _job = job if 'job' in locals() and job else {}
+                _url = _job.get("url", "unknown")
+                _retry = _job.get("retry_count", 0)
+
+                # Classify for log message only — all exceptions retry up to the cap.
+                _retryable = isinstance(e, (
+                    aiohttp.ClientError,
+                    asyncio.TimeoutError,
+                    ConnectionError,
+                    TimeoutError,
+                ))
+
+                if _job and _retry < 3:
+                    _job["retry_count"] = _retry + 1
+                    _backoff = 2 ** _retry  # 1s, 2s, 4s
+                    _kind = "transient" if _retryable else "non-retryable type"
+                    logger.warning(
+                        f"[Vampire-{vampire_id}] {_kind.capitalize()} failure on {_url} "
+                        f"(attempt {_retry + 1}/3): {e}. Requeueing in {_backoff}s."
+                    )
+                    await asyncio.sleep(_backoff)
+                    await self.adapter.enqueue_job("queue:scraping", _job)
+                else:
+                    logger.error(
+                        f"[DEAD] [Vampire-{vampire_id}] Terminal failure on {_url} "
+                        f"after {_retry} attempt(s): {e}. Job dropped."
+                    )
 
     async def _crawl_and_store(self, mission_id: str, topic_name: str, query: str) -> None:
         """Background task: adaptive frontier research mission."""
