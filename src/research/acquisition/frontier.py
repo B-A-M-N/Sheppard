@@ -141,11 +141,20 @@ class AdaptiveFrontier:
         # Load Nodes using V3 Adapter
         db_nodes = await self.sm.adapter.list_mission_nodes(self.mission_id)
         for n in db_nodes:
+            # Extract exhausted_modes from JSON column or fallback to empty list
+            em_raw = n.get('exhausted_modes_json', '[]')
+            if isinstance(em_raw, str):
+                try:
+                    em_list = json.loads(em_raw)
+                except json.JSONDecodeError:
+                    em_list = []
+            else:
+                em_list = em_raw if isinstance(em_raw, list) else []
             self.nodes[n['label']] = FrontierNode(
                 concept=n['label'],
                 status=n['status'],
                 yield_history=[], # Omitting complex unpack for now
-                exhausted_modes=set(),
+                exhausted_modes=set(em_list),
                 parent_node_id=n.get('parent_node_id')
             )
 
@@ -172,7 +181,8 @@ class AdaptiveFrontier:
             parent_node_id=p_id,
             label=node.concept,
             concept_form=node.concept,
-            status=node.status
+            status=node.status,
+            exhausted_modes=list(node.exhausted_modes)
         )
         await self.sm.adapter.upsert_mission_node(v3_node.to_pg_row())
 

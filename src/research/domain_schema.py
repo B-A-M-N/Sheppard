@@ -115,14 +115,16 @@ class MissionNode(BaseModel):
     coverage_score: float = 0.0
     gain_score: float = 0.0
     failure_signature: Optional[str] = None
+    exhausted_modes: List[str] = Field(default_factory=list)
     notes: Dict[str, Any] = Field(default_factory=dict)
 
     def to_pg_row(self) -> Dict[str, Any]:
-        row = self.model_dump(exclude={"surface_forms", "artifact_forms", "adjacency_forms", "notes"})
+        row = self.model_dump(exclude={"surface_forms", "artifact_forms", "adjacency_forms", "notes", "exhausted_modes"})
         row["surface_forms_json"] = json.dumps(self.surface_forms)
         row["artifact_forms_json"] = json.dumps(self.artifact_forms)
         row["adjacency_forms_json"] = json.dumps(self.adjacency_forms)
         row["notes_json"] = json.dumps(self.notes)
+        row["exhausted_modes_json"] = json.dumps(self.exhausted_modes)
         return row
 
     def to_runtime_cache(self) -> Dict[str, Any]:
