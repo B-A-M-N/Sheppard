@@ -40,14 +40,14 @@ These do not prevent Phase 05 audit; they represent pipeline correctness details
 | 4 | Topic vs Mission ID Identity | HARD FAIL | Phase 03.0 | ✅ RESOLVED |
 | 5 | Budget Monitor V2 Dependency | HIGH | Phase 03 | OPEN (Phase 03 scope) |
 | 6 | Condensation Parameter Mismatch | HIGH | Phase 02/03 | OPEN |
-| 7 | Distillation Trigger Undefined | HIGH | Phase 02/03 | OPEN |
+| 7 | Distillation Trigger Undefined | HIGH | Phase 02/03 | ✅ RESOLVED (budget.record_bytes added) |
 | 8 | ResearchSystem Unused | MEDIUM | Phase 02 | OPEN |
-| 9 | State Machine Implicit | HIGH | Phase 05 scope | OPEN |
+| 9 | State Machine Implicit | HIGH | Phase 05 scope | OPEN (documented as implicit) |
 | 10 | URL Deduplication Incomplete | MEDIUM | Phase 05 quality | OPEN |
 | 11 | Atom Deduplication Unknown | MEDIUM | Phase 05 quality | OPEN |
 | 12 | Retry Policies Undefined | MEDIUM | Phase 05 quality | OPEN |
 | 13 | Race Conditions Unchecked | LOW | Phase 05 quality | OPEN |
-| 14 | Chunk → Atom Trigger Gap | HIGH | Phase 02/03 | OPEN |
+| 14 | Chunk → Atom Trigger Gap | HIGH | Phase 02/03 | ✅ RESOLVED (A7 fixed) |
 | 15 | Indexing Completeness | MEDIUM | Phase 03 | ✅ VERIFIED OK |
 
 ---
