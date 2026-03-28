@@ -158,15 +158,18 @@ If any failures occur, investigate and iterate.
 
 ## Conclusion
 
-The **Phase 07.1 repair package is complete** (artifacts + code changes delivered). All planned fixes and test enhancements are in place.
+The **Phase 07.1 repair package is complete** and **validated**.
 
-**System Status:** READY FOR VALIDATION EXECUTION (POST-MIGRATION REQUIRED)
+**System Status:** READY FOR MILESTONE AUDIT
 
-The milestone v1.0 is **not yet validated**. The migration must be applied and the validation test suite must execute and pass before the system can be declared stable.
+**Validation Outcome (2026-03-28):**
+- Migration applied: `exhausted_modes_json` column added
+- All 9 tests passed, including:
+  - V09 lifecycle (original + restart)
+  - V10 backpressure (component + integration)
+  - V11 exhausted modes persistence
+  - V12 academic filtering
+- Exit code: 0
+- Log: `.planning/gauntlet_phases/phase07.1_critical_repairs/validation_output.log`
 
-No further code changes are required at this time; awaiting operational execution of steps:
-1. Apply migration
-2. Run `pytest tests/validation/ -v`
-3. Verify all tests pass
-4. If failures occur, return to Phase 07.1 for debugging
-5. If all pass, proceed to final audit (`gsd:audit-milestone`)
+The milestone v1.0 is now validated and ready for final audit. No further code changes required.
