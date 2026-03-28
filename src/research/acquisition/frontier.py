@@ -49,6 +49,7 @@ class FrontierNode:
     status: str = "underexplored"  # underexplored, active, saturated
     yield_history: List[int] = field(default_factory=list)
     exhausted_modes: Set[str] = field(default_factory=set)
+    parent_node_id: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -144,7 +145,8 @@ class AdaptiveFrontier:
                 concept=n['label'],
                 status=n['status'],
                 yield_history=[], # Omitting complex unpack for now
-                exhausted_modes=set()
+                exhausted_modes=set(),
+                parent_node_id=n.get('parent_node_id')
             )
 
         self.visited_urls = await self.sm.adapter.get_visited_urls(self.mission_id)
@@ -154,16 +156,20 @@ class AdaptiveFrontier:
         if self.visited_urls:
             console.print(f"[dim]  - Pre-loaded {len(self.visited_urls)} visited URLs from DB.[/dim]")
 
-    async def _save_node(self, node: FrontierNode):
+    async def _save_node(self, node: FrontierNode, parent_node_id: Optional[str] = None):
         """Checkpoint a single node."""
         import uuid
         from src.research.domain_schema import MissionNode
 
         node_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{self.mission_id}:{node.concept}"))
 
+        # Use passed parent_node_id, or the node's stored attribute, or None
+        p_id = parent_node_id if parent_node_id is not None else getattr(node, 'parent_node_id', None)
+
         v3_node = MissionNode(
             node_id=node_id,
             mission_id=self.mission_id,
+            parent_node_id=p_id,
             label=node.concept,
             concept_form=node.concept,
             status=node.status
@@ -252,9 +258,9 @@ Output valid JSON:
                 # Clean node name (remove "Node 1:", "1.", etc)
                 clean_n = re.sub(r'^(Node\s*\d+:?|\d+[\.\)]\s*)', '', n, flags=re.IGNORECASE).strip()
                 if clean_n and len(clean_n) > 3:
-                    node = FrontierNode(concept=clean_n)
+                    node = FrontierNode(concept=clean_n, parent_node_id=None)
                     self.nodes[clean_n] = node
-                    await self._save_node(node)
+                    await self._save_node(node, parent_node_id=None)
                     node_count += 1
             
             if node_count > 0:
@@ -340,12 +346,15 @@ Identify 3-5 new, specific sub-topics MISSING from this context. No quotes. One 
         resp = await self.sm.ollama.complete(TaskType.QUERY_EXPANSION, prompt)
         
         new_count = 0
+        # Compute parent_node_id from parent_node (deterministic UUID5)
+        import uuid
+        parent_node_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{self.mission_id}:{parent_node.concept}"))
         for line in resp.split('\n'):
             clean = re.sub(r'^\d+[\.\)]\s*', '', line.strip()).replace('"', '').replace("'", "")
             if len(clean) > 10 and clean.lower() not in [n.lower() for n in self.nodes.keys()]:
-                node = FrontierNode(concept=clean)
+                node = FrontierNode(concept=clean, parent_node_id=parent_node_id)
                 self.nodes[clean] = node
-                await self._save_node(node)
+                await self._save_node(node, parent_node_id=parent_node_id)
                 new_count += 1
         
         if new_count > 0:
