@@ -89,6 +89,7 @@ class CorpusStore(Protocol):
     async def get_source(self, source_id: str) -> JsonDict | None: ...
     async def get_source_by_url_hash(self, normalized_url_hash: str) -> JsonDict | None: ...
     async def list_sources(self, mission_id: str, topic_id: str | None = None) -> list[JsonDict]: ...
+    async def get_visited_urls(self, mission_id: str) -> set[str]: ...
 
     async def record_source_fetch(self, fetch_event: JsonDict) -> None: ...
 
@@ -527,6 +528,10 @@ class SheppardStorageAdapter(StorageAdapter):
         where: JsonDict = {"mission_id": mission_id}
         if topic_id is not None: where["topic_id"] = topic_id
         return await self.pg.fetch_many("corpus.sources", where=where, order_by="created_at DESC")
+
+    async def get_visited_urls(self, mission_id: str) -> set[str]:
+        rows = await self.list_sources(mission_id)
+        return {r["normalized_url"] for r in rows if r.get("normalized_url")}
 
     async def record_source_fetch(self, fetch_event: JsonDict) -> None:
         await self.pg.insert_row("corpus.source_fetches", fetch_event)
