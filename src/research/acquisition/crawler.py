@@ -300,7 +300,11 @@ class FirecrawlLocalClient:
             for url in urls:
                 if visited_urls is not None and url in visited_urls:
                     continue
-                    
+
+                # Apply academic_only filter if enabled
+                if self.academic_only and not self._is_academic(url):
+                    continue
+
                 lane = self._route_url(url)
                 payload = {
                     "topic_id": topic_id,

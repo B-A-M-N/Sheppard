@@ -125,6 +125,7 @@ class SystemManager:
             self.crawler = FirecrawlLocalClient(
                 config=CrawlerConfig(),
                 on_bytes_crawled=self.budget.record_bytes,
+                academic_only=True,
             )
             await self.crawler.initialize()
 
