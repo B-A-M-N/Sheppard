@@ -21,14 +21,17 @@ from src.research.acquisition.crawler import FirecrawlLocalClient, CrawlerConfig
 from src.research.acquisition.frontier import AdaptiveFrontier
 # V2 Condensation
 from src.research.condensation.pipeline import DistillationPipeline
-# V2 Reasoning
-from src.research.reasoning.retriever import HybridRetriever, RetrievalQuery
-from src.research.reasoning.assembler import EvidenceAssembler
-from src.research.reasoning.synthesis_service import SynthesisService
+# V2 Reasoning (deprecated — not used in V3)
+# from src.research.reasoning.retriever import HybridRetriever, RetrievalQuery
+from src.research.reasoning.retriever import RetrievalQuery  # Shared types only
+from src.research.reasoning.v3_retriever import V3Retriever
+# from src.research.reasoning.assembler import EvidenceAssembler  # disabled — V2 dependency
+# from src.research.reasoning.synthesis_service import SynthesisService  # disabled — V2 dependency
 # LLM & Memory
 from src.llm.client import OllamaClient
 from src.llm.model_router import ModelRouter, TaskType
-from src.memory.manager import MemoryManager
+# NOTE: MemoryManager is deprecated; V3 uses SheppardStorageAdapter exclusively.
+from src.research.system import ResearchSystem
 
 # V3 Storage
 import asyncpg
@@ -50,15 +53,17 @@ class SystemManager:
     """
 
     def __init__(self):
-        self.memory: Optional[MemoryManager] = None
         self.adapter: Optional[SheppardStorageAdapter] = None
         self.ollama: Optional[OllamaClient] = None
         self.model_router = ModelRouter()
         self.budget: Optional[BudgetMonitor] = None
         self.crawler: Optional[FirecrawlLocalClient] = None
         self.condenser: Optional[DistillationPipeline] = None
-        self.retriever: Optional[HybridRetriever] = None
+        self.retriever: Optional[V3Retriever] = None
         self.synthesis_service: Optional[SynthesisService] = None
+        self.research_system: Optional[ResearchSystem] = None
+        # V2 MemoryManager removed — canonical truth is V3 adapter only
+        self.memory = None
 
         self._crawl_tasks: Dict[str, asyncio.Task] = {}
         self.active_frontiers: Dict[str, AdaptiveFrontier] = {}
@@ -76,7 +81,7 @@ class SystemManager:
 
             # 0. Boot V3 Triad Adapters
             from src.config.database import DatabaseConfig
-            pg_dsn = DatabaseConfig.DB_URLS.get("semantic_memory")
+            pg_dsn = DatabaseConfig.DB_URLS.get("sheppard_v3")
             
             self.pg_pool = await asyncpg.create_pool(
                 pg_dsn,
@@ -97,25 +102,20 @@ class SystemManager:
                 chroma=chroma_store
             )
 
-            # 1. Memory (ChromaDB + Postgres V2 - Legacy Support)
-            self.memory = MemoryManager()
-            await self.memory.initialize()
-
-            # 2. LLM Client
+            # 1. LLM Client
             self.ollama = OllamaClient(model_router=self.model_router)
             await self.ollama.initialize()
-            self.memory.set_ollama_client(self.ollama)
 
-            # 3. Budget monitor
+            # 2. Budget monitor
             self.budget = BudgetMonitor(
                 config=BudgetConfig(),
                 condensation_callback=self._condensation_callback,
             )
 
-            # 4. Condensation pipeline
+            # 4. Condensation pipeline (V3-only, memory=None)
             self.condenser = DistillationPipeline(
                 ollama=self.ollama,
-                memory=self.memory,
+                memory=None,  # MemoryManager removed
                 budget=self.budget,
                 adapter=self.adapter
             )
@@ -127,13 +127,22 @@ class SystemManager:
             )
             await self.crawler.initialize()
 
-            # 6. Retriever & Synthesis
-            self.retriever = HybridRetriever(memory_manager=self.memory)
-            
-            assembler = EvidenceAssembler(self.ollama, self.memory, self.retriever, self.adapter)
-            self.synthesis_service = SynthesisService(self.ollama, self.memory, assembler, self.adapter)
+            # 6. Retriever (V3 only)
+            self.retriever = V3Retriever(adapter=self.adapter)
 
-            # 7. Start background tasks
+            # NOTE: Assembler and SynthesisService are disabled pending V3-only implementations
+            # self.assembler = None
+            # self.synthesis_service = None
+
+            # 7. Research system (V3 deep research)
+            self.research_system = ResearchSystem(
+                chroma_store=self.adapter.chroma,
+                ollama_client=self.ollama,
+                memory_manager=None  # V2 memory deprecated; intermediate storage disabled
+            )
+            await self.research_system.initialize()
+
+            # 8. Start background tasks
             self._monitor_task = asyncio.create_task(self.budget.run_monitor_loop())
             
             # 8. Unleash Local Vampires
@@ -161,12 +170,9 @@ class SystemManager:
         import uuid
         from src.research.domain_schema import ResearchMission, DomainProfile, SourcePreferences
 
-        # Keep legacy topic creation for now to satisfy budget monitor
-        topic_id = await self.memory.create_topic(name=topic_name, description=query)
-        await self.memory.update_topic_status(topic_id, "active")
-
+        # V3 identity model: mission_id is canonical (topic_id eliminated)
         mission_id = str(uuid.uuid4())
-        
+
         # 1. Create Domain Profile
         profile_id = f"profile_{mission_id[:8]}"
         profile = DomainProfile(
@@ -183,27 +189,28 @@ class SystemManager:
         # 2. Create Mission
         mission = ResearchMission(
             mission_id=mission_id,
-            topic_id=topic_id,
+            topic_id=mission_id,  # For legacy schema compatibility; in V3, topic_id == mission_id
             domain_profile_id=profile.profile_id,
             title=topic_name,
             objective=query,
             budget_bytes=int(ceiling_gb * 1024**3)
         )
         await self.adapter.create_mission(mission.to_pg_row())
-        
+
+        # 3. Register with Budget Monitor (will be migrated to mission_id in Phase 03)
         self.budget.register_topic(
-            topic_id=topic_id,
+            topic_id=mission_id,  # Bridge: use mission_id as topic_id until BudgetMonitor migrates
             topic_name=topic_name,
             ceiling_gb=ceiling_gb,
         )
 
         self.crawler.academic_only = academic_only
 
-        task = asyncio.create_task(self._crawl_and_store(topic_id, topic_name, query, mission_id))
-        self._crawl_tasks[topic_id] = task
-        
+        task = asyncio.create_task(self._crawl_and_store(mission_id, topic_name, query))
+        self._crawl_tasks[mission_id] = task
+
         logger.info(f"[System] Learning mission '{topic_name}' started (Mission ID: {mission_id})")
-        return topic_id
+        return mission_id
 
     async def query(
         self,
@@ -275,15 +282,13 @@ class SystemManager:
         
         for vt in self._vampire_tasks:
             if not vt.done(): vt.cancel()
-        
+
         # Close network sessions
         if self.crawler:
             await self.crawler.cleanup()
         if self.ollama:
             await self.ollama.cleanup()
-        if self.memory:
-            await self.memory.cleanup()
-        
+
         # Close V3 Triad connections
         if getattr(self, 'pg_pool', None):
             await self.pg_pool.close()
@@ -306,10 +311,11 @@ class SystemManager:
                 if not job: continue
                 
                 url = job.get("url")
-                topic_id = job.get("topic_id")
-                # Defensive fallback for legacy tasks
-                mission_id = job.get("mission_id") or topic_id
-                
+                mission_id = job.get("mission_id")
+                if not mission_id:
+                    logger.warning(f"[Vampire-{vampire_id}] Job missing mission_id, skipping")
+                    continue
+
                 # Check if already processed (Greedy de-duplication)
                 existing = await self.adapter.get_source_by_url_hash(job.get("url_hash", ""))
                 if existing and existing.get("status") == "fetched":
@@ -317,7 +323,7 @@ class SystemManager:
                     continue
 
                 # Check budget before eating
-                if not self.budget.can_crawl(topic_id):
+                if not self.budget.can_crawl(mission_id):
                     # Re-queue for later
                     await self.adapter.enqueue_job("queue:scraping", job)
                     await asyncio.sleep(30); continue
@@ -328,7 +334,6 @@ class SystemManager:
                     # Atomic Ingestion via V3 Adapter
                     source_meta = {
                         "mission_id": mission_id,
-                        "topic_id": topic_id,
                         "url": url,
                         "normalized_url": url,
                         "normalized_url_hash": result.checksum,
@@ -339,17 +344,6 @@ class SystemManager:
                     }
                     await self.adapter.ingest_source(source_meta, result.markdown)
                     
-                    # Legacy support for existing refinery/budget hooks
-                    await self.memory.store_source(
-                        topic_id=topic_id,
-                        url=url,
-                        content=result.markdown,
-                        raw_bytes=result.raw_bytes,
-                        checksum=result.checksum,
-                        title=result.title,
-                        domain=result.domain
-                    )
-                    
                     logger.info(f"[Vampire-{vampire_id}] Consumed: {url}")
                 
             except asyncio.CancelledError:
@@ -358,68 +352,63 @@ class SystemManager:
                 logger.error(f"[Vampire-{vampire_id}] Indigestion on {job.get('url') if 'job' in locals() else 'unknown'}: {e}")
                 await asyncio.sleep(2)
 
-    async def _crawl_and_store(self, topic_id: str, topic_name: str, query: str, mission_id: str = None) -> None:
+    async def _crawl_and_store(self, mission_id: str, topic_name: str, query: str) -> None:
         """Background task: adaptive frontier research mission."""
         from src.utils.console import console
         try:
             console.print(f"\n[bold yellow][System][/bold yellow] Starting Deep Accretive Mission: [cyan]{topic_name}[/cyan]")
-            
-            if not mission_id:
-                mission_id = topic_id
-            
+
             # Pass mission_id to AdaptiveFrontier to use V3 schema
-            frontier = AdaptiveFrontier(self, topic_id, topic_name, mission_id=mission_id)
-            self.active_frontiers[topic_id] = frontier
+            frontier = AdaptiveFrontier(self, mission_id, topic_name)
+            self.active_frontiers[mission_id] = frontier
             total_ingested = await frontier.run()
-            
+
             console.print(f"[bold blue][DONE][/bold blue] Mission complete. [green]{total_ingested}[/green] total sources ingested.")
-            await self.memory.update_topic_status(topic_id, "done")
             await self.adapter.update_mission_status(mission_id, "completed")
 
         except Exception as e:
             console.print(f"[bold red][FAIL][/bold red] Mission error: {e}")
             logger.error(f"[System] Mission error: {e}", exc_info=True)
-            await self.memory.update_topic_status(topic_id, "failed")
             await self.adapter.update_mission_status(mission_id, "failed", stop_reason=str(e))
         finally:
-            self._crawl_tasks.pop(topic_id, None)
-            self.active_frontiers.pop(topic_id, None)
+            self._crawl_tasks.pop(mission_id, None)
+            self.active_frontiers.pop(mission_id, None)
 
-    async def nudge_mission(self, topic_id: str, instruction: str) -> bool:
+    async def nudge_mission(self, mission_id: str, instruction: str) -> bool:
         """Apply a human-in-the-loop steering correction to an active mission."""
-        frontier = self.active_frontiers.get(topic_id)
+        frontier = self.active_frontiers.get(mission_id)
         if not frontier:
             return False
         await frontier.apply_nudge(instruction)
         return True
 
-    async def cancel_mission(self, topic_id: str) -> bool:
+    async def cancel_mission(self, mission_id: str) -> bool:
         """Gracefully stop a running research mission."""
-        task = self._crawl_tasks.get(topic_id)
+        task = self._crawl_tasks.get(mission_id)
         if not task:
             return False
-        
+
         # 1. Cancel the task
         task.cancel()
-        
+
         # 2. Cleanup state
-        self._crawl_tasks.pop(topic_id, None)
-        self.active_frontiers.pop(topic_id, None)
-        
+        self._crawl_tasks.pop(mission_id, None)
+        self.active_frontiers.pop(mission_id, None)
+
         # 3. Update DB status
-        await self.memory.update_topic_status(topic_id, "stopped")
-        
-        logger.info(f"[System] Mission {topic_id} cancelled by user.")
+        await self.adapter.update_mission_status(mission_id, "stopped")
+
+        logger.info(f"[System] Mission {mission_id} cancelled by user.")
         return True
 
-    async def generate_report(self, topic_id: str) -> Optional[str]:
-        """Trigger Tier 4 Selective Synthesis for a specific topic."""
+    async def generate_report(self, mission_id: str) -> Optional[str]:
+        """Trigger Tier 4 Selective Synthesis for a specific mission."""
         if not self.synthesis_service:
             return None
-        return await self.synthesis_service.generate_master_brief(topic_id)
+        return await self.synthesis_service.generate_master_brief(mission_id)
 
-    async def _condensation_callback(self, topic_id: str, priority: CondensationPriority) -> None:
-        await self.condenser.run(topic_id, priority)
+    async def _condensation_callback(self, mission_id: str, priority: CondensationPriority) -> None:
+        await self.condenser.run(mission_id, priority)
 
     def _build_system_prompt(self, context: str, project: Optional[str]) -> str:
         return (

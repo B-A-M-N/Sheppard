@@ -63,11 +63,10 @@ class FrontierNode:
 # ──────────────────────────────────────────────────────────────
 
 class AdaptiveFrontier:
-    def __init__(self, system_manager, topic_id: str, topic_name: str, mission_id: str = None):
+    def __init__(self, system_manager, mission_id: str, topic_name: str):
         self.sm = system_manager
-        self.topic_id = topic_id
+        self.mission_id = mission_id
         self.topic_name = topic_name
-        self.mission_id = mission_id or topic_id
         self.policy = ResearchPolicy()
         self.nodes: Dict[str, FrontierNode] = {}
         self.visited_urls: Set[str] = set()
@@ -83,7 +82,7 @@ class AdaptiveFrontier:
         
         while True:
             # Check budget
-            status = self.sm.budget.get_status(self.topic_id)
+            status = self.sm.budget.get_status(self.mission_id)
             if status and status.usage_ratio >= 1.0:
                 console.print(f"[bold red][Frontier][/bold red] Storage ceiling reached. Terminating acquisition.")
                 break
@@ -105,7 +104,7 @@ class AdaptiveFrontier:
             round_yield = 0
             for q in queries:
                 enqueued = await self.sm.crawler.discover_and_enqueue(
-                    topic_id=self.topic_id,
+                    topic_id=self.mission_id,
                     topic_name=self.topic_name,
                     query=q,
                     mission_id=self.mission_id,
@@ -136,13 +135,8 @@ class AdaptiveFrontier:
 
     async def _load_checkpoint(self):
         """Restore previous state from DB."""
-        console.print(f"[bold cyan][Frontier][/bold cyan] Loading persistent state for topic: [white]{self.topic_id}[/white]")
-        
-        # Load Visited URLs
-        self.visited_urls = await self.sm.memory.get_visited_urls(self.topic_id)
-        if self.visited_urls:
-            console.print(f"[dim]  - Pre-loaded {len(self.visited_urls)} visited URLs.[/dim]")
-            
+        console.print(f"[bold cyan][Frontier][/bold cyan] Loading persistent state for mission: [white]{self.mission_id}[/white]")
+
         # Load Nodes using V3 Adapter
         db_nodes = await self.sm.adapter.list_mission_nodes(self.mission_id)
         for n in db_nodes:
@@ -152,18 +146,10 @@ class AdaptiveFrontier:
                 yield_history=[], # Omitting complex unpack for now
                 exhausted_modes=set()
             )
-        
-        # Fallback to legacy node load if none found
-        if not db_nodes:
-            legacy_nodes = await self.sm.memory.get_frontier_nodes(self.topic_id)
-            for n in legacy_nodes:
-                self.nodes[n['concept']] = FrontierNode(
-                    concept=n['concept'],
-                    status=n['status'],
-                    yield_history=n['yield_history'],
-                    exhausted_modes=set(n['exhausted_modes'])
-                )
-                
+
+        # FIXME: V3 visited_urls persistence not implemented; will lose dedup state across restarts
+        # self.visited_urls = await self.sm.adapter.get_visited_urls(self.mission_id)  # Not yet available
+
         if self.nodes:
             console.print(f"[dim]  - Pre-loaded {len(self.nodes)} research nodes from DB.[/dim]")
 
@@ -171,9 +157,9 @@ class AdaptiveFrontier:
         """Checkpoint a single node."""
         import uuid
         from src.research.domain_schema import MissionNode
-        
+
         node_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{self.mission_id}:{node.concept}"))
-        
+
         v3_node = MissionNode(
             node_id=node_id,
             mission_id=self.mission_id,
@@ -182,9 +168,6 @@ class AdaptiveFrontier:
             status=node.status
         )
         await self.sm.adapter.upsert_mission_node(v3_node.to_pg_row())
-        
-        # Legacy save for safety
-        await self.sm.memory.upsert_frontier_node(self.topic_id, **node.to_dict())
 
     async def _frame_research_policy(self):
         """Load policy from DB or generate new one using V3 schema."""
@@ -346,7 +329,7 @@ CRITICAL:
         parent_concept = parent_node.concept if parent_node else self.topic_name
         console.print(f"[bold cyan][Frontier][/bold cyan] Spawning deeper nodes for [white]{parent_concept}[/white]...")
         
-        current_context = await self.sm.query(text=parent_concept, topic_filter=self.topic_id, max_results=10)
+        current_context = await self.sm.query(text=parent_concept, topic_filter=self.mission_id, max_results=10)
         
         prompt = f"""
 Research Subject: {self.topic_name} | Area: {parent_concept}
