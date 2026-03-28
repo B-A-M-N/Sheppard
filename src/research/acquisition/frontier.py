@@ -147,11 +147,12 @@ class AdaptiveFrontier:
                 exhausted_modes=set()
             )
 
-        # FIXME: V3 visited_urls persistence not implemented; will lose dedup state across restarts
-        # self.visited_urls = await self.sm.adapter.get_visited_urls(self.mission_id)  # Not yet available
+        self.visited_urls = await self.sm.adapter.get_visited_urls(self.mission_id)
 
         if self.nodes:
             console.print(f"[dim]  - Pre-loaded {len(self.nodes)} research nodes from DB.[/dim]")
+        if self.visited_urls:
+            console.print(f"[dim]  - Pre-loaded {len(self.visited_urls)} visited URLs from DB.[/dim]")
 
     async def _save_node(self, node: FrontierNode):
         """Checkpoint a single node."""
