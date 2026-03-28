@@ -111,9 +111,9 @@ async def test_v11_exhausted_modes_persistence():
     await frontier._save_node(node)
 
     # Verify database row contains the correct exhausted_modes_json
-    rows = await adapter.pg.fetch_all(
-        "SELECT exhausted_modes_json FROM mission.mission_nodes WHERE mission_id=$1 AND label=$2",
-        mission_id, test_concept
+    rows = await adapter.pg.fetch_many(
+        "mission.mission_nodes",
+        where={"mission_id": mission_id, "label": test_concept}
     )
     assert len(rows) == 1, "Node row should exist in DB"
     db_exhausted_raw = rows[0]['exhausted_modes_json']

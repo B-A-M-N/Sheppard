@@ -30,8 +30,8 @@ async def test_v12_academic_filtering(monkeypatch):
 
     # Create a mock system_manager with adapter
     mock_sm = MockSystemManager()
-    # Patch the module-level system_manager used by discover_and_enqueue
-    monkeypatch.setattr("src.research.acquisition.crawler.system_manager", mock_sm)
+    # Patch the system_manager in the core.system module where it is defined
+    monkeypatch.setattr("src.core.system.system_manager", mock_sm)
 
     # Create FirecrawlLocalClient with academic_only=True
     client = FirecrawlLocalClient(

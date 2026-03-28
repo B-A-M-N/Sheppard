@@ -108,8 +108,8 @@ async def test_v10_backpressure_crawler_integration(monkeypatch):
 
     # Mock system_manager with adapter
     mock_sm = types.SimpleNamespace(adapter=MockAdapter())
-    # Patch the module-level system_manager in crawler module
-    monkeypatch.setattr("src.research.acquisition.crawler.system_manager", mock_sm)
+    # Patch the system_manager in the core.system module where it is defined
+    monkeypatch.setattr("src.core.system.system_manager", mock_sm)
 
     # Create FirecrawlLocalClient with academic_only=False (doesn't matter)
     client = FirecrawlLocalClient(
