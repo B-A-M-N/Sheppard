@@ -23,7 +23,12 @@ For each phase:
 | 03.0 — Canonical Authority Lock | ✅ | PASS | 2026-03-27 | V2 removed, HybridRetriever deleted, V3-only runtime |
 | 03 — Triad Enforcement | ✅ | FAIL | 2026-03-27 | Archivist direct Chroma write violates projection invariant |
 | 04 — Lineage Integrity | ✅ | PASS | 2026-03-27 | Structural lineage verified |
-| 05 — /learn Pipeline | ⏳ | BLOCKED | | Blocked by Phase 03.0/03 triad violations (see PHASE-05-AMBIGUITIES.md) |
+| 05 — /learn Pipeline | ✅ | PASS | 2026-03-27 | Nyquist validated; 10/10 state transitions confirmed; gap-closure subphases 05A–05E queued |
+| 05A — Atom Deduplication | ⏳ | | | G1: idempotent atom storage via content/evidence hash |
+| 05B — Visited URL Persistence | ⏳ | | | G2: persist visited_urls across restarts |
+| 05C — BudgetMonitor topic_id Cleanup | ⏳ | | | G3: remove topic_id bridge, standardize on mission_id |
+| 05D — Retry Policy | ⏳ | | | G4: classify + implement retry by failure class |
+| 05E — Race Hardening Review | ⏳ | | | G5: audit concurrent hot paths, add guards |
 | 06 — Discovery | ⏳ | | | Deferred |
 | 07 — Workers | ⏳ | | | Deferred |
 | 08 — Scraping | ⏳ | | | Deferred |
