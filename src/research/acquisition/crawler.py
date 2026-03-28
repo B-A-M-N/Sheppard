@@ -316,18 +316,10 @@ class FirecrawlLocalClient:
                     visited_urls.add(url)
                 page_new_count += 1
                 total_enqueued += 1
-            
-            # If we found at least one new thing on this page, we can stop or continue.
-            # Let's be greedy: if we found new things, we've fulfilled the node for now.
-            # If we found NOTHING new, we go to the next page.
-            if page_new_count > 0:
-                if page > 1:
-                    console.print(f"[dim][Crawler] Deep Mine successful on Page {page}. Found {page_new_count} new targets.[/dim]")
-                break
-            else:
-                # Page was all duplicates, try deeper
-                continue
-            
+
+            # Deep mining: continue through all pages regardless of new URL count.
+            # Removed break-on-first-success to explore pages 1-5 fully.
+
         return total_enqueued
 
     _search_lock = asyncio.Lock()
