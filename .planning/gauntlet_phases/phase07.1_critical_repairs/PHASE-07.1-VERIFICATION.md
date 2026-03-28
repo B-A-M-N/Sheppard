@@ -158,12 +158,15 @@ If any failures occur, investigate and iterate.
 
 ## Conclusion
 
-The critical repairs phase is **complete from a code and artifact perspective**. The system now has:
-- Correct database schema
-- Verified presence of Phase 06 fixes
-- Additional runtime validation tests for critical invariants
-- Stronger integration tests for backpressure and lifecycle
+The **Phase 07.1 repair package is complete** (artifacts + code changes delivered). All planned fixes and test enhancements are in place.
 
-The milestone v1.0 has been elevated from "NOT READY" to "CONDITIONALLY READY" pending migration application and successful test runs.
+**System Status:** READY FOR VALIDATION EXECUTION (POST-MIGRATION REQUIRED)
 
-No further code changes are required; only operational steps remain.
+The milestone v1.0 is **not yet validated**. The migration must be applied and the validation test suite must execute and pass before the system can be declared stable.
+
+No further code changes are required at this time; awaiting operational execution of steps:
+1. Apply migration
+2. Run `pytest tests/validation/ -v`
+3. Verify all tests pass
+4. If failures occur, return to Phase 07.1 for debugging
+5. If all pass, proceed to final audit (`gsd:audit-milestone`)

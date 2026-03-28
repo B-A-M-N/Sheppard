@@ -105,14 +105,27 @@ All critical issues identified in the milestone audit have been addressed:
 ✅ Deferred invariants (V-11, V-12) now have runtime verification tests
 ✅ V09 and V10 tests improved to use real components and cover integration
 
-**Remaining gate:** The migration must be applied to the database before the system can run discovery missions without errors. Tests will pass after migration.
+**System Status:** READY FOR VALIDATION EXECUTION (POST-MIGRATION REQUIRED)
 
-Milestone v1.0 is now **conditionally ready** pending migration application and successful test execution.
+All repair artifacts are in place, but **no runtime validation has occurred**. The migration must be applied and the test suite must execute and pass before the system is verified stable.
 
 ---
 
-**Next Steps:**
-1. Apply the `exhausted_modes_json` migration to the `sheppard_v3` database.
-2. Run the validation test suite (`pytest tests/validation/`) to confirm all tests pass, including the new/updated ones.
-3. If any test fails, iterate and debug.
-4. After tests pass, proceed to final milestone audit (`gsd:audit-milestone`).
+**Execution Steps (Strict Order):**
+1. **Apply migration** to `sheppard_v3` database (see MIGRATION_add_exhausted_modes_json.sql)
+2. **Verify column exists:**
+   ```sql
+   SELECT column_name FROM information_schema.columns WHERE table_name='mission_nodes' AND column_name='exhausted_modes_json';
+   ```
+   Expected output: `exhausted_modes_json`
+3. **Run validation suite:**
+   ```bash
+   pytest tests/validation/ -v
+   ```
+4. **Confirm all tests pass**, specifically:
+   - `v09_lifecycle` (lifecycle with real frontier)
+   - `v10_backpressure` (both component + integration)
+   - `v11_exhausted_modes_persistence` (requires migration)
+   - `v12_academic_filtering`
+5. **If any test fails** — return to Phase 07.1, debug, and repeat steps 1–4.
+6. **Only after all tests pass** — proceed to final milestone audit (`gsd:audit-milestone`).

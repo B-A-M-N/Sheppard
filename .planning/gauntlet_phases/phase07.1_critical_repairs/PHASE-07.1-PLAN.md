@@ -4,8 +4,9 @@ sub_phase: true
 parent_phase: "07-validation"
 name: "Critical Repairs — Pre-signoff Remediation"
 purpose: "Fix critical blockers and verification gaps before milestone completion"
-status: in_progress
+status: completed
 start_date: 2026-03-28
+completed_date: 2026-03-28
 milestone: v1.0
 ---
 
