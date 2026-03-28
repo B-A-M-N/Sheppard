@@ -84,7 +84,7 @@ class ResearchMission(BaseModel):
     domain_profile_id: str
     title: str
     objective: str
-    status: str = "active"
+    status: str = "created"
     depth_target: Optional[str] = None
     budget_bytes: int = 0
     bytes_ingested: int = 0

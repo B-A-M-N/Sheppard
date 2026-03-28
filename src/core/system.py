@@ -431,6 +431,8 @@ class SystemManager:
         """Background task: adaptive frontier research mission."""
         from src.utils.console import console
         try:
+            # Set mission status to active at start of execution
+            await self.adapter.update_mission_status(mission_id, "active")
             console.print(f"\n[bold yellow][System][/bold yellow] Starting Deep Accretive Mission: [cyan]{topic_name}[/cyan]")
 
             # Pass mission_id to AdaptiveFrontier to use V3 schema
