@@ -6,7 +6,10 @@ Also verifies that after draining, enqueue succeeds again (frontier can resume).
 """
 import pytest
 import asyncio
+import types
+import json
 from src.memory.adapters.redis import RedisStoresImpl
+from src.research.acquisition.crawler import FirecrawlLocalClient, CrawlerConfig
 
 class FakeRedisClient:
     """Simple in-memory fake Redis for queue operations."""
@@ -77,3 +80,61 @@ async def test_v10_backpressure(monkeypatch):
     # Verify depth increased by one
     depth_final = await fake_client.llen("queue:scraping")
     assert depth_final == 81
+
+@pytest.mark.asyncio
+async def test_v10_backpressure_crawler_integration(monkeypatch):
+    """
+    Integration test: Verify that FirecrawlLocalClient.discover_and_enqueue respects backpressure.
+    When the Redis queue reaches MAX_QUEUE_DEPTH, further enqueues are rejected, the backpressure_triggered
+    flag stops further URL processing, and total_enqueued does not exceed the limit.
+    """
+    # Set a small MAX_QUEUE_DEPTH for the test
+    import src.memory.adapters.redis as redis_mod
+    monkeypatch.setattr(redis_mod, "MAX_QUEUE_DEPTH", 5, raising=False)
+
+    # Fake Redis that tracks queue length
+    fake_redis = FakeRedisClient()
+    redis_store = RedisStoresImpl(fake_redis)
+
+    # Mock adapter that uses our redis_store.enqueue_job
+    class MockAdapter:
+        def __init__(self):
+            self.redis_queue = redis_store
+        async def enqueue_job(self, queue_name: str, payload: dict) -> bool:
+            return await self.redis_queue.enqueue_job(queue_name, payload)
+
+    # Mock system_manager with adapter
+    mock_sm = types.SimpleNamespace(adapter=MockAdapter())
+    # Patch the module-level system_manager in crawler module
+    monkeypatch.setattr("src.research.acquisition.crawler.system_manager", mock_sm)
+
+    # Create FirecrawlLocalClient with academic_only=False (doesn't matter)
+    client = FirecrawlLocalClient(
+        config=CrawlerConfig(),
+        on_bytes_crawled=lambda x: None,
+        academic_only=False
+    )
+
+    # Mock _search to return many URLs to trigger backpressure
+    async def mock_search(query, pageno):
+        # Return 10 URLs per page to ensure we exceed depth quickly
+        return [f"https://example.com/page{pageno}-{i}" for i in range(10)]
+    monkeypatch.setattr(client, "_search", mock_search)
+
+    # Call discover_and_enqueue with empty visited set
+    total_enqueued = await client.discover_and_enqueue(
+        topic_id="test",
+        topic_name="Test",
+        query="test query",
+        mission_id="test-mission-backpressure",
+        visited_urls=set()
+    )
+
+    # With MAX_QUEUE_DEPTH=5, we expect exactly 5 enqueues before backpressure stops
+    assert total_enqueued == 5, f"Expected 5 enqueued due to backpressure, got {total_enqueued}"
+    assert len(fake_redis.queue) == 5
+
+    # Verify that all enqueued payloads are unique (no duplicates)
+    urls = [json.loads(payload)["url"] for payload in fake_redis.queue]
+    assert len(set(urls)) == len(urls), "Enqueued URLs should be unique"
+

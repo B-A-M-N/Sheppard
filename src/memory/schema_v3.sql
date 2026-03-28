@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS mission.mission_nodes (
     gain_score NUMERIC(8,4),
     failure_signature TEXT,
     notes_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    exhausted_modes_json JSONB NOT NULL DEFAULT '[]'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

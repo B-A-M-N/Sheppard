@@ -7,7 +7,7 @@ and that no illegal jumps occur. Also checks that terminal state persists.
 import pytest
 import asyncio
 from src.core.system import SystemManager
-from src.research.acquisition.frontier import AdaptiveFrontier
+from src.research.acquisition.frontier import AdaptiveFrontier, FrontierNode
 import asyncpg
 from src.memory.storage_adapter import SheppardStorageAdapter
 from src.memory.adapters.postgres import PostgresStoreImpl
@@ -17,12 +17,24 @@ import chromadb
 import tempfile
 import json
 
-class DummyFrontier:
-    """A frontier that immediately completes with no ingestion."""
-    def __init__(self, system, mission_id, topic_name):
-        pass
+class MinimalFrontier(AdaptiveFrontier):
+    """
+    A minimal frontier that performs a tiny amount of real work to exercise DB interactions,
+    including checkpointing (_load_checkpoint, _save_node). This replaces the previous DummyFrontier
+    to ensure that node persistence (parent_node_id, exhausted_modes) is exercised during the test.
+    """
     async def run(self):
-        return 0
+        # Load existing state (should be empty for new mission)
+        await self._load_checkpoint()
+        # Create a simple node and save it to exercise DB checkpointing
+        node = FrontierNode(
+            concept="minimal_test_node",
+            status="underexplored",
+            yield_history=[],
+            exhausted_modes=set()
+        )
+        await self._save_node(node)
+        return 1
 
 class FakeRedisClient:
     """A minimal fake Redis client for tests."""
@@ -53,7 +65,7 @@ class FakeRedisClient:
 @pytest.mark.asyncio
 async def test_v09_lifecycle(monkeypatch):
     # Patch AdaptiveFrontier in core.system module where _crawl_and_store uses it
-    monkeypatch.setattr("src.core.system.AdaptiveFrontier", DummyFrontier)
+    monkeypatch.setattr("src.core.system.AdaptiveFrontier", MinimalFrontier)
 
     # Setup adapter with real Postgres (local) and fake Redis/Chroma
     pg_pool = await asyncpg.create_pool(
