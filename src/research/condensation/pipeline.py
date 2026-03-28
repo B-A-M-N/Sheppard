@@ -86,7 +86,7 @@ class DistillationPipeline:
                     for atom_dict in atoms_data:
                         if not isinstance(atom_dict, dict): continue
                         
-                        atom_id = str(uuid.uuid4())
+                        atom_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{mission_id}:{source_id}:{atom_dict.get('content', '')[:200]}"))
                         profile_id = mission_row.get("domain_profile_id") if mission_row else f"profile_{mission_id[:8]}"
                         
                         atom = KnowledgeAtom(
