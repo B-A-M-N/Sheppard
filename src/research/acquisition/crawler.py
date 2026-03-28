@@ -297,6 +297,7 @@ class FirecrawlLocalClient:
                 break
                 
             page_new_count = 0
+            backpressure_triggered = False
             for url in urls:
                 if visited_urls is not None and url in visited_urls:
                     continue
@@ -314,12 +315,19 @@ class FirecrawlLocalClient:
                     "lane": lane,
                     "priority": 1 if lane == "fast" else 0
                 }
-                await system_manager.adapter.enqueue_job("queue:scraping", payload)
-                
-                if visited_urls is not None:
-                    visited_urls.add(url)
-                page_new_count += 1
-                total_enqueued += 1
+                success = await system_manager.adapter.enqueue_job("queue:scraping", payload)
+                if success:
+                    if visited_urls is not None:
+                        visited_urls.add(url)
+                    page_new_count += 1
+                    total_enqueued += 1
+                else:
+                    # Backpressure: queue depth limit reached; stop enqueuing further URLs for this node
+                    backpressure_triggered = True
+                    break
+
+            if backpressure_triggered:
+                break
 
             # Deep mining: continue through all pages regardless of new URL count.
             # Removed break-on-first-success to explore pages 1-5 fully.

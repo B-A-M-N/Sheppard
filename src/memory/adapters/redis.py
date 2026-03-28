@@ -3,13 +3,18 @@ memory/adapters/redis.py
 Concrete Redis backend implementation.
 """
 import json
+import logging
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional
 import redis.asyncio as redis
 from src.memory.storage_adapter import LockHandle
 
+logger = logging.getLogger(__name__)
 JsonDict = dict[str, Any]
+
+# Queue backpressure configuration
+MAX_QUEUE_DEPTH = 10000
 
 class RedisStoresImpl:
     """
@@ -80,8 +85,13 @@ class RedisStoresImpl:
         await self.client.delete(key)
 
     # QueueStore
-    async def enqueue_job(self, queue_name: str, payload: JsonDict) -> None:
+    async def enqueue_job(self, queue_name: str, payload: JsonDict) -> bool:
+        depth = await self.client.llen(queue_name)
+        if depth >= MAX_QUEUE_DEPTH:
+            logger.warning(f"Queue depth {depth} exceeds limit {MAX_QUEUE_DEPTH} — rejecting job")
+            return False
         await self.client.rpush(queue_name, self._serialize(payload))
+        return True
 
     async def dequeue_job(self, queue_name: str, timeout_s: int = 0) -> JsonDict | None:
         result = await self.client.blpop(queue_name, timeout=timeout_s)
