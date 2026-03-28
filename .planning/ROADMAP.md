@@ -12,6 +12,12 @@
 | 06-06 | Queue backpressure | ✅ Completed | 1/1 |
 | 06-XX | Validation / Integration | ⬜ Pending | 0/0 |
 
+## Phase 07 — Orchestration Validation
+
+| Plan | Name | Status | Tasks (C/T) |
+| ---- | ---- | ------ | ----------- |
+| 07-01 | Core invariants | ✅ Completed | 5/5 |
+
 **Legend**: ✅ Completed, ⬜ Pending, 🔄 In Progress
 
 ## Notes
