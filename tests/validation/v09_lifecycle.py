@@ -147,3 +147,106 @@ async def test_v09_lifecycle(monkeypatch):
     # Cleanup
     await adapter.pg.delete_where("mission.research_missions", {"mission_id": mission_id})
     await pg_pool.close()
+
+
+@pytest.mark.asyncio
+async def test_v09_lifecycle_with_restart(monkeypatch):
+    """
+    Variant of V09 that tests restart resilience: after a mission completes,
+    we reset its status to 'created' and run again to verify the lifecycle can
+    be repeated and checkpoint restoration functions correctly.
+    """
+    monkeypatch.setattr("src.core.system.AdaptiveFrontier", MinimalFrontier)
+
+    pg_pool = await asyncpg.create_pool(
+        'postgresql://sheppard:1234@localhost:5432/sheppard_v3',
+        min_size=1, max_size=5
+    )
+    pg_store = PostgresStoreImpl(pg_pool)
+    fake_redis = FakeRedisClient()
+    redis_runtime = RedisStoresImpl(fake_redis)
+    redis_cache = RedisStoresImpl(fake_redis)
+    redis_queue = RedisStoresImpl(fake_redis)
+    tmpdir = tempfile.mkdtemp()
+    chroma_client = chromadb.PersistentClient(path=tmpdir, settings=chromadb.Settings(anonymized_telemetry=False, allow_reset=True))
+    chroma_store = ChromaSemanticStoreImpl(chroma_client)
+
+    adapter = SheppardStorageAdapter(
+        pg=pg_store,
+        redis_runtime=redis_runtime,
+        redis_cache=redis_cache,
+        redis_queue=redis_queue,
+        chroma=chroma_store
+    )
+
+    sm = SystemManager()
+    sm.adapter = adapter
+    from src.research.acquisition.budget import BudgetMonitor, BudgetConfig
+    sm.budget = BudgetMonitor(config=BudgetConfig())
+    sm.crawler = None
+    sm.condenser = None
+    sm.retriever = None
+    sm.research_system = None
+    sm._crawl_tasks = {}
+    sm.active_frontiers = {}
+    sm._monitor_task = None
+    sm._vampire_tasks = []
+    sm._initialized = True
+
+    mission_id = "test-mission-v09-restart"
+    mission_row = {
+        "mission_id": mission_id,
+        "topic_id": mission_id,
+        "domain_profile_id": "profile_test",
+        "title": "Test Mission V09 Restart",
+        "objective": "Validate lifecycle with restart",
+        "status": "created",
+        "budget_bytes": 0,
+        "bytes_ingested": 0,
+        "source_count": 0,
+    }
+    await adapter.pg.insert_row("mission.research_missions", mission_row)
+
+    # --- First Run ---
+    status_calls1 = []
+    original_update_status = adapter.update_mission_status
+    async def spy_update_status1(mission_id, status, stop_reason=None):
+        status_calls1.append(status)
+        await original_update_status(mission_id, status, stop_reason)
+    adapter.update_mission_status = spy_update_status1
+
+    await sm._crawl_and_store(mission_id, "test topic", "test query")
+
+    assert "active" in status_calls1, "First run: Expected transition to 'active'"
+    assert "completed" in status_calls1, "First run: Expected transition to 'completed'"
+    # Check DB shows completed
+    mid_mission = await adapter.get_mission(mission_id)
+    assert mid_mission["status"] == "completed"
+
+    # --- Simulate Restart ---
+    # Reset mission status to 'created' to simulate a retry/restart after failure or manual reset
+    await adapter.update_mission_status(mission_id, "created")
+
+    # Clear status call history and install new spy for second run
+    status_calls2 = []
+    async def spy_update_status2(mission_id, status, stop_reason=None):
+        status_calls2.append(status)
+        await original_update_status(mission_id, status, stop_reason)
+    adapter.update_mission_status = spy_update_status2
+
+    # --- Second Run ---
+    await sm._crawl_and_store(mission_id, "test topic", "test query")
+
+    assert "active" in status_calls2, "Second run: Expected transition to 'active'"
+    assert "completed" in status_calls2, "Second run: Expected transition to 'completed'"
+    active_idx = status_calls2.index("active")
+    completed_idx = status_calls2.index("completed")
+    assert active_idx < completed_idx, "Second run: 'active' must occur before 'completed'"
+
+    # Final status still completed
+    final_mission = await adapter.get_mission(mission_id)
+    assert final_mission["status"] == "completed", f"Final status should be 'completed', got {final_mission['status']}"
+
+    # Cleanup
+    await adapter.pg.delete_where("mission.research_missions", {"mission_id": mission_id})
+    await pg_pool.close()

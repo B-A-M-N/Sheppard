@@ -87,6 +87,9 @@ async def test_v10_backpressure_crawler_integration(monkeypatch):
     Integration test: Verify that FirecrawlLocalClient.discover_and_enqueue respects backpressure.
     When the Redis queue reaches MAX_QUEUE_DEPTH, further enqueues are rejected, the backpressure_triggered
     flag stops further URL processing, and total_enqueued does not exceed the limit.
+
+    This test uses a single page with 10 URLs. With MAX_QUEUE_DEPTH=5, we expect exactly 5 enqueues,
+    proving that backpressure cuts off mid-page and the remaining URLs are never enqueued.
     """
     # Set a small MAX_QUEUE_DEPTH for the test
     import src.memory.adapters.redis as redis_mod
@@ -115,10 +118,12 @@ async def test_v10_backpressure_crawler_integration(monkeypatch):
         academic_only=False
     )
 
-    # Mock _search to return many URLs to trigger backpressure
+    # Mock _search: page 1 returns 10 URLs; page 2+ return none
+    # This ensures we test that backpressure stops mids-page.
     async def mock_search(query, pageno):
-        # Return 10 URLs per page to ensure we exceed depth quickly
-        return [f"https://example.com/page{pageno}-{i}" for i in range(10)]
+        if pageno == 1:
+            return [f"https://example.com/page1-{i}" for i in range(10)]
+        return []  # no further pages
     monkeypatch.setattr(client, "_search", mock_search)
 
     # Call discover_and_enqueue with empty visited set
@@ -137,4 +142,12 @@ async def test_v10_backpressure_crawler_integration(monkeypatch):
     # Verify that all enqueued payloads are unique (no duplicates)
     urls = [json.loads(payload)["url"] for payload in fake_redis.queue]
     assert len(set(urls)) == len(urls), "Enqueued URLs should be unique"
+
+    # Explicitly prove backpressure rejected remaining URLs:
+    # The first page had 10 URLs, but only 5 were enqueued.
+    # The remaining 5 (indices 5-9) must not appear in the enqueued list.
+    enqueued_set = set(urls)
+    rejected_urls = [f"https://example.com/page1-{i}" for i in range(5, 10)]
+    for rurl in rejected_urls:
+        assert rurl not in enqueued_set, f"URL {rurl} should have been rejected due to backpressure, but was enqueued"
 

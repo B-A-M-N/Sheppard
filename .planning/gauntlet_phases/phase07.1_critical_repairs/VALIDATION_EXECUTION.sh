@@ -13,9 +13,14 @@
 # Requirements: psql, pytest, database connectivity
 
 set -e  # Exit on any error
+set -o pipefail  # Pipeline returns failure if any stage fails
 
 echo "=== Phase 07.1: Validation Execution ==="
 echo ""
+
+# Determine log file path (same directory as this script)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOG_FILE="$SCRIPT_DIR/validation_output.log"
 
 # Color helpers
 RED='\033[0;31m'
@@ -95,15 +100,17 @@ echo -e "${GREEN}✓${NC} pytest available"
 echo ""
 echo "Step 5: Running validation test suite..."
 echo "Command: pytest tests/validation/ -v --tb=short"
+echo "Output log: $LOG_FILE"
 echo ""
 
-# Run tests with verbose output
-if pytest tests/validation/ -v --tb=short; then
+# Run tests with verbose output, capture to log
+if pytest tests/validation/ -v --tb=short 2>&1 | tee "$LOG_FILE"; then
     echo ""
     echo -e "${GREEN}========================================${NC}"
     echo -e "${GREEN}✓ ALL VALIDATION TESTS PASSED${NC}"
     echo -e "${GREEN}========================================${NC}"
     echo ""
+    echo "Validation log saved to: $LOG_FILE"
     echo "The system is now validated for milestone v1.0."
     echo "Next: Run final milestone audit with 'gsd:audit-milestone'"
     exit 0
@@ -114,7 +121,8 @@ else
     echo -e "${RED}========================================${NC}"
     echo ""
     echo "FAILURE ANALYSIS:"
-    echo "- Review the pytest output above for specific test failures"
+    echo "- Full output saved to: $LOG_FILE"
+    echo "- Review the log for specific test failures"
     echo "- Common issues:"
     echo "  1. Missing exhausted_modes_json column → re-apply migration"
     echo "  2. V09 failure with real frontier → check DB interactions"
