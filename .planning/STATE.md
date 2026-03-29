@@ -71,3 +71,40 @@ progress:
 
 - Database migration required: add `exhausted_modes_json` column to `mission.mission_nodes` table.
 - All code changes are surgical and align with audit findings.
+
+---
+
+## Phase 10 — Retrieval & Grounding
+
+- **Plan:** 01
+- **Status:** Completed
+- **Tasks:** 5/5 completed
+
+### Decisions
+
+- V3Retriever placed in `src/retrieval/` to separate concerns.
+- Lexical overlap threshold set to ≥2 content words after stopword removal.
+- Entity extraction uses any uppercase word token (>1 char) to balance precision/recall.
+- STOPWORDS expanded to include common auxiliary verbs (is, are, was, etc.) for proper content identification.
+- No confidence filtering applied to retrieval results.
+
+### Issues
+
+- None outstanding.
+
+### Sessions
+
+- Completed execution of Phase 10 PLAN-01 on 2026-03-29T23:30:59Z
+- Stopped At: Completed PHASE-10-PLAN-01
+
+### Performance Metrics
+
+| Phase | Plan | Duration (approx) | Tasks | Files |
+| ----- | ---- | ----------------- | ----- | ----- |
+| 10    | 01   | ~20 minutes       | 5     | 8     |
+
+### Requirements Traceability
+
+- RETRIEVAL-GROUNDING: ✅ Implemented
+- PROVENANCE: ✅ Sequential citations enforced
+- CONCURRENT-RESEARCH: Out of scope for this plan

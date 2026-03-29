@@ -27,7 +27,14 @@
 
 | Plan | Name | Status | Tasks (C/T) |
 | ---- | ---- | ------ | ----------- |
-| 09-01 | Atom schema and extraction pipeline | ⬜ Pending | 0/0 |
+| 09-01 | Atom schema and extraction pipeline | ✅ Completed | 0/0 |
+| 09-XX | Gap Closure (soft acceptance) | ✅ Completed | 0/0 |
+
+## Phase 10 — Atom Store & Query
+
+| Plan | Name | Status | Tasks (C/T) |
+| ---- | ---- | ------ | ----------- |
+| 10-01 | Storage handoff and retrieval verification | ✅ Completed | 5/5 |
 
 **Legend**: ✅ Completed, ⬜ Pending, 🔄 In Progress
 
