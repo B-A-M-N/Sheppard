@@ -9,7 +9,7 @@ files_modified:
   - src/research/archivist/loop.py
   - tests/test_archivist_resilience.py
 autonomous: true
-requirements: [O1, O2, O3]
+requirements: [O1, O2, O5]
 must_haves:
   truths:
     - "HTTP 5xx errors are retried up to 3 times before failing"
@@ -26,7 +26,7 @@ must_haves:
       provides: "Explicit error logging on all catch blocks"
       contains: "logger.error"
     - path: "tests/test_archivist_resilience.py"
-      provides: "Regression tests for O1, O2, O3 fixes"
+      provides: "Regression tests for O1, O2, O5 fixes"
       min_lines: 50
   key_links:
     - from: "src/research/archivist/crawler.py"
@@ -93,11 +93,11 @@ The fallback fetch block is a flat try/except with no retry:
         return None
 ```
 
-**Required change:** Replace the flat try/except block (lines 60-81) with a retry loop that classifies errors. The new code for the "Fallback to manual requests" section should be:
+**Required change:** First, add `import time` at the module level (top of file, alongside the other imports). The file does not currently import `time`, so there is no conflict.
+
+Then replace the flat try/except block (lines 61-81) with a retry loop that classifies errors. The new code for the "Fallback to manual requests" section should be:
 
 ```python
-    import time as _time
-
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -123,14 +123,14 @@ The fallback fetch block is a flat try/except with no retry:
         except requests.exceptions.HTTPError as e:
             status_code = e.response.status_code if e.response is not None else 0
             if 500 <= status_code < 600 and attempt < max_retries - 1:
-                _time.sleep(1 * (attempt + 1))  # Linear backoff: 1s, 2s
+                time.sleep(1 * (attempt + 1))  # Linear backoff: 1s, 2s
                 continue
             # 4xx or final 5xx attempt -- not retryable / exhausted
             return None
 
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
             if attempt < max_retries - 1:
-                _time.sleep(1 * (attempt + 1))
+                time.sleep(1 * (attempt + 1))
                 continue
             return None
 
@@ -141,7 +141,7 @@ The fallback fetch block is a flat try/except with no retry:
     return None
 ```
 
-Move `import time as _time` to the top of the file with other imports (rename to avoid conflicts -- or just use `import time` at module level if no conflict exists). Check: the file does not currently import `time`, so `import time` at the top level is fine.
+Note: The replacement block contains NO import statement. The `import time` is at the module level only.
 
 **Test file:** Create `tests/test_archivist_resilience.py`. Use `unittest.mock.patch` to mock `requests.get`. For 5xx tests, create a mock response with `.status_code = 500` and `.raise_for_status()` that raises `requests.exceptions.HTTPError(response=mock_response)`. For 4xx, same pattern with 404. For ConnectionError/Timeout, make `requests.get` raise those directly. Count call count to verify retry behavior.
 
@@ -156,7 +156,7 @@ Move `import time as _time` to the top of the file with other imports (rename to
     - grep "500 <= status_code < 600" src/research/archivist/crawler.py succeeds
     - grep "ConnectionError.*Timeout" src/research/archivist/crawler.py succeeds
     - All retry/classification tests pass
-    - No "except: pass" exists in crawler.py (grep -c "except: pass" returns 0 or is absent)
+    - grep -c "http_status_code >= 500\|500 <= status_code" src/research/archivist/crawler.py returns at least 1
   </acceptance_criteria>
   <done>
     HTTP 5xx triggers retry (up to 3 attempts with backoff). HTTP 4xx returns None immediately. ConnectionError/Timeout retry. All bounded. Tests prove it.
@@ -240,7 +240,7 @@ Mock all external calls (search.search_web, crawler.fetch_url, embeddings.*, ret
 </task>
 
 <task type="auto" tdd="true">
-  <name>Task 3: O3 -- Relax extract_text heuristics to reduce false rejection</name>
+  <name>Task 3: O5 -- Relax extract_text heuristics to reduce false rejection</name>
   <files>src/research/archivist/crawler.py, tests/test_archivist_resilience.py</files>
   <read_first>
     - src/research/archivist/crawler.py (lines 83-115 specifically -- the extract_text function)
@@ -248,8 +248,9 @@ Mock all external calls (search.search_web, crawler.fetch_url, embeddings.*, ret
   <behavior>
     - Test: A line with 11 chars (e.g., "Short line.") is kept (was dropped by > 20 filter)
     - Test: A line with 9 chars is still dropped (below new 10-char threshold)
-    - Test: Content after navigation keywords is kept when substantial content (>500 chars) already accumulated
-    - Test: Content after navigation keywords is still dropped when little content (<100 chars) accumulated
+    - Test: Content after navigation keywords is kept when substantial content (>= 500 chars) already accumulated
+    - Test: Content after navigation keywords is still dropped when little content (< 500 chars) accumulated -- use 499 chars to test boundary
+    - Test: Content after navigation keywords is kept when exactly 501 chars accumulated -- boundary kept
     - Test: A representative structured .gov HTML snippet (with short label lines and navigation divs) extracts to > 300 chars
   </behavior>
   <action>
@@ -264,9 +265,9 @@ Mock all external calls (search.search_web, crawler.fetch_url, embeddings.*, ret
     cleaned_text = '\n'.join(chunk for chunk in chunks if len(chunk) > 10)
 ```
 
-**Change 2: Don't skip_rest if substantial content already accumulated (lines 105-109):**
+**Change 2: Don't skip_rest if substantial content already accumulated (lines 103-109):**
 ```python
-# BEFORE (lines 105-109):
+# BEFORE (lines 103-109):
     filtered_lines = []
     skip_rest = False
     for line in cleaned_text.split('\n'):
@@ -292,7 +293,7 @@ This means: if we already have 500+ chars of accumulated content when we hit a n
 
 **Tests:** Add tests to `tests/test_archivist_resilience.py`:
 - Test the `> 10` threshold with crafted lines
-- Test the skip_rest gating with a mock HTML page that has "navigation" early but real content after
+- Test the skip_rest gating: use 499 chars accumulated (boundary -- should activate skip_rest) and 501 chars accumulated (boundary -- should NOT activate skip_rest)
 - Test with a minimal .gov-like HTML structure that previously would have been stripped to < 300 chars
   </action>
   <verify>
@@ -337,7 +338,7 @@ grep -c "except: pass" src/research/archivist/loop.py               # expect: 0
 grep -c "except Exception as e" src/research/archivist/loop.py      # expect: >= 4
 grep -c "logger.error" src/research/archivist/loop.py               # expect: >= 4
 
-# O3 checks
+# O5 checks
 grep "len(chunk) > 10" src/research/archivist/crawler.py            # expect: match
 grep "len(chunk) > 20" src/research/archivist/crawler.py            # expect: NO match
 ```
@@ -350,6 +351,12 @@ cd /home/bamn/Sheppard && python -m pytest tests/test_chunking_validation.py -v 
 If any check fails, fix the issue in the relevant source file before proceeding.
 
 **Step 4:** Summarize results in the plan summary.
+
+**Step 5:** Create `.planning/gauntlet_phases/phase08.2_resilience_hardening/PHASE-08.2-VERIFICATION.md` documenting:
+- Each observation (O1, O2, O5) with PASS/FAIL status
+- Test results summary
+- Grep check results
+- Any regressions found (or confirmation of none)
   </action>
   <verify>
     <automated>cd /home/bamn/Sheppard && python -m pytest tests/test_archivist_resilience.py tests/test_chunking_validation.py -v --tb=short 2>&1 | tail -30</automated>
@@ -358,9 +365,10 @@ If any check fails, fix the issue in the relevant source file before proceeding.
     - All tests in test_archivist_resilience.py pass
     - All tests in test_chunking_validation.py pass (no regression)
     - All grep checks from Tasks 1-3 return expected values
+    - PHASE-08.2-VERIFICATION.md exists with pass/fail status for each observation
   </acceptance_criteria>
   <done>
-    All O1/O2/O3 fixes verified by automated tests and grep checks. No regressions in Phase 08.1 test suite. Phase 08.2 implementation complete.
+    All O1/O2/O5 fixes verified by automated tests and grep checks. No regressions in Phase 08.1 test suite. PHASE-08.2-VERIFICATION.md produced. Phase 08.2 implementation complete.
   </done>
 </task>
 
@@ -373,7 +381,7 @@ All three soak findings closed:
 
 2. **O2 (Silent failure):** Zero `except: pass` in loop.py. All catch blocks use `except Exception as e: logger.error(...)` with URL/query in message. Loop continues after error.
 
-3. **O3 (False rejection):** Per-line minimum lowered to 10 chars. skip_rest gated on accumulated content (500 chars). Structured .gov pages extract properly.
+3. **O5 (False rejection):** Per-line minimum lowered to 10 chars. skip_rest gated on accumulated content (500 chars). Structured .gov pages extract properly.
 
 No scope creep: only crawler.py, loop.py, and test file touched. No new frameworks, no circuit breakers, no system-wide changes.
 </verification>
@@ -385,8 +393,11 @@ No scope creep: only crawler.py, loop.py, and test file touched. No new framewor
 - grep -c "for attempt in range" src/research/archivist/crawler.py == 1
 - grep "len(chunk) > 10" src/research/archivist/crawler.py matches
 - grep "len(chunk) > 20" src/research/archivist/crawler.py does NOT match
+- .planning/gauntlet_phases/phase08.2_resilience_hardening/PHASE-08.2-VERIFICATION.md exists
 </success_criteria>
 
 <output>
-After completion, create `.planning/gauntlet_phases/phase08.2_resilience_hardening/08.2-01-SUMMARY.md`
+After completion, create:
+- `.planning/gauntlet_phases/phase08.2_resilience_hardening/08.2-01-SUMMARY.md`
+- `.planning/gauntlet_phases/phase08.2_resilience_hardening/PHASE-08.2-VERIFICATION.md`
 </output>
