@@ -51,7 +51,8 @@ async def fill_data_gaps(state, section_title, section_goal, chroma_store: Chrom
                     new_urls.add(u)
                 elif any(kw in state.objective.lower() for kw in ['epstein', 'files', 'investigation']) and u not in state.source_registry:
                     new_urls.add(u)
-        except: pass
+        except Exception as e:
+            logger.error(f"[FAIL] Search query failed: {q}: {e}")
 
     for url in list(new_urls)[:6]:
         try:
@@ -104,7 +105,8 @@ async def execute_section_cycle(state, section_index, chroma_store: ChromaSemant
                     if u not in state.source_registry: new_urls.add(u)
                 elif any(kw in state.objective.lower() for kw in ['epstein', 'files', 'investigation', 'unredacted']) and not is_junk:
                     if u not in state.source_registry: new_urls.add(u)
-        except: pass
+        except Exception as e:
+            logger.error(f"[FAIL] Search query failed: {q}: {e}")
 
     for url in list(new_urls)[:6]:
         try:
@@ -124,7 +126,8 @@ async def execute_section_cycle(state, section_index, chroma_store: ChromaSemant
                     metadatas = [{"source": url, "text": c, "global_id": sid} for c in chunks]
                     await index.add_chunks(chunks, embs, metadatas)
                     logger.info(f"[PASS] Ingested: [{sid}] {url}")
-        except: pass
+        except Exception as e:
+            logger.error(f"[FAIL] Ingestion failed for {url}: {e}")
 
     # Retrieve Context
     q_emb = embeddings.get_embedding(f"{state.objective}: {title} {goal}")

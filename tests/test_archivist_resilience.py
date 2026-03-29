@@ -44,6 +44,58 @@ config_mod = _load_module_directly('src.research.archivist.config', os.path.join
 # Load crawler (depends on config)
 crawler = _load_module_directly('src.research.archivist.crawler', os.path.join(_ARCHIVIST, 'crawler.py'))
 
+# ---------------------------------------------------------------------------
+# Load loop.py with stub dependencies so we can test it without real backends
+# ---------------------------------------------------------------------------
+
+def _make_stub_module(name: str, **attrs):
+    """Create a stub module with the given attributes."""
+    mod = types.ModuleType(name)
+    for k, v in attrs.items():
+        setattr(mod, k, v)
+    sys.modules[name] = mod
+    return mod
+
+# Stub all heavy archivist dependencies that loop.py imports
+_make_stub_module('src.research.archivist.planner', generate_section_queries=MagicMock(return_value=["q1"]))
+_make_stub_module('src.research.archivist.search', search_web=MagicMock(return_value=[]))
+_make_stub_module('src.research.archivist.chunker', chunk_text=MagicMock(return_value=["chunk"]))
+_make_stub_module('src.research.archivist.embeddings',
+                  get_embeddings_batch=MagicMock(return_value=[]),
+                  get_embedding=MagicMock(return_value=[0.1] * 10))
+async def _async_none(*args, **kwargs):
+    return None
+
+_make_stub_module('src.research.archivist.index',
+                  init=MagicMock(),
+                  add_chunks=_async_none,
+                  clear_index=_async_none)
+async def _async_empty_list(*args, **kwargs):
+    return []
+
+_make_stub_module('src.research.archivist.retriever',
+                  init=MagicMock(),
+                  search=_async_empty_list)
+_make_stub_module('src.research.archivist.synth',
+                  summarize_source=MagicMock(return_value="summary"),
+                  write_section=MagicMock(return_value="Section content"))
+_make_stub_module('src.research.archivist.critic',
+                  critique_answer=MagicMock(return_value={"needs_more_info": False}))
+_make_stub_module('src.research.archivist.llm', set_sheppard_client=MagicMock())
+_make_stub_module('src.memory',)
+_make_stub_module('src.memory.storage_adapter', ChromaSemanticStore=MagicMock)
+
+# Also stub planner, search, crawler refs as standalone modules in archivist package
+# (loop imports them as `from . import planner, search, crawler, ...`)
+_archivist_pkg = sys.modules['src.research.archivist']
+for _sub in ['planner', 'search', 'chunker', 'embeddings', 'index', 'retriever', 'synth', 'critic', 'llm']:
+    setattr(_archivist_pkg, _sub, sys.modules[f'src.research.archivist.{_sub}'])
+# Set crawler reference to the one we loaded
+setattr(_archivist_pkg, 'crawler', crawler)
+
+# Now load loop.py
+loop = _load_module_directly('src.research.archivist.loop', os.path.join(_ARCHIVIST, 'loop.py'))
+
 
 # ---------------------------------------------------------------------------
 # Helper: build a mock HTTP response
@@ -194,127 +246,88 @@ class TestLoopErrorLogging(unittest.TestCase):
     """Test that loop.py logs errors instead of silently swallowing them."""
 
     def _make_state(self):
-        from src.research.archivist import loop
         state = loop.ResearchState("test objective")
         state.plan = [{"title": "Test Section", "goal": "test goal"}]
         return state
 
-    @patch('src.research.archivist.loop.search.search_web')
-    @patch('src.research.archivist.loop.crawler.fetch_url')
-    @patch('src.research.archivist.loop.embeddings.get_embedding')
-    @patch('src.research.archivist.loop.embeddings.get_embeddings_batch')
-    @patch('src.research.archivist.loop.retriever.search')
-    @patch('src.research.archivist.loop.synth.write_section')
-    @patch('src.research.archivist.loop.synth.summarize_source')
-    @patch('src.research.archivist.loop.index.add_chunks')
-    @patch('src.research.archivist.loop.logger')
-    def test_execute_section_cycle_logs_fetch_error(
-        self,
-        mock_logger,
-        mock_index_add,
-        mock_summarize,
-        mock_write_section,
-        mock_retriever_search,
-        mock_embs_batch,
-        mock_emb,
-        mock_fetch,
-        mock_search,
-    ):
+    def test_execute_section_cycle_logs_fetch_error(self):
         """When fetch_url raises in execute_section_cycle, error is logged with URL."""
-        from src.research.archivist import loop
+        import asyncio
+        import unittest.mock as _mock
 
-        mock_search.return_value = ["http://example.com/url1"]
-        mock_fetch.side_effect = RuntimeError("network exploded")
-        mock_emb.return_value = [0.1] * 10
-        mock_retriever_search.return_value = []
-        mock_write_section.return_value = "Section content without gaps"
-        mock_embs_batch.return_value = []
-        mock_index_add.return_value = None
-        mock_summarize.return_value = "summary"
+        async def _mock_retriever_search(*a, **kw):
+            return []
+
+        mock_logger = MagicMock()
+        mock_fetch = MagicMock(side_effect=RuntimeError("network exploded"))
+        # Use a .gov URL so it passes the is_authoritative filter
+        mock_search = MagicMock(return_value=["https://www.nih.gov/page"])
+        mock_emb = MagicMock(return_value=[0.1] * 10)
+        mock_write = MagicMock(return_value="Section content without gaps")
 
         state = self._make_state()
-
-        import asyncio
         chroma_store = MagicMock()
-        asyncio.run(loop.execute_section_cycle(state, 0, chroma_store))
 
-        # logger.error should have been called with URL in message
+        with _mock.patch.object(loop, 'logger', mock_logger), \
+             _mock.patch.object(loop.crawler, 'fetch_url', mock_fetch), \
+             _mock.patch.object(loop.search, 'search_web', mock_search), \
+             _mock.patch.object(loop.embeddings, 'get_embedding', mock_emb), \
+             _mock.patch.object(loop.retriever, 'search', _mock_retriever_search), \
+             _mock.patch.object(loop.synth, 'write_section', mock_write):
+            asyncio.run(loop.execute_section_cycle(state, 0, chroma_store))
+
         error_calls = [str(c) for c in mock_logger.error.call_args_list]
         self.assertTrue(
-            any("http://example.com/url1" in c or "FAIL" in c for c in error_calls),
+            any("nih.gov" in c or "FAIL" in c for c in error_calls),
             f"Expected logger.error with URL, got: {error_calls}"
         )
 
-    @patch('src.research.archivist.loop.search.search_web')
-    @patch('src.research.archivist.loop.crawler.fetch_url')
-    @patch('src.research.archivist.loop.embeddings.get_embedding')
-    @patch('src.research.archivist.loop.embeddings.get_embeddings_batch')
-    @patch('src.research.archivist.loop.retriever.search')
-    @patch('src.research.archivist.loop.synth.write_section')
-    @patch('src.research.archivist.loop.synth.summarize_source')
-    @patch('src.research.archivist.loop.index.add_chunks')
-    @patch('src.research.archivist.loop.logger')
-    def test_execute_section_cycle_continues_after_error(
-        self,
-        mock_logger,
-        mock_index_add,
-        mock_summarize,
-        mock_write_section,
-        mock_retriever_search,
-        mock_embs_batch,
-        mock_emb,
-        mock_fetch,
-        mock_search,
-    ):
+    def test_execute_section_cycle_continues_after_error(self):
         """After a logged error, the loop continues — function completes (doesn't crash)."""
-        from src.research.archivist import loop
+        import asyncio
+        import unittest.mock as _mock
 
-        mock_search.return_value = ["http://example.com/url1", "http://example.com/url2"]
-        mock_fetch.side_effect = RuntimeError("boom")
-        mock_emb.return_value = [0.1] * 10
-        mock_retriever_search.return_value = []
-        mock_write_section.return_value = "Section content"
-        mock_embs_batch.return_value = []
-        mock_index_add.return_value = None
-        mock_summarize.return_value = "summary"
+        async def _mock_retriever_search(*a, **kw):
+            return []
+
+        mock_logger = MagicMock()
+        mock_fetch = MagicMock(side_effect=RuntimeError("boom"))
+        # Use .gov URLs so they pass the is_authoritative filter in execute_section_cycle
+        mock_search = MagicMock(return_value=["https://www.nih.gov/url1", "https://www.cdc.gov/url2"])
+        mock_emb = MagicMock(return_value=[0.1] * 10)
+        mock_write = MagicMock(return_value="Section content")
 
         state = self._make_state()
         chroma_store = MagicMock()
 
-        import asyncio
-        # Should not raise
-        result = asyncio.run(loop.execute_section_cycle(state, 0, chroma_store))
-        self.assertTrue(result is not None or result is None)  # Completes without exception
+        with _mock.patch.object(loop, 'logger', mock_logger), \
+             _mock.patch.object(loop.crawler, 'fetch_url', mock_fetch), \
+             _mock.patch.object(loop.search, 'search_web', mock_search), \
+             _mock.patch.object(loop.embeddings, 'get_embedding', mock_emb), \
+             _mock.patch.object(loop.retriever, 'search', _mock_retriever_search), \
+             _mock.patch.object(loop.synth, 'write_section', mock_write):
+            # Should not raise
+            result = asyncio.run(loop.execute_section_cycle(state, 0, chroma_store))
 
-    @patch('src.research.archivist.loop.search.search_web')
-    @patch('src.research.archivist.loop.crawler.fetch_url')
-    @patch('src.research.archivist.loop.embeddings.get_embeddings_batch')
-    @patch('src.research.archivist.loop.index.add_chunks')
-    @patch('src.research.archivist.loop.synth.summarize_source')
-    @patch('src.research.archivist.loop.logger')
-    def test_fill_data_gaps_logs_fetch_error(
-        self,
-        mock_logger,
-        mock_summarize,
-        mock_index_add,
-        mock_embs_batch,
-        mock_fetch,
-        mock_search,
-    ):
+        # Completes without raising — result can be True or None
+        self.assertTrue(result is not None or result is None)
+
+    def test_fill_data_gaps_logs_fetch_error(self):
         """When fetch_url raises in fill_data_gaps URL loop, error is logged."""
-        from src.research.archivist import loop
+        import asyncio
+        import unittest.mock as _mock
 
-        mock_search.return_value = ["http://gov.example.gov/page"]
-        mock_fetch.side_effect = RuntimeError("fetch failed")
-        mock_embs_batch.return_value = []
-        mock_index_add.return_value = None
-        mock_summarize.return_value = "summary"
+        mock_logger = MagicMock()
+        mock_fetch = MagicMock(side_effect=RuntimeError("fetch failed"))
+        mock_search = MagicMock(return_value=["http://gov.example.gov/page"])
 
         state = self._make_state()
         chroma_store = MagicMock()
 
-        import asyncio
-        asyncio.run(loop.fill_data_gaps(state, "Test Section", "test goal", chroma_store))
+        with _mock.patch.object(loop, 'logger', mock_logger), \
+             _mock.patch.object(loop.crawler, 'fetch_url', mock_fetch), \
+             _mock.patch.object(loop.search, 'search_web', mock_search):
+            asyncio.run(loop.fill_data_gaps(state, "Test Section", "test goal", chroma_store))
 
         error_calls = [str(c) for c in mock_logger.error.call_args_list]
         self.assertTrue(
@@ -322,35 +335,23 @@ class TestLoopErrorLogging(unittest.TestCase):
             "Expected logger.error to be called when fetch_url raises"
         )
 
-    @patch('src.research.archivist.loop.search.search_web')
-    @patch('src.research.archivist.loop.crawler.fetch_url')
-    @patch('src.research.archivist.loop.embeddings.get_embeddings_batch')
-    @patch('src.research.archivist.loop.index.add_chunks')
-    @patch('src.research.archivist.loop.synth.summarize_source')
-    @patch('src.research.archivist.loop.logger')
-    def test_fill_data_gaps_search_error_logged(
-        self,
-        mock_logger,
-        mock_summarize,
-        mock_index_add,
-        mock_embs_batch,
-        mock_fetch,
-        mock_search,
-    ):
+    def test_fill_data_gaps_search_error_logged(self):
         """When search_web raises in fill_data_gaps, error is logged."""
-        from src.research.archivist import loop
+        import asyncio
+        import unittest.mock as _mock
 
-        mock_search.side_effect = RuntimeError("search exploded")
-        mock_fetch.return_value = None
-        mock_embs_batch.return_value = []
-        mock_index_add.return_value = None
+        mock_logger = MagicMock()
+        mock_fetch = MagicMock(return_value=None)
+        mock_search = MagicMock(side_effect=RuntimeError("search exploded"))
 
         state = self._make_state()
         chroma_store = MagicMock()
 
-        import asyncio
-        # Should complete without raising
-        asyncio.run(loop.fill_data_gaps(state, "Test Section", "test goal", chroma_store))
+        with _mock.patch.object(loop, 'logger', mock_logger), \
+             _mock.patch.object(loop.crawler, 'fetch_url', mock_fetch), \
+             _mock.patch.object(loop.search, 'search_web', mock_search):
+            # Should complete without raising
+            asyncio.run(loop.fill_data_gaps(state, "Test Section", "test goal", chroma_store))
 
         error_calls = [str(c) for c in mock_logger.error.call_args_list]
         self.assertTrue(
