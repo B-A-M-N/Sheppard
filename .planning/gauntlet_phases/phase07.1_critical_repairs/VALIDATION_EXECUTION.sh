@@ -99,12 +99,12 @@ echo -e "${GREEN}✓${NC} pytest available"
 # ============================================
 echo ""
 echo "Step 5: Running validation test suite..."
-echo "Command: pytest tests/validation/ -v --tb=short"
+echo "Command: PYTHONPATH=. pytest tests/validation/ -v --tb=short"
 echo "Output log: $LOG_FILE"
 echo ""
 
 # Run tests with verbose output, capture to log
-if pytest tests/validation/ -v --tb=short 2>&1 | tee "$LOG_FILE"; then
+if PYTHONPATH=. pytest tests/validation/ -v --tb=short 2>&1 | tee "$LOG_FILE"; then
     echo ""
     echo -e "${GREEN}========================================${NC}"
     echo -e "${GREEN}✓ ALL VALIDATION TESTS PASSED${NC}"

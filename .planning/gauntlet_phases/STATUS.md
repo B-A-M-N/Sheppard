@@ -31,8 +31,11 @@ For each phase:
 | 05E — Race Hardening Review | ⏳ | | | G5: audit concurrent hot paths, add guards |
 | 06 — Discovery | ⏳ | | | Deferred |
 | 07 — Workers | ⏳ | | | Deferred |
-| 08 — Scraping | ⏳ | | | Deferred |
-| 09 — Smelter | ⏳ | | | Deferred |
+| 08 — Scraping | ✅ | FAIL→REPAIRED | 2026-03-28 | Chunking missing + validation bypass → fixed via 08.1 |
+| 08.1 — Critical Repairs | ✅ | PASS | 2026-03-29 | Chunking live, validation enforced, 13 regression tests |
+| SOAK | ✅ | ISSUES FOUND | 2026-03-29 | 9 URLs × 2 runs. Issues: retry policy gap (5xx not retried), loop.py swallows errors silently, NIH false rejection. Chunking deterministic. No unknown failures. |
+| 08.2 — Resilience Hardening | ⏳ | | | B: local hardening of repaired ingestion path. Retries, validation bypass prevention, chunking determinism under failure, partial state control, race edges, LLM dependency bounds. NOT platform-wide. |
+| 09 — Smelter | ⏳ | | | C: distillation / atom extraction. After 08.2 only. |
 | 10 — Retrieval | ⏳ | | | Deferred |
 | 11 — Reports | ⏳ | | | Deferred |
 | 12 — Async | ⏳ | | | Deferred |

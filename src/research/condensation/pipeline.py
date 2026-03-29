@@ -80,14 +80,15 @@ class DistillationPipeline:
                 
                 try:
                     atoms_data = await extract_technical_atoms(self.ollama, content, topic_name)
-                    
+
                     # 3. Storage & Indexing
+                    atoms_this_source = 0
                     for atom_dict in atoms_data:
                         if not isinstance(atom_dict, dict): continue
-                        
+
                         atom_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{mission_id}:{source_id}:{atom_dict.get('content', '')[:200]}"))
                         profile_id = mission_row.get("domain_profile_id") if mission_row else f"profile_{mission_id[:8]}"
-                        
+
                         atom = KnowledgeAtom(
                             atom_id=atom_id,
                             topic_id=mission_row.get("topic_id") if mission_row else mission_id,
@@ -104,7 +105,7 @@ class DistillationPipeline:
                             ),
                             metadata={"type": atom_dict.get('type'), "source_id": source_id}
                         )
-                        
+
                         # Store atom and evidence atomically via V3 Adapter
                         atom_row = atom.to_pg_row()
                         evidence_rows = [{
@@ -115,13 +116,22 @@ class DistillationPipeline:
                         await self.adapter.store_atom_with_evidence(atom_row, evidence_rows)
 
                         total_atoms += 1
+                        atoms_this_source += 1
 
-                    # 5. Mark individual source as condensed immediately
-                    await self.adapter.pg.update_row(
-                        "corpus.sources", 
-                        "source_id", 
-                        {"source_id": source_id, "status": "condensed"}
-                    )
+                    # 5. Mark individual source as condensed only if atoms were stored
+                    if atoms_this_source > 0:
+                        await self.adapter.pg.update_row(
+                            "corpus.sources",
+                            "source_id",
+                            {"source_id": source_id, "status": "condensed"}
+                        )
+                    else:
+                        # No valid atoms extracted — reject source explicitly
+                        await self.adapter.pg.update_row(
+                            "corpus.sources",
+                            "source_id",
+                            {"source_id": source_id, "status": "rejected"}
+                        )
                 except Exception as e:
                     logger.error(f"[Distillery] Smelting failed for {source_id}: {e}")
                     await self.adapter.pg.update_row("corpus.sources", "source_id", {"source_id": source_id, "status": "error"})

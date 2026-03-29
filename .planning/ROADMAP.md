@@ -18,6 +18,17 @@
 | ---- | ---- | ------ | ----------- |
 | 07-01 | Core invariants | ✅ Completed | 5/5 |
 
+## Phase 08 — Scraping / Content Normalization Audit
+
+| Plan | Name | Status | Tasks (C/T) |
+| ---- | ---- | ------ | ----------- |
+
+## Phase 09 — Smelter / Atom Extraction Audit
+
+| Plan | Name | Status | Tasks (C/T) |
+| ---- | ---- | ------ | ----------- |
+| 09-01 | Atom schema and extraction pipeline | ⬜ Pending | 0/0 |
+
 **Legend**: ✅ Completed, ⬜ Pending, 🔄 In Progress
 
 ## Notes
