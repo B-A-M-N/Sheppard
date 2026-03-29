@@ -118,7 +118,7 @@ def extract_text(html: str) -> str:
     
     lines = (line.strip() for line in text.splitlines())
     chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-    cleaned_text = '\n'.join(chunk for chunk in chunks if len(chunk) > 20)
+    cleaned_text = '\n'.join(chunk for chunk in chunks if len(chunk) > 10)
     
     junk_lines = ["log in", "sign up", "privacy policy", "cookie policy", "subscribe", "related articles", "follow us on", "more from", "recommended for you", "read more", "terms of service", "accessibility"]
     filtered_lines = []
@@ -126,7 +126,8 @@ def extract_text(html: str) -> str:
     for line in cleaned_text.split('\n'):
         l_lower = line.lower()
         if any(j in l_lower for j in ["related topics", "most read", "editors' picks", "footer", "sidebar", "navigation"]):
-            skip_rest = True
+            if len('\n'.join(filtered_lines)) < 500:
+                skip_rest = True
         if skip_rest: continue
         
         if len(line.split()) < 5 and any(j in l_lower for j in junk_lines):
