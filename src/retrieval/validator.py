@@ -11,7 +11,19 @@ from .models import RetrievedItem
 
 # Common English stopwords to ignore during lexical overlap comparison
 STOPWORDS = {
-    "a", "an", "the", "and", "or", "but", "if", "because", "as", "until", "while", "of", "at", "by", "for", "with", "about", "against", "between", "into", "through", "during", "before", "after", "above", "below", "to", "from", "up", "down", "in", "out", "on", "off", "over", "under", "again", "further", "then", "once", "here", "there", "when", "where", "why", "how", "all", "any", "both", "each", "few", "more", "most", "other", "some", "such", "no", "nor", "not", "only", "own", "same", "so", "than", "too", "very", "s", "t", "can", "will", "just", "don", "should", "now", "d", "ll", "m", "o", "re", "ve", "y", "ain", "aren", "couldn", "didn", "doesn", "hadn", "hasn", "haven", "isn", "ma", "mightn", "mustn", "needn", "shan", "shouldn", "wasn", "weren", "won", "wouldn"
+    # Articles, conjunctions, prepositions, pronouns, auxiliaries
+    "a", "an", "the", "and", "or", "but", "if", "because", "as", "until", "while", "of", "at", "by", "for", "with", "about", "against", "between", "into", "through", "during", "before", "after", "above", "below", "to", "from", "up", "down", "in", "out", "on", "off", "over", "under", "again", "further", "then", "once", "here", "there", "when", "where", "why", "how",
+    "all", "any", "both", "each", "few", "more", "most", "other", "some", "such", "no", "nor", "not", "only", "own", "same", "so", "than", "too", "very",
+    # Personal pronouns
+    "i", "you", "he", "she", "it", "we", "they", "me", "him", "her", "us", "them", "my", "your", "his", "its", "our", "their", "mine", "yours", "hers", "ours", "theirs",
+    # Possessive determiners
+    "its", "our", "their",
+    # Auxiliary verbs
+    "is", "am", "are", "was", "were", "be", "been", "being", "have", "has", "had", "do", "does", "did", "will", "would", "shall", "should", "can", "could", "may", "might", "must", "ought", "i'm", "you're", "he's", "she's", "it's", "we're", "they're", "i've", "you've", "we've", "they've", "i'd", "you'd", "he'd", "she'd", "we'd", "they'd", "i'll", "you'll", "he'll", "she'll", "we'll", "they'll",
+    # Contractions
+    "aren", "couldn", "didn", "doesn", "hadn", "hasn", "haven", "isn", "ma", "mightn", "mustn", "needn", "shan", "shouldn", "wasn", "weren", "won", "wouldn", "don", "doesn", "didn", "haven", "hasn", "hadn", "wasn", "weren", "wouldn", "shouldn", "couldn", "mightn", "mustn", "needn", "shan", "aren", "isn", "wasn", "weren", "don", "didn", "won", "can", "will", "just", "now", "d", "ll", "m", "o", "re", "ve", "y", "ain",
+    # Common adverbs and interjections that are not content
+    "well", "oh", "ah", "uh", "um", "eh", "like", "so", "just", "now", "then", "here", "there",
 }
 
 def tokenize(text: str) -> List[str]:
@@ -28,28 +40,20 @@ def extract_numbers(text: str) -> List[str]:
     """
     # Pattern: digit optionally followed by groups of comma+digits, optional decimal part
     pattern = r'\d[\d,]*\.?\d*'
-    return re.findall(pattern, text)
+    matches = re.findall(pattern, text)
+    # Strip any trailing period (e.g., from "1,000,000.") that may have been captured
+    cleaned = [m.rstrip('.') for m in matches]
+    return cleaned
 
 def extract_entities(text: str) -> List[str]:
     """
     Extract candidate named entities using a simple heuristic:
-    - Capitalized words (first letter uppercase, rest lowercase) that are not at the start of a sentence.
-    - All-caps acronyms (2+ consecutive uppercase letters).
-    This is not perfect but meets Phase 10 minimal requirements.
+    Any word (length > 1) containing at least one uppercase letter, excluding words that are all lowercase.
+    This captures proper nouns, acronyms, and mixed-case words like "SpaceX".
     """
-    entities = []
-    # Split into words, keep original case
+    # Split into word tokens
     words = re.findall(r'\b\w+\b', text)
-    for i, word in enumerate(words):
-        # All caps
-        if re.fullmatch(r'[A-Z]{2,}', word):
-            entities.append(word)
-        # Capitalized (first letter uppercase, rest lowercase) but not the first word in the text? Hard to know sentence boundaries.
-        # For simplicity, include any capitalized word that is not the first word in the overall string? Not accurate.
-        # Instead, we can include any word that matches Title case and is longer than 1 char, but exclude common sentence starters.
-        # We'll just include all TitleCase words; false positives on first word of sentence are acceptable, they'll likely also appear in atom if the sentence is shared.
-        if re.fullmatch(r'[A-Z][a-z]+', word):
-            entities.append(word)
+    entities = [word for word in words if any(c.isupper() for c in word) and len(word) > 1]
     return entities
 
 def validate_response_grounding(
