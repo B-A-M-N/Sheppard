@@ -4,6 +4,7 @@ from .config import USER_AGENT
 import io
 import pypdf
 import os
+import time
 
 def fetch_url(url: str, browser_manager=None) -> str:
     """
@@ -58,27 +59,47 @@ def fetch_url(url: str, browser_manager=None) -> str:
         "Upgrade-Insecure-Requests": "1",
     }
     
-    try:
-        response = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
-        response.raise_for_status()
-        
-        # Check if it's a PDF
-        content_type = response.headers.get('Content-Type', '').lower()
-        if 'application/pdf' in content_type or url.lower().endswith('.pdf'):
-            try:
-                pdf_file = io.BytesIO(response.content)
-                reader = pypdf.PdfReader(pdf_file)
-                text = ""
-                for page in reader.pages:
-                    text += page.extract_text() + "\n"
-                return text
-            except Exception as pdf_err:
-                print(f"Error parsing PDF {url}: {pdf_err}")
-                return None
-                
-        return extract_text(response.text)
-    except Exception as e:
-        return None
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
+            response.raise_for_status()
+
+            # Check if it's a PDF
+            content_type = response.headers.get('Content-Type', '').lower()
+            if 'application/pdf' in content_type or url.lower().endswith('.pdf'):
+                try:
+                    pdf_file = io.BytesIO(response.content)
+                    reader = pypdf.PdfReader(pdf_file)
+                    text = ""
+                    for page in reader.pages:
+                        text += page.extract_text() + "\n"
+                    return text
+                except Exception as pdf_err:
+                    print(f"Error parsing PDF {url}: {pdf_err}")
+                    return None
+
+            return extract_text(response.text)
+
+        except requests.exceptions.HTTPError as e:
+            status_code = e.response.status_code if e.response is not None else 0
+            if 500 <= status_code < 600 and attempt < max_retries - 1:
+                time.sleep(1 * (attempt + 1))  # Linear backoff: 1s, 2s
+                continue
+            # 4xx or final 5xx attempt -- not retryable / exhausted
+            return None
+
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            if attempt < max_retries - 1:
+                time.sleep(1 * (attempt + 1))
+                continue
+            return None
+
+        except Exception as e:
+            # Unexpected error -- do not retry
+            return None
+
+    return None
 
 def extract_text(html: str) -> str:
     """
