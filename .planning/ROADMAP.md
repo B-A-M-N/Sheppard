@@ -12,7 +12,7 @@
 
 | Plan | Name | Status | Tasks (C/T) |
 | ---- | ---- | ------ | ----------- |
-| 12-01 | Benchmark suite & baseline metrics | ⏳ Pending | 0/0 |
+| 12-01 | Benchmark suite & baseline metrics | ✅ Completed | 3/0 |
 | 12-02 | Retrieval latency optimization | ⏳ Pending | 0/0 |
 | 12-03 | Synthesis throughput improvements | ⏳ Pending | 0/0 |
 | 12-04 | Structured metrics & tracing | ⏳ Pending | 0/0 |
