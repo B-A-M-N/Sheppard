@@ -42,9 +42,11 @@ class V3Retriever:
         """
         items: List[RetrievedItem] = []
 
-        # Build where clause for topic filtering
+        # Build where clause for mission/topic filtering
         where = {}
-        if query.topic_filter:
+        if query.mission_filter:
+            where["mission_id"] = query.mission_filter
+        elif query.topic_filter:
             where["topic_id"] = query.topic_filter
 
         # Semantic search on knowledge_atoms (Level B)

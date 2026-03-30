@@ -14,7 +14,7 @@ from redis.asyncio import Redis
 from asyncpg.pool import Pool
 
 from ....config.database import DatabaseConfig
-from ...exceptions import SheppardError, ConnectionError  # Updated import
+from ...exceptions import ResourceError  # Fixed import: use ResourceError instead of non-existent SheppardError/ConnectionError
 from ...trust_call import call
 
 logger = logging.getLogger(__name__)
@@ -104,7 +104,7 @@ class ConnectionManager:
         try:
             connection = self.connections.get('association_network')
             if not connection or not connection.redis:
-                raise ConnectionError("Association network not initialized")
+                raise ResourceError("Association network not initialized")
 
             # Store associations with scores
             async with self.get_redis_connection('association_network') as redis:
@@ -114,7 +114,7 @@ class ConnectionManager:
 
         except Exception as e:
             logger.error(f"Failed to store associations: {e}", exc_info=True)
-            raise ConnectionError(f"Association storage failed: {str(e)}")
+            raise ResourceError(f"Association storage failed: {str(e)}")
 
     @call
     async def add_graph_node(self, graph_key: str, node_id: str, properties: Dict[str, Any] = None):
@@ -122,7 +122,7 @@ class ConnectionManager:
         try:
             connection = self.connections.get('semantic_memory')
             if not connection or not connection.pool:
-                raise ConnectionError("Semantic memory not initialized")
+                raise ResourceError("Semantic memory not initialized")
 
             async with self.get_postgres_connection('semantic_memory') as conn:
                 await conn.execute(
@@ -138,7 +138,7 @@ class ConnectionManager:
 
         except Exception as e:
             logger.error(f"Failed to add graph node: {e}", exc_info=True)
-            raise ConnectionError(f"Graph node creation failed: {str(e)}")
+            raise ResourceError(f"Graph node creation failed: {str(e)}")
 
     @call
     async def add_graph_edge(
@@ -153,7 +153,7 @@ class ConnectionManager:
         try:
             connection = self.connections.get('semantic_memory')
             if not connection or not connection.pool:
-                raise ConnectionError("Semantic memory not initialized")
+                raise ResourceError("Semantic memory not initialized")
 
             async with self.get_postgres_connection('semantic_memory') as conn:
                 await conn.execute(
@@ -170,7 +170,7 @@ class ConnectionManager:
 
         except Exception as e:
             logger.error(f"Failed to add graph edge: {e}", exc_info=True)
-            raise ConnectionError(f"Graph edge creation failed: {str(e)}")
+            raise ResourceError(f"Graph edge creation failed: {str(e)}")
 
     @call
     @asynccontextmanager
@@ -178,7 +178,7 @@ class ConnectionManager:
         """Get a PostgreSQL connection for a specific memory type."""
         connection = self.connections.get(memory_type)
         if not connection or not connection.pool:
-            raise ConnectionError(f"No PostgreSQL pool for memory type: {memory_type}")
+            raise ResourceError(f"No PostgreSQL pool for memory type: {memory_type}")
 
         connection.last_accessed = datetime.now()
         async with connection.pool.acquire() as conn:
@@ -194,7 +194,7 @@ class ConnectionManager:
         """Get a Redis connection for a specific memory type."""
         connection = self.connections.get(memory_type)
         if not connection or not connection.redis:
-            raise ConnectionError(f"No Redis client for memory type: {memory_type}")
+            raise ResourceError(f"No Redis client for memory type: {memory_type}")
 
         connection.last_accessed = datetime.now()
         try:
@@ -215,7 +215,7 @@ class ConnectionManager:
         try:
             connection = self.connections.get(memory_type)
             if not connection or not connection.vector_store:
-                raise ConnectionError(f"No vector store for memory type: {memory_type}")
+                raise ResourceError(f"No vector store for memory type: {memory_type}")
 
             results = await connection.vector_store.search(
                 embedding,
@@ -227,7 +227,7 @@ class ConnectionManager:
 
         except Exception as e:
             logger.error(f"Error during similarity search: {e}", exc_info=True)
-            raise ConnectionError(f"Similarity search failed: {str(e)}")
+            raise ResourceError(f"Similarity search failed: {str(e)}")
 
     def _calculate_association_strength(self, value: Any) -> float:
         """Calculate association strength score."""

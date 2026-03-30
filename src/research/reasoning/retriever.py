@@ -75,6 +75,7 @@ class RetrievalQuery:
     text: str
     project_filter: Optional[str] = None
     topic_filter: Optional[str] = None
+    mission_filter: Optional[str] = None
     max_results: int = 12
     # Role-based slot sizes
     max_definitions: int = 3

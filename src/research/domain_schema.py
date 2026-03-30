@@ -329,7 +329,8 @@ class SynthesisArtifact(BaseModel):
     freshness_state: str = "current"
     version: int = 1
     metadata: Dict[str, Any] = Field(default_factory=dict)
-    
+    mission_id: Optional[str] = None  # V3 mission isolation
+
     # Optional loaded content for indexing
     inline_text: Optional[str] = None
 

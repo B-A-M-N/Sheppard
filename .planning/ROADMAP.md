@@ -1,5 +1,11 @@
 # Project Roadmap
 
+**Current Milestone:** v1.0 — Truth Contract Implementation
+**Scope:** Phases 10–11.1 (Retrieval + Synthesis truth guarantees)
+**Status:** ✅ COMPLETE (verified via milestone audit)
+
+---
+
 ## Phase 06 — Discovery Engine
 
 | Plan | Name | Status | Tasks (C/T) |
@@ -30,11 +36,12 @@
 | 09-01 | Atom schema and extraction pipeline | ✅ Completed | 0/0 |
 | 09-XX | Gap Closure (soft acceptance) | ✅ Completed | 0/0 |
 
-## Phase 10 — Atom Store & Query
+## Phase 10–11.1 — Truth Contract Implementation (v1.0)
 
-| Plan | Name | Status | Tasks (C/T) |
-| ---- | ---- | ------ | ----------- |
-| 10-01 | Storage handoff and retrieval verification | ✅ Completed | 5/5 |
+**Status:** ✅ COMPLETE (archived 2026-03-30)
+
+*All phases consolidated into milestone v1.0. See `.planning/milestones/v1.0-ROADMAP.md` for full details.*
+
 
 **Legend**: ✅ Completed, ⬜ Pending, 🔄 In Progress
 

@@ -119,6 +119,8 @@ class OllamaClient:
                 'num_predict': max_tokens
             }
         }
+        if config.seed is not None:
+            payload['options']['seed'] = config.seed
 
         try:
             session = await self._get_session(config.api_host)

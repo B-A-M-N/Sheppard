@@ -1,0 +1,26 @@
+Phase 11.1 — Report Pipeline Hardening — Completed 2026-03-29
+
+All 7 blocking failures from Phase 11 audit have been resolved.
+
+Key Changes:
+- Replaced HybridRetriever with V3Retriever throughout synthesis path.
+- Propagated mission_id from top to all DB queries and storage.
+- Added atom_ids_used capture and stored via existing synthesis_citations table.
+- Removed "MINIMUM 1000 WORDS"; tightened Archivist prompt with NO INFERENCE and PER-SENTENCE CITATION rules.
+- Implemented grounding validator (citation presence + lexical overlap).
+- Enforced determinism: temperature=0, fixed seed (12345), sorted atom order.
+- Implemented binary evidence threshold (MIN_EVIDENCE=3); insufficient evidence produces placeholder.
+
+DB Migration:
+- ALTER TABLE authority.synthesis_artifacts ADD COLUMN mission_id TEXT REFERENCES mission.research_missions(mission_id);
+- ALTER TABLE authority.synthesis_sections ADD COLUMN mission_id TEXT REFERENCES mission.research_missions(mission_id);
+
+Deliverables (in .planning/gauntlet_phases/phase11.1_reports/):
+1. INVARIANT_IMPLEMENTATION.md — detailed change log per invariant
+2. DATA_PROVENANCE_STORAGE.md — how synthesis_citations are populated
+3. UNIT_TESTS.md — test suite (with full code) proving invariants
+4. VERIFICATION_REPORT.md — re-audit results showing PASS
+
+Unit test file created at: tests/research/reasoning/test_phase11_invariants.py
+
+Status: All invariants enforced; synthesis pipeline now truth-compliant pending DB migration application.

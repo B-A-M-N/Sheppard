@@ -7,7 +7,7 @@ Task → Model assignment.
 import os
 from enum import Enum
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Optional
 
 class TaskType(Enum):
     CHAT = "chat"
@@ -24,6 +24,7 @@ class ModelConfig:
     model_name: str
     api_host: str
     temperature: float = 0.4
+    seed: Optional[int] = None
 
 class ModelRouter:
     def __init__(self):
@@ -44,12 +45,12 @@ class ModelRouter:
         self._map: Dict[TaskType, ModelConfig] = {
             # Heavy reasoning goes to the powerful remote brain (.90)
             TaskType.CHAT: ModelConfig(chat_model, remote_host, 0.7),
-            TaskType.SYNTHESIS: ModelConfig(synth_model, remote_host, 0.4),
+            TaskType.SYNTHESIS: ModelConfig(synth_model, remote_host, 0.0, seed=12345),
             TaskType.CONTRADICTION_DETECTION: ModelConfig(synth_model, remote_host, 0.1),
             TaskType.EXTRACT_ATOMS: ModelConfig(synth_model, remote_host, 0.1),
             TaskType.DECOMPOSITION: ModelConfig(chat_model, remote_host, 0.2),
             TaskType.QUERY_EXPANSION: ModelConfig(chat_model, remote_host, 0.5),
-            
+
             # Fast, distributed tasks
             TaskType.SUMMARIZATION: ModelConfig(summarize_model, vampire_scout_host, 0.3),
             TaskType.EMBEDDING: ModelConfig(embed_model, local_host, 0.0),

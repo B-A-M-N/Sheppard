@@ -64,6 +64,10 @@ class FrontierNode:
 # ──────────────────────────────────────────────────────────────
 
 class AdaptiveFrontier:
+    # Governance limits (tunable)
+    MAX_RESPAWN_CYCLES = 3  # Maximum times we can regenerate frontier before failing
+    MAX_CONSECUTIVE_ZERO_YIELD = 5  # Maximum consecutive nodes with zero discovery
+
     def __init__(self, system_manager, mission_id: str, topic_name: str):
         self.sm = system_manager
         self.mission_id = mission_id
@@ -72,29 +76,47 @@ class AdaptiveFrontier:
         self.nodes: Dict[str, FrontierNode] = {}
         self.visited_urls: Set[str] = set()
         self.total_ingested = 0
+        self.respawn_count = 0
+        self.consecutive_zero_yield = 0
+        self.failed = False
+        self.failure_reason: Optional[str] = None
 
     async def run(self):
         """Metabolic Control Loop."""
         # 1. Load existing state if it exists
         await self._load_checkpoint()
-        
+
         # 2. Policy Generation (or Load)
         await self._frame_research_policy()
-        
+
         while True:
+            # Check if mission already failed (from previous iteration)
+            if self.failed:
+                break
+
             # Check budget
             status = self.sm.budget.get_status(self.mission_id)
             if status and status.usage_ratio >= 1.0:
-                console.print(f"[bold red][Frontier][/bold red] Storage ceiling reached. Terminating acquisition.")
+                await self._fail_mission("BUDGET_EXCEEDED")
                 break
-            
+
             # 3. Select Next Action
             node, mode = self._select_next_action()
-            if not node: 
+            if not node:
+                # All nodes saturated, attempt to respawn new frontier
                 console.print(f"[bold cyan][Frontier][/bold cyan] Current frontier saturated. Generating fresh perspectives...")
-                await self._respawn_nodes(None) 
+                if self.respawn_count >= self.MAX_RESPAWN_CYCLES:
+                    await self._fail_mission("NO_DISCOVERY")
+                    break
+
+                self.respawn_count += 1
+                console.print(f"[yellow][Frontier][/yellow] Respawn cycle {self.respawn_count}/{self.MAX_RESPAWN_CYCLES}")
+                await self._respawn_nodes(None)
                 node, mode = self._select_next_action()
-                if not node: break
+                if not node:
+                    # Even after respawn, no nodes available
+                    await self._fail_mission("NO_DISCOVERY")
+                    break
 
             console.print(f"\n[bold yellow][Frontier][/bold yellow] Dispatching search for: [white]{node.concept}[/white] ({mode})")
             
@@ -116,10 +138,17 @@ class AdaptiveFrontier:
                 
             console.print(f"[bold blue][Frontier][/bold blue] Enqueued {round_yield} new targets for vampires.")
 
-            # 6. Thermal Management
+            # 6. Thermal Management & Zero-Yield Detection
             if round_yield == 0:
+                self.consecutive_zero_yield += 1
                 console.print(f"[bold red][Frontier][/bold red] Zero discovery for node '{node.concept}'. Triggering Thermal Recovery.")
+                if self.consecutive_zero_yield >= self.MAX_CONSECUTIVE_ZERO_YIELD:
+                    await self._fail_mission("NO_DISCOVERY")
+                    break
                 await asyncio.sleep(10)
+            else:
+                # Reset consecutive counter on any yield
+                self.consecutive_zero_yield = 0
 
             # 7. Feedback & Checkpoint
             node.yield_history.append(round_yield)
@@ -164,6 +193,22 @@ class AdaptiveFrontier:
             console.print(f"[dim]  - Pre-loaded {len(self.nodes)} research nodes from DB.[/dim]")
         if self.visited_urls:
             console.print(f"[dim]  - Pre-loaded {len(self.visited_urls)} visited URLs from DB.[/dim]")
+
+    async def _fail_mission(self, reason: str):
+        """Terminate mission with explicit failure reason."""
+        self.failed = True
+        self.failure_reason = reason
+        console.print(f"[bold red][Frontier][/bold red] Mission terminated: {reason}")
+
+        # Update mission status in DB
+        try:
+            await self.sm.adapter.update_mission_status(
+                self.mission_id,
+                status="failed",
+                stop_reason=reason
+            )
+        except Exception as e:
+            logger.error(f"[Frontier] Failed to update mission status: {e}")
 
     async def _save_node(self, node: FrontierNode, parent_node_id: Optional[str] = None):
         """Checkpoint a single node."""
@@ -356,9 +401,11 @@ Identify 3-5 new, specific sub-topics MISSING from this context. No quotes. One 
         resp = await self.sm.ollama.complete(TaskType.QUERY_EXPANSION, prompt)
         
         new_count = 0
-        # Compute parent_node_id from parent_node (deterministic UUID5)
+        # Compute parent_node_id from parent_node (deterministic UUID5) if provided
         import uuid
-        parent_node_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{self.mission_id}:{parent_node.concept}"))
+        parent_node_id = None
+        if parent_node is not None:
+            parent_node_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{self.mission_id}:{parent_node.concept}"))
         for line in resp.split('\n'):
             clean = re.sub(r'^\d+[\.\)]\s*', '', line.strip()).replace('"', '').replace("'", "")
             if len(clean) > 10 and clean.lower() not in [n.lower() for n in self.nodes.keys()]:
