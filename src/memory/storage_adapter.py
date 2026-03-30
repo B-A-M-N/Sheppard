@@ -113,6 +113,7 @@ class KnowledgeStore(Protocol):
     async def get_atom(self, atom_id: str) -> JsonDict | None: ...
     async def list_atoms_for_topic(
         self,
+        mission_id: str,
         topic_id: str,
         atom_types: Sequence[str] | None = None,
     ) -> list[JsonDict]: ...
@@ -598,9 +599,14 @@ class SheppardStorageAdapter(StorageAdapter):
         if row is not None: await self.redis_cache.cache_hot_object("atom", atom_id, row, ttl_s=3600)
         return row
 
-    async def list_atoms_for_topic(self, topic_id: str, atom_types: Sequence[str] | None = None) -> list[JsonDict]:
-        rows = await self.pg.fetch_many("knowledge.knowledge_atoms", where={"topic_id": topic_id}, order_by="importance DESC")
-        if not atom_types: return rows
+    async def list_atoms_for_topic(self, mission_id: str, topic_id: str, atom_types: Sequence[str] | None = None) -> list[JsonDict]:
+        rows = await self.pg.fetch_many(
+            "knowledge.knowledge_atoms",
+            where={"mission_id": mission_id, "topic_id": topic_id},
+            order_by="importance DESC"
+        )
+        if not atom_types:
+            return rows
         allowed = set(atom_types)
         return [row for row in rows if row.get("atom_type") in allowed]
 
