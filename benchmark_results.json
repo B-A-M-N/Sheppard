@@ -1,0 +1,292 @@
+{
+  "no_discovery": {
+    "run_id": "bench_20260330_144634",
+    "timestamp": "2026-03-30T19:46:34.837883Z",
+    "scenario": "no_discovery",
+    "iterations": 3,
+    "aggregate": {
+      "frontier_acquisition_ms": {
+        "mean": 90176.33653400117,
+        "median": 90156.84776499984,
+        "p95": 95219.46264099097,
+        "p99": 95219.46264099097
+      },
+      "retrieval_ms": {
+        "mean": 998.0454076721799,
+        "median": 1124.9516830139328,
+        "p95": 1125.9403479925822,
+        "p99": 1125.9403479925822
+      },
+      "synthesis_llm_ms": {
+        "mean": 0.0,
+        "median": 0,
+        "p95": 0,
+        "p99": 0
+      },
+      "validator_ms": {
+        "mean": 0.0,
+        "median": 0,
+        "p95": 0,
+        "p99": 0
+      },
+      "persistence_ms": {
+        "mean": 377.60582099629875,
+        "median": 392.37415199750103,
+        "p95": 396.5363999886904,
+        "p99": 396.5363999886904
+      },
+      "total_synthesis_ms": {
+        "mean": 10613.37611466297,
+        "median": 11319.90785599919,
+        "p95": 12222.864910989301,
+        "p99": 12222.864910989301
+      },
+      "e2e_ms": {
+        "mean": 100789.71264866414,
+        "median": 102379.71267598914,
+        "p95": 106539.37049699016,
+        "p99": 106539.37049699016
+      },
+      "atom_count": {
+        "mean": 0.0,
+        "median": 0,
+        "p95": 0,
+        "p99": 0
+      },
+      "chunk_count": {
+        "mean": 0.0,
+        "median": 0,
+        "p95": 0,
+        "p99": 0
+      },
+      "sections_count": {
+        "mean": 6.333333333333333,
+        "median": 7,
+        "p95": 7,
+        "p99": 7
+      },
+      "avg_atoms_per_section": {
+        "mean": 0.0,
+        "median": 0.0,
+        "p95": 0.0,
+        "p99": 0.0
+      }
+    },
+    "per_run": [
+      {
+        "mission_id": "67ebdbf3-b8a1-4458-b6d2-5fb7de39f544",
+        "scenario": "no_discovery",
+        "stage_timings": {
+          "frontier_acquisition_ms": 95219.46264099097,
+          "condensation_ms": 0,
+          "retrieval_ms": 1124.9516830139328,
+          "synthesis_llm_ms": 0,
+          "validator_ms": 0,
+          "persistence_ms": 392.37415199750103,
+          "total_synthesis_ms": 11319.90785599919
+        },
+        "total_ms": 106539.37049699016,
+        "atom_count": 0,
+        "chunk_count": 0,
+        "sections_count": 7,
+        "avg_atoms_per_section": 0.0,
+        "validator_passed": false,
+        "call_counts": {
+          "retrieval_queries": 7,
+          "validator_invocations": 0
+        }
+      },
+      {
+        "mission_id": "410246b9-3785-4a73-82e8-2c443fbd31b9",
+        "scenario": "no_discovery",
+        "stage_timings": {
+          "frontier_acquisition_ms": 90156.84776499984,
+          "condensation_ms": 0,
+          "retrieval_ms": 1125.9403479925822,
+          "synthesis_llm_ms": 0,
+          "validator_ms": 0,
+          "persistence_ms": 343.9069110027049,
+          "total_synthesis_ms": 12222.864910989301
+        },
+        "total_ms": 102379.71267598914,
+        "atom_count": 0,
+        "chunk_count": 0,
+        "sections_count": 7,
+        "avg_atoms_per_section": 0.0,
+        "validator_passed": false,
+        "call_counts": {
+          "retrieval_queries": 7,
+          "validator_invocations": 0
+        }
+      },
+      {
+        "mission_id": "650ecfb4-f18d-43f6-ab78-af922772f14e",
+        "scenario": "no_discovery",
+        "stage_timings": {
+          "frontier_acquisition_ms": 85152.69919601269,
+          "condensation_ms": 0,
+          "retrieval_ms": 743.2441920100246,
+          "synthesis_llm_ms": 0,
+          "validator_ms": 0,
+          "persistence_ms": 396.5363999886904,
+          "total_synthesis_ms": 8297.355577000417
+        },
+        "total_ms": 93450.05477301311,
+        "atom_count": 0,
+        "chunk_count": 0,
+        "sections_count": 5,
+        "avg_atoms_per_section": 0.0,
+        "validator_passed": false,
+        "call_counts": {
+          "retrieval_queries": 5,
+          "validator_invocations": 0
+        }
+      }
+    ]
+  },
+  "high_evidence": {
+    "run_id": "bench_20260330_145210",
+    "timestamp": "2026-03-30T19:52:10.526985Z",
+    "scenario": "high_evidence",
+    "iterations": 3,
+    "aggregate": {
+      "frontier_acquisition_ms": {
+        "mean": 93455.96068366042,
+        "median": 95111.36477100081,
+        "p95": 95162.3264469963,
+        "p99": 95162.3264469963
+      },
+      "retrieval_ms": {
+        "mean": 1149.2701459986467,
+        "median": 1146.6565509908833,
+        "p95": 1233.0579249828588,
+        "p99": 1233.0579249828588
+      },
+      "synthesis_llm_ms": {
+        "mean": 0.0,
+        "median": 0,
+        "p95": 0,
+        "p99": 0
+      },
+      "validator_ms": {
+        "mean": 0.0,
+        "median": 0,
+        "p95": 0,
+        "p99": 0
+      },
+      "persistence_ms": {
+        "mean": 358.4737256654383,
+        "median": 358.0737070005853,
+        "p95": 381.7012590006925,
+        "p99": 381.7012590006925
+      },
+      "total_synthesis_ms": {
+        "mean": 10569.411886991778,
+        "median": 11770.521684986306,
+        "p95": 12300.108220981201,
+        "p99": 12300.108220981201
+      },
+      "e2e_ms": {
+        "mean": 104025.37257065221,
+        "median": 102748.97052600863,
+        "p95": 106932.84813198261,
+        "p99": 106932.84813198261
+      },
+      "atom_count": {
+        "mean": 0.0,
+        "median": 0,
+        "p95": 0,
+        "p99": 0
+      },
+      "chunk_count": {
+        "mean": 0.0,
+        "median": 0,
+        "p95": 0,
+        "p99": 0
+      },
+      "sections_count": {
+        "mean": 7.333333333333333,
+        "median": 7,
+        "p95": 8,
+        "p99": 8
+      },
+      "avg_atoms_per_section": {
+        "mean": 0.0,
+        "median": 0.0,
+        "p95": 0.0,
+        "p99": 0.0
+      }
+    },
+    "per_run": [
+      {
+        "mission_id": "7190139b-00cd-44cc-9718-277bce642157",
+        "scenario": "high_evidence",
+        "stage_timings": {
+          "frontier_acquisition_ms": 90094.19083298417,
+          "condensation_ms": 0,
+          "retrieval_ms": 1233.0579249828588,
+          "synthesis_llm_ms": 0,
+          "validator_ms": 0,
+          "persistence_ms": 381.7012590006925,
+          "total_synthesis_ms": 12300.108220981201
+        },
+        "total_ms": 102394.29905396537,
+        "atom_count": 0,
+        "chunk_count": 0,
+        "sections_count": 8,
+        "avg_atoms_per_section": 0.0,
+        "validator_passed": false,
+        "call_counts": {
+          "retrieval_queries": 8,
+          "validator_invocations": 0
+        }
+      },
+      {
+        "mission_id": "bad4f2d6-c4ec-4690-bb4f-06e6e7a7c63f",
+        "scenario": "high_evidence",
+        "stage_timings": {
+          "frontier_acquisition_ms": 95162.3264469963,
+          "condensation_ms": 0,
+          "retrieval_ms": 1146.6565509908833,
+          "synthesis_llm_ms": 0,
+          "validator_ms": 0,
+          "persistence_ms": 358.0737070005853,
+          "total_synthesis_ms": 11770.521684986306
+        },
+        "total_ms": 106932.84813198261,
+        "atom_count": 0,
+        "chunk_count": 0,
+        "sections_count": 7,
+        "avg_atoms_per_section": 0.0,
+        "validator_passed": false,
+        "call_counts": {
+          "retrieval_queries": 7,
+          "validator_invocations": 0
+        }
+      },
+      {
+        "mission_id": "d870016e-1dcd-48a2-a3b7-7661a9aabe40",
+        "scenario": "high_evidence",
+        "stage_timings": {
+          "frontier_acquisition_ms": 95111.36477100081,
+          "condensation_ms": 0,
+          "retrieval_ms": 1068.0959620221984,
+          "synthesis_llm_ms": 0,
+          "validator_ms": 0,
+          "persistence_ms": 335.6462109950371,
+          "total_synthesis_ms": 7637.605755007826
+        },
+        "total_ms": 102748.97052600863,
+        "atom_count": 0,
+        "chunk_count": 0,
+        "sections_count": 7,
+        "avg_atoms_per_section": 0.0,
+        "validator_passed": false,
+        "call_counts": {
+          "retrieval_queries": 7,
+          "validator_invocations": 0
+        }
+      }
+    ]
+  }
+}
