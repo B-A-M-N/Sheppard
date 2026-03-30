@@ -87,7 +87,7 @@ class MissionStore(Protocol):
 class CorpusStore(Protocol):
     async def register_source(self, source: JsonDict) -> None: ...
     async def get_source(self, source_id: str) -> JsonDict | None: ...
-    async def get_source_by_url_hash(self, normalized_url_hash: str) -> JsonDict | None: ...
+    async def get_source_by_url_hash(self, mission_id: str, normalized_url_hash: str) -> JsonDict | None: ...
     async def list_sources(self, mission_id: str, topic_id: str | None = None) -> list[JsonDict]: ...
     async def get_visited_urls(self, mission_id: str) -> set[str]: ...
 
@@ -521,8 +521,11 @@ class SheppardStorageAdapter(StorageAdapter):
         if active is not None: return active
         return await self.pg.fetch_one("corpus.sources", {"source_id": source_id})
 
-    async def get_source_by_url_hash(self, normalized_url_hash: str) -> JsonDict | None:
-        return await self.pg.fetch_one("corpus.sources", {"normalized_url_hash": normalized_url_hash})
+    async def get_source_by_url_hash(self, mission_id: str, normalized_url_hash: str) -> JsonDict | None:
+        return await self.pg.fetch_one(
+            "corpus.sources",
+            {"mission_id": mission_id, "normalized_url_hash": normalized_url_hash}
+        )
 
     async def list_sources(self, mission_id: str, topic_id: str | None = None) -> list[JsonDict]:
         where: JsonDict = {"mission_id": mission_id}
