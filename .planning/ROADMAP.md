@@ -20,6 +20,17 @@
 | 12-06 | High-evidence E2E integration test | ⏳ Pending | 0/0 |
 | 12-07 | Ranking improvements (constraint-safe) | ⏳ Pending | 0/0 |
 
+### Phase 12-02: Retrieval Latency Optimization
+
+**Goal:** Reduce total retrieval latency from ~1200ms to ≤200-300ms by parallelizing section retrieval in EvidenceAssembler.
+**Requirements:** [PERF-01]
+**Plans:** 3 plans
+
+Plans:
+- [ ] 12-02-01-PLAN.md — Instrumentation, dead code deprecation, test scaffolding
+- [ ] 12-02-02-PLAN.md — Concurrent assembly implementation + tests
+- [ ] 12-02-03-PLAN.md — Benchmark extension with corpus tiers + before/after comparison
+
 **Guardrails:**
 - No weakening of Phase 10/11 truth contract invariants
 - All existing tests must pass unchanged
