@@ -1,13 +1,13 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.0
-milestone_name: milestone
-status: completed
-last_updated: "2026-03-28T08:59:36.551Z"
+milestone: v1.1
+milestone_name: Performance & Observability
+status: in_progress
+last_updated: "2026-03-30T00:00:00Z"
 progress:
-  total_phases: 3
+  total_phases: 7
   completed_phases: 0
-  total_plans: 1
+  total_plans: 7
   completed_plans: 0
 ---
 
@@ -15,9 +15,48 @@ progress:
 
 ## Position
 
-- **Phase:** 07
+- **Phase:** 12 (Planning)
 - **Plan:** Not started
-- **Status:** Milestone complete
+- **Status:** Milestone in progress — v1.1 Performance & Observability
+
+## Previous Milestone
+
+- **v1.0:** Truth Contract Implementation — ✅ COMPLETE (archived 2026-03-30)
+- Verified end-to-end truth guarantees: retrieval + synthesis both enforce citation + provenance + mission isolation
+
+## Current Milestone: v1.1
+
+**Focus Areas:**
+1. Performance (latency, throughput, efficiency)
+2. Observability (metrics, tracing, debug APIs)
+3. High-evidence E2E coverage
+4. Contradiction system V3 upgrade
+5. Ranking improvements (constraint-safe)
+
+**Guardrails:** No weakening of v1.0 truth contract invariants.
+
+---
+
+## Sessions
+
+- None yet; v1.1 planning in progress.
+
+## Performance Metrics
+
+| Phase | Plan | Duration (approx) | Tasks | Files |
+| ----- | ---- | ----------------- | ----- | ----- |
+| 12 | 01–07 | TBD | 7 | TBD |
+
+## Requirements Traceability
+
+- Pending requirements definition phase.
+
+---
+
+## Notes
+
+- Starting from clean baseline: v1.0 tag `96fca0c`
+- All v1.0 tests must pass throughout v1.1 development.
 
 ## Progress
 

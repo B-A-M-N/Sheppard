@@ -1,8 +1,29 @@
 # Project Roadmap
 
-**Current Milestone:** v1.0 — Truth Contract Implementation
-**Scope:** Phases 10–11.1 (Retrieval + Synthesis truth guarantees)
-**Status:** ✅ COMPLETE (verified via milestone audit)
+**Current Milestone:** v1.1 — Performance & Observability
+**Scope:** Phase 12 (optimize retrieval/synthesis, add metrics/tracing, upgrade contradictions)
+**Previous Milestone:** v1.0 — Truth Contract Implementation (✅ COMPLETE, archived)
+
+---
+
+## Phase 12 — Performance & Observability (v1.1)
+
+**Objective:** Optimize latency/throughput and add full observability without weakening truth invariants.
+
+| Plan | Name | Status | Tasks (C/T) |
+| ---- | ---- | ------ | ----------- |
+| 12-01 | Benchmark suite & baseline metrics | ⏳ Pending | 0/0 |
+| 12-02 | Retrieval latency optimization | ⏳ Pending | 0/0 |
+| 12-03 | Synthesis throughput improvements | ⏳ Pending | 0/0 |
+| 12-04 | Structured metrics & tracing | ⏳ Pending | 0/0 |
+| 12-05 | Contradiction system V3 upgrade | ⏳ Pending | 0/0 |
+| 12-06 | High-evidence E2E integration test | ⏳ Pending | 0/0 |
+| 12-07 | Ranking improvements (constraint-safe) | ⏳ Pending | 0/0 |
+
+**Guardrails:**
+- No weakening of Phase 10/11 truth contract invariants
+- All existing tests must pass unchanged
+- Determinism preserved (seed/temperature untouched)
 
 ---
 
