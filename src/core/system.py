@@ -352,7 +352,10 @@ class SystemManager:
                     continue
 
                 # Check if already processed (Greedy de-duplication)
-                existing = await self.adapter.get_source_by_url_hash(job.get("url_hash", ""))
+                existing = await self.adapter.get_source_by_url_hash(
+                    mission_id=mission_id,
+                    normalized_url_hash=job.get("url_hash", "")
+                )
                 if existing and existing.get("status") == "fetched":
                     logger.debug(f"[Vampire-{vampire_id}] Already fetched: {url}")
                     continue
