@@ -23,9 +23,16 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 from core.system import system_manager
 from src.config.database import DatabaseConfig
+from research.reasoning.assembler import EvidenceAssembler, RETRIEVAL_CONCURRENCY_LIMIT
 
 # Use local test database
 DatabaseConfig.DB_URLS["sheppard_v3"] = "postgresql://sheppard:1234@localhost:5432/sheppard_v3"
+
+CORPUS_TIERS = {
+    "small": 20,
+    "medium": 500,
+    "large": 1000
+}
 
 
 class Timer:
@@ -108,7 +115,60 @@ def compute_percentiles(values: List[float]) -> Dict[str, float]:
     }
 
 
-async def run_benchmark_scenario(scenario: str, iterations: int) -> Dict[str, Any]:
+async def seed_high_evidence_atoms(adapter, mission_id, topic, count=20):
+    """Inject synthetic atoms directly into DB and Chroma to guarantee evidence."""
+    # Fetch mission to get domain_profile_id
+    mission = await adapter.get_mission(mission_id)
+    if not mission:
+        raise RuntimeError(f"Mission {mission_id} not found for seeding")
+    domain_profile_id = mission.get('domain_profile_id')
+    if not domain_profile_id:
+        # Fallback: try profile_id field
+        domain_profile_id = mission.get('profile_id')
+    if not domain_profile_id:
+        raise RuntimeError(f"Mission {mission_id} has no domain_profile_id")
+    print(f"Seeding {count} synthetic atoms for HIGH_EVIDENCE...")
+    chroma_batch = []
+    for i in range(count):
+        atom_id = f"atom_{uuid.uuid4().hex[:8]}"
+        title = f"Test Atom {i+1} about {topic}"
+        statement = f"Benchmark claim {i+1}: {topic} demonstrates important properties relevant to the mission."
+        summary = f"Summary for claim {i+1}"
+        atom = {
+            "atom_id": atom_id,
+            "mission_id": mission_id,
+            "topic_id": mission_id,
+            "domain_profile_id": domain_profile_id,
+            "atom_type": "claim",
+            "title": title,
+            "statement": statement,
+            "summary": summary,
+            "confidence": 0.9,
+            "importance": 0.8,
+            "novelty": 0.5,
+            "stability": "medium",
+            "scope_json": {},
+            "qualifiers_json": {},
+            "lineage_json": json.dumps({"created_by": "benchmark", "mission_id": mission_id, "extraction_mode": "synthetic"}),
+            "metadata_json": {},
+        }
+        # Insert into Postgres
+        await adapter.pg.insert_row("knowledge.knowledge_atoms", atom)
+        # Prepare Chroma batch entry
+        doc = adapter.projection.build_atom_document(atom)
+        meta = adapter.projection.build_atom_metadata(atom)
+        meta["mission_id"] = mission_id  # ensure filter matches
+        chroma_batch.append((atom_id, doc, meta))
+
+    # Batch or individual Chroma indexing
+    if len(chroma_batch) > 50:
+        await adapter.chroma.index_documents("knowledge_atoms", chroma_batch)
+    else:
+        for doc_id, document, metadata in chroma_batch:
+            await adapter.chroma.index_document("knowledge_atoms", doc_id, document, metadata)
+
+
+async def run_benchmark_scenario(scenario: str, iterations: int, corpus_tier: str, corpus_atom_count: int) -> Dict[str, Any]:
     """
     Run benchmark for a given scenario.
 
@@ -156,10 +216,17 @@ async def run_benchmark_scenario(scenario: str, iterations: int) -> Dict[str, An
             )
             print(f"Mission started: {mission_id}")
 
-            # Wait for mission to complete
-            status = await wait_for_mission_completion(adapter, mission_id, timeout_seconds=300)
-            if status != 'completed':
-                raise RuntimeError(f"Mission {mission_id} did not complete successfully: {status}")
+            if scenario == "high_evidence":
+                # Inject synthetic atoms directly to guarantee retrieval
+                await seed_high_evidence_atoms(adapter, mission_id, topic, count=corpus_atom_count)
+                # For synthetic data, we skip the natural acquisition wait
+                # We'll consider the mission effectively complete for our purposes
+                status = 'completed'  # fake completion
+            else:
+                # Wait for mission to complete normally
+                status = await wait_for_mission_completion(adapter, mission_id, timeout_seconds=300)
+                if status != 'completed':
+                    raise RuntimeError(f"Mission {mission_id} did not complete successfully: {status}")
         frontier_acquisition_ms = frontier_timer.elapsed_ms
         print(f"Frontier+Acquisition time: {frontier_acquisition_ms:.2f}ms")
 
@@ -181,15 +248,38 @@ async def run_benchmark_scenario(scenario: str, iterations: int) -> Dict[str, An
             validator_ms_total = 0
             sections_data = []
             all_atom_ids = []
-            call_counts = {"retrieval_queries": 0, "validator_invocations": 0}
+            call_counts = {"retrieval_queries": len(plan), "validator_invocations": 0}
+
+            # Instrument build_evidence_packet to capture per-section retrieval times
+            original_build = assembler.build_evidence_packet
+            retrieval_times = []
+
+            async def timed_build(*args, **kwargs):
+                start = time.perf_counter()
+                try:
+                    result = await original_build(*args, **kwargs)
+                    return result
+                finally:
+                    elapsed = (time.perf_counter() - start) * 1000
+                    retrieval_times.append(elapsed)
+
+            assembler.build_evidence_packet = timed_build
+
+            # Concurrent retrieval
+            with Timer() as retrieval_timer:
+                all_packets = await assembler.assemble_all_sections(mission_id, topic, plan)
+            retrieval_ms_total = retrieval_timer.elapsed_ms
+
+            # Compute retrieval metrics
+            seq_total = sum(retrieval_times)
+            per_section_mean = seq_total / len(retrieval_times) if retrieval_times else 0
+            retrieval_parallelism_efficiency = round(
+                (per_section_mean * len(plan)) / max(retrieval_ms_total, 1), 2
+            )
 
             previous_context = ""
             for section in sorted(plan, key=lambda x: x.order):
-                # Build evidence packet (includes retrieval)
-                with Timer() as packet_timer:
-                    packet = await assembler.build_evidence_packet(mission_id, topic, section)
-                retrieval_ms_total += packet_timer.elapsed_ms
-                call_counts["retrieval_queries"] += 1
+                packet = all_packets[section.order]
 
                 atom_ids_used = list(packet.atom_ids_used) if hasattr(packet, 'atom_ids_used') else []
                 all_atom_ids.extend(atom_ids_used)
@@ -322,7 +412,11 @@ async def run_benchmark_scenario(scenario: str, iterations: int) -> Dict[str, An
             "sections_count": sections_count,
             "avg_atoms_per_section": avg_atoms_per_section,
             "validator_passed": validator_passed,
-            "call_counts": call_counts
+            "call_counts": call_counts,
+            "retrieval_queries": len(plan),
+            "retrieval_ms_per_section_mean": per_section_mean,
+            "retrieval_parallelism_efficiency": retrieval_parallelism_efficiency,
+            "concurrency_level": RETRIEVAL_CONCURRENCY_LIMIT
         }
         per_run_results.append(run_result)
         total_iterations += 1
@@ -359,7 +453,9 @@ async def run_benchmark_scenario(scenario: str, iterations: int) -> Dict[str, An
         "scenario": scenario,
         "iterations": iterations,
         "aggregate": aggregates,
-        "per_run": per_run_results
+        "per_run": per_run_results,
+        "corpus_tier": corpus_tier,
+        "corpus_atom_count": corpus_atom_count
     }
 
 
@@ -367,8 +463,15 @@ async def main():
     parser = argparse.ArgumentParser(description="Benchmark suite for Phase 12-01")
     parser.add_argument("--scenario", choices=["no_discovery", "high_evidence"], required=True)
     parser.add_argument("--iterations", type=int, default=10, help="Number of iterations to run")
+    parser.add_argument(
+        "--corpus-tier",
+        choices=["small", "medium", "large"],
+        default="small",
+        help="Corpus size tier: small=20, medium=500, large=1000 atoms"
+    )
     parser.add_argument("--output", type=Path, default=Path("benchmark_results.json"), help="Output JSON file")
     args = parser.parse_args()
+    tier_count = CORPUS_TIERS[args.corpus_tier]
 
     # Pre-check: run guardrail (pytest)
     if not run_pytest_guardrail():
@@ -377,7 +480,7 @@ async def main():
 
     print(f"\n[Benchmark] Running {args.iterations} iterations of {args.scenario} scenario")
     try:
-        results = await run_benchmark_scenario(args.scenario, args.iterations)
+        results = await run_benchmark_scenario(args.scenario, args.iterations, args.corpus_tier, tier_count)
     except Exception as e:
         print(f"❌ Benchmark failed with error: {e}")
         import traceback
