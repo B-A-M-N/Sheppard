@@ -157,3 +157,51 @@ Output ONLY valid JSON in this format:
                     })
 
         return packet
+
+    async def assemble_all_sections(
+        self, mission_id: str, topic_name: str, sections: List[SectionPlan]
+    ) -> Dict[int, EvidencePacket]:
+        """
+        Retrieve evidence for all sections concurrently.
+
+        Uses index-preserving asyncio.gather with return_exceptions=True
+        so a single section failure does not crash the entire retrieval.
+
+        Returns dict keyed by section.order -> EvidencePacket.
+        Per CONTEXT.md: each section's atoms are already sorted by global_id
+        inside build_evidence_packet. This per-section sort plus section-order
+        preservation satisfies the global re-sort invariant (RESEARCH.md Q1).
+        """
+        sorted_sections = sorted(sections, key=lambda s: s.order)
+
+        # Fan out: create (order, task) pairs for index preservation
+        indexed_tasks = [
+            (section.order, asyncio.create_task(
+                self.build_evidence_packet(mission_id, topic_name, section)
+            ))
+            for section in sorted_sections
+        ]
+
+        # Gather all concurrently -- return_exceptions=True isolates failures
+        results_raw = await asyncio.gather(
+            *[task for _, task in indexed_tasks],
+            return_exceptions=True
+        )
+
+        # Map results back to section order, handling exceptions
+        packets: Dict[int, EvidencePacket] = {}
+        for (order, _), result in zip(indexed_tasks, results_raw):
+            if isinstance(result, Exception):
+                logger.error(
+                    f"[Assembler] Section {order} retrieval failed: {result}"
+                )
+                # Return empty packet on failure -- preserve overall flow
+                packets[order] = EvidencePacket(
+                    topic_name=topic_name,
+                    section_title=f"Section {order}",
+                    section_objective=""
+                )
+            else:
+                packets[order] = result
+
+        return packets
