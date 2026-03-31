@@ -3,20 +3,20 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Performance & Observability
 status: in_progress
-last_updated: "2026-03-30T00:00:00Z"
+last_updated: "2026-03-30T00:10:00Z"
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 7
-  completed_plans: 0
+  completed_plans: 1
 ---
 
 # Sheppard V3: Planning State
 
 ## Position
 
-- **Phase:** 12 (Planning)
-- **Plan:** Not started
+- **Phase:** 12-02 (Retrieval Latency Optimization)
+- **Plan:** 01 complete, proceeding to 02
 - **Status:** Milestone in progress — v1.1 Performance & Observability
 
 ## Previous Milestone
@@ -39,13 +39,15 @@ progress:
 
 ## Sessions
 
-- None yet; v1.1 planning in progress.
+- Completed execution of Phase 12-02-01 (Retrieval Instrumentation & Test Scaffolding) on 2026-03-30
+- Stopped At: Completed 12-02-01-PLAN.md
 
 ## Performance Metrics
 
 | Phase | Plan | Duration (approx) | Tasks | Files |
 | ----- | ---- | ----------------- | ----- | ----- |
 | 12 | 01–07 | TBD | 7 | TBD |
+| 12-02 | 01 | ~10 minutes | 2 | 3 |
 
 ## Requirements Traceability
 
@@ -64,6 +66,9 @@ progress:
 
 ## Decisions
 
+- [12-02-01] RETRIEVAL_CONCURRENCY_LIMIT=8 defined in assembler.py as Wave 2 asyncio.Semaphore ceiling
+- [12-02-01] Per-section timing uses time.perf_counter() (monotonic, high-resolution) not datetime.utcnow()
+- [12-02-01] src/retrieval/retriever.py retained with DEPRECATED marker (not deleted) due to test import dependency
 - parent_node_id linked using deterministic UUID5; root nodes get NULL
 - exhausted_modes stored in MissionNode as JSON (exhausted_modes_json)
 - Deep mining: removed break-on-first-success to ensure all pages 1–5 processed

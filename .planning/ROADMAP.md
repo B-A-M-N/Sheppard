@@ -13,7 +13,7 @@
 | Plan | Name | Status | Tasks (C/T) |
 | ---- | ---- | ------ | ----------- |
 | 12-01 | Benchmark suite & baseline metrics | ✅ Completed | 3/0 |
-| 12-02 | Retrieval latency optimization | ⏳ Pending | 0/0 |
+| 12-02 | 1/1 | Complete   | 2026-03-31 |
 | 12-03 | Synthesis throughput improvements | ⏳ Pending | 0/0 |
 | 12-04 | Structured metrics & tracing | ⏳ Pending | 0/0 |
 | 12-05 | Contradiction system V3 upgrade | ⏳ Pending | 0/0 |
@@ -24,7 +24,7 @@
 
 **Goal:** Reduce total retrieval latency from ~1200ms to ≤200-300ms by parallelizing section retrieval in EvidenceAssembler.
 **Requirements:** [PERF-01]
-**Plans:** 3 plans
+**Plans:** 1/1 plans complete
 
 Plans:
 - [ ] 12-02-01-PLAN.md — Instrumentation, dead code deprecation, test scaffolding
