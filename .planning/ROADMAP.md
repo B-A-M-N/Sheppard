@@ -16,7 +16,7 @@
 | 12-02 | Retrieval Latency Optimization | ✅ Completed | 5/5 |
 | 12-02.1 | Retrieval Latency Diagnosis | ✅ Completed | 4/4 |
 | 12-02.2 | Batch Multi-Query Retrieval | ✅ Completed | 4/4 |
-| 12-03 | Synthesis throughput improvements | ⏳ Pending | 0/0 |
+| 12-03 | Synthesis throughput improvements | 🔄 In Progress | 0/5 |
 | 12-04 | Structured metrics & tracing | ⏳ Pending | 0/0 |
 | 12-05 | Contradiction system V3 upgrade | ⏳ Pending | 0/0 |
 | 12-06 | High-evidence E2E integration test | ⏳ Pending | 0/0 |
@@ -57,6 +57,24 @@ Implemented `V3Retriever.retrieve_many` and modified `EvidenceAssembler.assemble
 - Medium corpus: 266ms
 - Large corpus: 260ms
 All within ≤300ms target. Guardrails passed. PERF-01 achieved.
+
+### Phase 12-03: Synthesis throughput improvements
+
+**Goal:** Achieve ≥20% increase in validated_sections_per_minute by parallelizing section generation with bounded async worker pool while preserving truth invariants.
+**Requirements:** [PERF-02]
+**Plans:** 0/2 plans complete
+
+Plans:
+- [ ] 12-03-01-PLAN.md — Core parallel synthesis refactoring (config, worker pool, metrics, retry)
+- [ ] 12-03-02-PLAN.md — Benchmark update and throughput verification
+
+**Guardrails:**
+- No weakening of Phase 10/11 truth contract invariants.
+- All existing tests must pass unchanged.
+- Determinism preserved (seed/temperature untouched).
+- Validator runs on every section; no skipping.
+- Citations assigned after all sections complete.
+- Forbidden: skip validator, batch prompts, modify citation logic, shared mutable state.
 
 ---
 
