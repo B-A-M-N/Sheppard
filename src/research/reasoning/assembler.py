@@ -10,13 +10,13 @@ import json
 import logging
 import re
 import time
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, field
 
 from llm.client import OllamaClient
 from llm.model_router import TaskType
 from memory.manager import MemoryManager
-from research.reasoning.retriever import RetrievalQuery
+from research.reasoning.retriever import RetrievalQuery, RoleBasedContext
 from research.reasoning.v3_retriever import V3Retriever
 
 logger = logging.getLogger(__name__)
@@ -39,6 +39,7 @@ class EvidencePacket:
     atoms: List[Dict] = field(default_factory=list)
     contradictions: List[Dict] = field(default_factory=list)
     atom_ids_used: List[str] = field(default_factory=list)
+    retrieval_profile: Optional[Dict[str, float]] = None  # populated during diagnostics only
 
 class EvidenceAssembler:
     def __init__(self, ollama: OllamaClient, memory: MemoryManager, retriever: V3Retriever, adapter=None):
@@ -97,7 +98,7 @@ Output ONLY valid JSON in this format:
             ]
 
     async def build_evidence_packet(self, mission_id: str, topic_name: str, section: SectionPlan) -> EvidencePacket:
-        """Gather specific atoms for a section."""
+        """Gather specific atoms for a section (legacy single-query path)."""
         packet = EvidencePacket(
             topic_name=topic_name,
             section_title=section.title,
@@ -118,10 +119,21 @@ Output ONLY valid JSON in this format:
             f"({len(retrieved_context.all_items)} items)"
         )
 
+        # Build packet from retrieved context
+        await self._build_from_context(mission_id, section, retrieved_context, packet)
+
+        return packet
+
+    async def _build_from_context(self, mission_id: str, section: SectionPlan, context: RoleBasedContext, packet: EvidencePacket) -> None:
+        """
+        Fill an EvidencePacket from a retrieved context.
+        Extracted to share logic between single-query and batched paths.
+        Mutates packet in-place.
+        """
         # Deduplicate and extract the raw atom dictionaries, capturing atom IDs
         seen_ids = set()
         collected = []  # list of (atom_dict, atom_id) for deterministic sorting
-        for item in retrieved_context.all_items:
+        for item in context.all_items:
             # Atom ID is stored in metadata as 'atom_id' (from V3Retriever/Chroma index)
             if item.metadata and item.metadata.get('atom_id'):
                 aid = item.metadata['atom_id']
@@ -156,52 +168,59 @@ Output ONLY valid JSON in this format:
                         "claim_b": c['atom_b_content']
                     })
 
-        return packet
+        # Capture detailed retrieval profile if available (diagnostics only)
+        if hasattr(context, '_profile'):
+            packet.retrieval_profile = context._profile
 
     async def assemble_all_sections(
         self, mission_id: str, topic_name: str, sections: List[SectionPlan]
     ) -> Dict[int, EvidencePacket]:
         """
-        Retrieve evidence for all sections concurrently.
-
-        Uses index-preserving asyncio.gather with return_exceptions=True
-        so a single section failure does not crash the entire retrieval.
-
+        Retrieve evidence for all sections using batched retrieval when possible.
+        Falls back to sequential per-section retrieval on batch failure.
         Returns dict keyed by section.order -> EvidencePacket.
-        Per CONTEXT.md: each section's atoms are already sorted by global_id
-        inside build_evidence_packet. This per-section sort plus section-order
-        preservation satisfies the global re-sort invariant (RESEARCH.md Q1).
         """
         sorted_sections = sorted(sections, key=lambda s: s.order)
 
-        # Fan out: create (order, task) pairs for index preservation
-        indexed_tasks = [
-            (section.order, asyncio.create_task(
-                self.build_evidence_packet(mission_id, topic_name, section)
-            ))
-            for section in sorted_sections
-        ]
+        # Build RetrievalQuery for each section
+        queries: List[RetrievalQuery] = []
+        for section in sorted_sections:
+            query_text = f"{topic_name} {section.title} {' '.join(section.target_evidence_roles)}"
+            queries.append(RetrievalQuery(text=query_text, mission_filter=mission_id, max_results=15))
 
-        # Gather all concurrently -- return_exceptions=True isolates failures
-        results_raw = await asyncio.gather(
-            *[task for _, task in indexed_tasks],
-            return_exceptions=True
-        )
+        # Attempt batched retrieval
+        contexts: List[RoleBasedContext] = []
+        batch_failed = False
+        try:
+            contexts = await self.retriever.retrieve_many(queries)
+        except Exception as e:
+            logger.warning(f"[Assembler] Batch retrieval failed: {e}; falling back to sequential")
+            batch_failed = True
 
-        # Map results back to section order, handling exceptions
         packets: Dict[int, EvidencePacket] = {}
-        for (order, _), result in zip(indexed_tasks, results_raw):
-            if isinstance(result, Exception):
-                logger.error(
-                    f"[Assembler] Section {order} retrieval failed: {result}"
-                )
-                # Return empty packet on failure -- preserve overall flow
-                packets[order] = EvidencePacket(
+
+        if not batch_failed and len(contexts) == len(sorted_sections):
+            # Build packets from batched contexts
+            for section, ctx in zip(sorted_sections, contexts):
+                packet = EvidencePacket(
                     topic_name=topic_name,
-                    section_title=f"Section {order}",
-                    section_objective=""
+                    section_title=section.title,
+                    section_objective=section.purpose
                 )
-            else:
-                packets[order] = result
+                await self._build_from_context(mission_id, section, ctx, packet)
+                packets[section.order] = packet
+        else:
+            # Fallback: sequential per-section retrieval (preserves original behavior)
+            for section in sorted_sections:
+                try:
+                    packet = await self.build_evidence_packet(mission_id, topic_name, section)
+                    packets[section.order] = packet
+                except Exception as e:
+                    logger.error(f"[Assembler] Section {section.order} retrieval failed: {e}")
+                    packets[section.order] = EvidencePacket(
+                        topic_name=topic_name,
+                        section_title=f"Section {section.order}",
+                        section_objective=""
+                    )
 
         return packets

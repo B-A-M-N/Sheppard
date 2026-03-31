@@ -8,6 +8,8 @@ corpus.chunks via the StorageAdapter.
 
 import asyncio
 import logging
+import os
+import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -18,6 +20,9 @@ from .retriever import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Enable profiling via environment variable
+PROFILE_RETRIEVAL = os.getenv("PROFILE_RETRIEVAL") == "1"
 
 
 class V3Retriever:
@@ -42,6 +47,11 @@ class V3Retriever:
         """
         items: List[RetrievedItem] = []
 
+        # Initialize timers
+        t_start = t_query_start = t_query_end = t_post_start = t_post_end = 0.0
+        if PROFILE_RETRIEVAL:
+            t_start = time.perf_counter()
+
         # Build where clause for mission/topic filtering
         where = {}
         if query.mission_filter:
@@ -51,16 +61,22 @@ class V3Retriever:
 
         # Semantic search on knowledge_atoms (Level B)
         try:
+            if PROFILE_RETRIEVAL:
+                t_query_start = time.perf_counter()
             result = await self.adapter.chroma.query(
                 collection="knowledge_atoms",
                 query_text=query.text,
                 where=where if where else None,
                 limit=query.max_results
             )
+            if PROFILE_RETRIEVAL:
+                t_query_end = time.perf_counter()
 
             if result and result.get('documents') and result['documents'][0]:
                 logger.info(f"[V3Retriever] Found {len(result['documents'][0])} semantic matches.")
 
+                if PROFILE_RETRIEVAL:
+                    t_post_start = time.perf_counter()
                 for doc, meta, distance in zip(
                     result['documents'][0],
                     result['metadatas'][0],
@@ -81,10 +97,17 @@ class V3Retriever:
                         metadata=meta
                     )
                     items.append(item)
+                if PROFILE_RETRIEVAL:
+                    t_post_end = time.perf_counter()
             else:
                 logger.info("[V3Retriever] No semantic matches found.")
+                if PROFILE_RETRIEVAL:
+                    t_post_end = time.perf_counter()
         except Exception as e:
             logger.error(f"[V3Retriever] Semantic search failed: {e}", exc_info=True)
+            if PROFILE_RETRIEVAL:
+                t_query_end = time.perf_counter()
+                t_post_end = time.perf_counter()
 
         # TODO: Stage 1 Lexical prefilter (Postgres ILIKE on atoms)
         # TODO: Stage 3 Structural (graph traversal from core_atom_ids)
@@ -93,10 +116,121 @@ class V3Retriever:
         # Assemble into role-based context
         ctx = RoleBasedContext()
         ctx.evidence = items
+
+        # Attach profiling data if enabled
+        if PROFILE_RETRIEVAL:
+            query_ms = (t_query_end - t_query_start) * 1000
+            post_ms = (t_post_end - t_query_end) * 1000
+            total_ms = (t_post_end - t_start) * 1000
+            ctx._profile = {
+                "query_ms": query_ms,
+                "post_ms": post_ms,
+                "total_ms": total_ms
+            }
+
         # For now, definitions, contradictions, project_artifacts, unresolved remain empty
         # They can be populated in later refinements
 
         return ctx
+
+    async def retrieve_many(self, queries: List[RetrievalQuery]) -> List[RoleBasedContext]:
+        """
+        Batch retrieval for multiple queries in one ChromaDB call.
+        All queries should share the same filter (mission_id or topic_id).
+        Returns list of RoleBasedContext in same order as queries.
+        """
+        if not queries:
+            return []
+
+        # Validate common filter
+        first = queries[0]
+        filter_type = "mission_id" if first.mission_filter else "topic_id" if first.topic_filter else None
+        filter_value = first.mission_filter or first.topic_filter
+        if filter_type is None:
+            raise ValueError("retrieve_many requires all queries to have either mission_filter or topic_filter")
+        for q in queries[1:]:
+            other = q.mission_filter or q.topic_filter
+            if other != filter_value:
+                raise ValueError("All queries in retrieve_many must share the same filter value")
+
+        # Build where clause
+        where = {filter_type: filter_value}
+
+        # Prepare batch parameters
+        query_texts = [q.text for q in queries]
+        limits = [q.max_results for q in queries]
+        # Use the max limit among queries to ensure enough results for each
+        common_limit = max(limits) if limits else 20
+
+        # Profiling
+        t_start = time.perf_counter() if PROFILE_RETRIEVAL else None
+
+        try:
+            # Batch query: Chroma returns documents[0], metadatas[0], distances[0] as lists of length N
+            result = await self.adapter.chroma.query(
+                collection="knowledge_atoms",
+                query_texts=query_texts,
+                where=where,
+                limit=common_limit
+            )
+            t_end = time.perf_counter() if PROFILE_RETRIEVAL else None
+        except Exception as e:
+            logger.error(f"[V3Retriever] Batch query failed: {e}", exc_info=True)
+            # Return exception contexts? We'll raise and let caller handle
+            raise
+
+        # Split results into per-query contexts
+        contexts: List[RoleBasedContext] = []
+        docs_outer: List[List[str]] = result.get('documents', []) if result else []
+        metas_outer: List[List[Dict]] = result.get('metadatas', []) if result else []
+        dists_outer: List[List[float]] = result.get('distances', []) if result else []
+
+        N = len(queries)
+
+        # If outer lists are empty, return empty contexts for all queries
+        if not docs_outer or len(docs_outer) == 0:
+            return [RoleBasedContext() for _ in range(N)]
+
+        # Build per-query contexts
+        for i in range(N):
+            items: List[RetrievedItem] = []
+            # Get the i-th inner list if available; else empty
+            docs = docs_outer[i] if i < len(docs_outer) else []
+            metas = metas_outer[i] if i < len(metas_outer) else []
+            dists = dists_outer[i] if i < len(dists_outer) else []
+
+            for doc, meta, distance in zip(docs, metas, dists):
+                relevance = 1.0 - distance
+                item = RetrievedItem(
+                    content=doc,
+                    source=meta.get("source_url", "v3_knowledge"),
+                    strategy="semantic",
+                    knowledge_level="B",
+                    item_type=meta.get("atom_type", "claim"),
+                    relevance_score=relevance,
+                    trust_score=meta.get("trust_score", 0.5),
+                    recency_days=self._days_since(meta.get("captured_at")),
+                    tech_density=meta.get("tech_density", 0.5),
+                    citation_key=meta.get("citation_key"),
+                    metadata=meta
+                )
+                items.append(item)
+
+            ctx = RoleBasedContext()
+            ctx.evidence = items
+
+            if PROFILE_RETRIEVAL:
+                total_ms = (t_end - t_start) * 1000 if t_start and t_end else 0.0
+                ctx._profile = {
+                    "query_ms": total_ms / N,
+                    "post_ms": 0.0,
+                    "total_ms": total_ms / N
+                }
+
+            contexts.append(ctx)
+
+        return contexts
+
 
     def _days_since(self, date_str: Optional[str]) -> int:
         """Calculate days since a timestamp string, or return large default."""

@@ -14,6 +14,8 @@
 | ---- | ---- | ------ | ----------- |
 | 12-01 | Benchmark suite & baseline metrics | ✅ Completed | 3/0 |
 | 12-02 | Retrieval Latency Optimization | ✅ Completed | 5/5 |
+| 12-02.1 | Retrieval Latency Diagnosis | ✅ Completed | 4/4 |
+| 12-02.2 | Batch Multi-Query Retrieval | ✅ Completed | 4/4 |
 | 12-03 | Synthesis throughput improvements | ⏳ Pending | 0/0 |
 | 12-04 | Structured metrics & tracing | ⏳ Pending | 0/0 |
 | 12-05 | Contradiction system V3 upgrade | ⏳ Pending | 0/0 |
@@ -35,6 +37,26 @@ Plans:
 - No weakening of Phase 10/11 truth contract invariants
 - All existing tests must pass unchanged
 - Determinism preserved (seed/temperature untouched)
+
+### Phase 12-02.1: Retrieval Latency Diagnosis
+
+**Goal:** Identify root cause of high per-query latency observed after 12-02 implementation.
+**Status:** ✅ Completed (Diagnostic)
+**Artifacts:** ANALYSIS.md with full findings and recommendations
+
+The investigation revealed that single-query latency is within target (~150–180ms), but concurrent retrieval (8 sections) suffers severe serialization due to GIL contention during embedding computation. The recommended fix is to batch section queries into a single Chroma call.
+
+### Phase 12-02.2: Batch Multi-Query Retrieval
+
+**Goal:** Implement batch retrieval to eliminate GIL contention and achieve PERF-01.
+**Status:** ✅ Completed
+**Artifacts:** 12-02.2-SUMMARY.md
+
+Implemented `V3Retriever.retrieve_many` and modified `EvidenceAssembler.assemble_all_sections` to use it. Also extended Chroma adapter for `query_texts`. Results:
+- Small corpus: 227ms
+- Medium corpus: 266ms
+- Large corpus: 260ms
+All within ≤300ms target. Guardrails passed. PERF-01 achieved.
 
 ---
 

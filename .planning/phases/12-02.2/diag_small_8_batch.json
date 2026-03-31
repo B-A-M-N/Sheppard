@@ -1,0 +1,66 @@
+{
+  "timestamp": "2026-03-30T23:42:06.161222",
+  "corpus_tier": "small",
+  "corpus_atom_count": 20,
+  "db_total_atoms": 3245,
+  "num_sections": 7,
+  "concurrent_total_ms": 216.21435100678355,
+  "per_section_profiles": [
+    {
+      "order": 1,
+      "title": "Context",
+      "query_ms": 30.832512137879217,
+      "post_ms": 0.0,
+      "total_ms": 30.832512137879217
+    },
+    {
+      "order": 2,
+      "title": "Founding Principles",
+      "query_ms": 30.832512137879217,
+      "post_ms": 0.0,
+      "total_ms": 30.832512137879217
+    },
+    {
+      "order": 3,
+      "title": "Syntax and Semantics",
+      "query_ms": 30.832512137879217,
+      "post_ms": 0.0,
+      "total_ms": 30.832512137879217
+    },
+    {
+      "order": 4,
+      "title": "Evolution and Adoption",
+      "query_ms": 30.832512137879217,
+      "post_ms": 0.0,
+      "total_ms": 30.832512137879217
+    },
+    {
+      "order": 5,
+      "title": "Community and Ecosystem",
+      "query_ms": 30.832512137879217,
+      "post_ms": 0.0,
+      "total_ms": 30.832512137879217
+    },
+    {
+      "order": 6,
+      "title": "Challenges and Criticisms",
+      "query_ms": 30.832512137879217,
+      "post_ms": 0.0,
+      "total_ms": 30.832512137879217
+    },
+    {
+      "order": 7,
+      "title": "Best Practices and Guidelines",
+      "query_ms": 30.832512137879217,
+      "post_ms": 0.0,
+      "total_ms": 30.832512137879217
+    }
+  ],
+  "aggregate": {
+    "mean_total_ms_per_section": 30.832512137879213,
+    "mean_query_ms": 30.832512137879213,
+    "mean_post_ms": 0.0,
+    "sum_of_per_section_totals_ms": 215.8275849651545,
+    "parallelism_efficiency": 1.0
+  }
+}

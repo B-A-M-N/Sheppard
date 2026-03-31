@@ -76,21 +76,35 @@ class ChromaSemanticStoreImpl:
 
         return hits
 
-    async def query(self, collection: str, query_text: str | None = None, query_embeddings: list[float] | None = None, where: Optional[JsonDict] = None, limit: int = 20) -> Dict:
+    async def query(self, collection: str, query_text: str | None = None, query_texts: List[str] | None = None, query_embeddings: list[float] | None = None, where: Optional[JsonDict] = None, limit: int = 20) -> Dict:
         """
         Raw query to Chroma collection. Returns full result dict with
         documents, metadatas, distances, ids.
+
+        Supports single query (query_text) or batch (query_texts).
         """
-        if query_text is None and query_embeddings is None:
-            raise ValueError("Must provide either query_text or query_embeddings")
+        if query_texts is not None:
+            # Batch query
+            if not isinstance(query_texts, list) or not query_texts:
+                raise ValueError("query_texts must be a non-empty list of strings")
+            query_mode = "batch"
+        elif query_text is not None:
+            query_mode = "single"
+        elif query_embeddings is not None:
+            query_mode = "embedding"
+        else:
+            raise ValueError("Must provide either query_text, query_texts, or query_embeddings")
+
         coll = await self._get_collection(collection)
         kwargs = {
             "n_results": limit
         }
-        if query_embeddings is not None:
-            kwargs["query_embeddings"] = [query_embeddings]
-        else:
+        if query_mode == "batch":
+            kwargs["query_texts"] = query_texts
+        elif query_mode == "single":
             kwargs["query_texts"] = [query_text]
+        else:  # embedding
+            kwargs["query_embeddings"] = [query_embeddings]
         if where:
             kwargs["where"] = where
 
