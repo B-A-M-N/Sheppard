@@ -5,9 +5,11 @@ The "Librarian" for Tier 4 Selective Synthesis.
 Builds role-based evidence packets from the atom store for the synthesis engine.
 """
 
+import asyncio
 import json
 import logging
 import re
+import time
 from typing import Dict, List, Any
 from dataclasses import dataclass, field
 
@@ -18,6 +20,9 @@ from research.reasoning.retriever import RetrievalQuery
 from research.reasoning.v3_retriever import V3Retriever
 
 logger = logging.getLogger(__name__)
+
+# Maximum number of concurrent section retrievals (tunable)
+RETRIEVAL_CONCURRENCY_LIMIT = 8
 
 @dataclass
 class SectionPlan:
@@ -104,7 +109,14 @@ Output ONLY valid JSON in this format:
         q = RetrievalQuery(text=query_text, mission_filter=mission_id, max_results=15)
 
         # Pull standard atoms
+        # --- Per-section timing instrumentation ---
+        _t0 = time.perf_counter()
         retrieved_context = await self.retriever.retrieve(q)
+        _retrieve_ms = (time.perf_counter() - _t0) * 1000
+        logger.debug(
+            f"[Assembler] Section '{section.title}' retrieval: {_retrieve_ms:.1f}ms "
+            f"({len(retrieved_context.all_items)} items)"
+        )
 
         # Deduplicate and extract the raw atom dictionaries, capturing atom IDs
         seen_ids = set()
