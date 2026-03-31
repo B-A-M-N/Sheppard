@@ -13,7 +13,7 @@
 | Plan | Name | Status | Tasks (C/T) |
 | ---- | ---- | ------ | ----------- |
 | 12-01 | Benchmark suite & baseline metrics | ✅ Completed | 3/0 |
-| 12-02 | 1/1 | Complete   | 2026-03-31 |
+| 12-02 | Retrieval Latency Optimization | ✅ Completed | 5/5 |
 | 12-03 | Synthesis throughput improvements | ⏳ Pending | 0/0 |
 | 12-04 | Structured metrics & tracing | ⏳ Pending | 0/0 |
 | 12-05 | Contradiction system V3 upgrade | ⏳ Pending | 0/0 |
@@ -24,12 +24,12 @@
 
 **Goal:** Reduce total retrieval latency from ~1200ms to ≤200-300ms by parallelizing section retrieval in EvidenceAssembler.
 **Requirements:** [PERF-01]
-**Plans:** 1/1 plans complete
+**Plans:** 3/3 plans complete
 
 Plans:
-- [ ] 12-02-01-PLAN.md — Instrumentation, dead code deprecation, test scaffolding
-- [ ] 12-02-02-PLAN.md — Concurrent assembly implementation + tests
-- [ ] 12-02-03-PLAN.md — Benchmark extension with corpus tiers + before/after comparison
+- [x] 12-02-01-PLAN.md — Instrumentation, dead code deprecation, test scaffolding
+- [x] 12-02-02-PLAN.md — Concurrent assembly implementation + tests
+- [x] 12-02-03-PLAN.md — Benchmark extension with corpus tiers + before/after comparison
 
 **Guardrails:**
 - No weakening of Phase 10/11 truth contract invariants
@@ -72,11 +72,12 @@ Plans:
 
 **Status:** ✅ COMPLETE (archived 2026-03-30)
 
-*All phases consolidated into milestone v1.0. See `.planning/milestones/v1.0-ROADMAP.md` for full details.*
+*All phases consolidated under milestone v1.0. See `.planning/milestones/v1.0-ROADMAP.md` for full details.*
 
 
 **Legend**: ✅ Completed, ⬜ Pending, 🔄 In Progress
 
 ## Notes
+
 - All gaps from Phase 06-01 audit have been closed.
 - Database migration pending for `exhausted_modes_json` column.

@@ -3,7 +3,7 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: milestone
 status: executing
-last_updated: "2026-03-31T02:30:56.623Z"
+last_updated: "2026-03-31T03:00:00Z"
 progress:
   total_phases: 1
   completed_phases: 0
@@ -15,8 +15,8 @@ progress:
 
 ## Position
 
-- **Phase:** 12-02 (Retrieval Latency Optimization)
-- **Plan:** 01 complete, proceeding to 02
+- **Phase:** 12-02 (Retrieval Latency Optimization) ✅ COMPLETE
+- **Plan:** 03 complete — all retrieval latency optimization plans finished
 - **Status:** Milestone in progress — v1.1 Performance & Observability
 
 ## Previous Milestone
@@ -42,6 +42,10 @@ progress:
 
 - Completed execution of Phase 12-02-01 (Retrieval Instrumentation & Test Scaffolding) on 2026-03-30
 - Stopped At: Completed 12-02-01-PLAN.md
+- Completed execution of Phase 12-02-02 (Concurrent assembly implementation + tests) on 2026-03-30
+- Stopped At: Completed 12-02-02-PLAN.md
+- Completed execution of Phase 12-02-03 (Benchmark suite extension with corpus tiers and concurrency metrics) on 2026-03-30
+- Stopped At: Completed 12-02-03-PLAN.md
 
 ## Performance Metrics
 
@@ -49,6 +53,8 @@ progress:
 | ----- | ---- | ----------------- | ----- | ----- |
 | 12 | 01–07 | TBD | 7 | TBD |
 | 12-02 | 01 | ~10 minutes | 2 | 3 |
+| 12-02 | 02 | ~15 minutes | 1 | 2 |
+| 12-02 | 03 | ~28 minutes | 2 | 1 |
 
 ## Requirements Traceability
 
@@ -70,6 +76,8 @@ progress:
 - [12-02-01] RETRIEVAL_CONCURRENCY_LIMIT=8 defined in assembler.py as Wave 2 asyncio.Semaphore ceiling
 - [12-02-01] Per-section timing uses time.perf_counter() (monotonic, high-resolution) not datetime.utcnow()
 - [12-02-01] src/retrieval/retriever.py retained with DEPRECATED marker (not deleted) due to test import dependency
+- [12-02-02] assemble_all_sections uses index-preserving asyncio.gather with return_exceptions=True; LLM synthesis loop kept sequential for previous_context
+- [12-02-03] Used method patching to capture per-section retrieval times; added try/finally to ensure elapsed time recording even on exceptions
 - parent_node_id linked using deterministic UUID5; root nodes get NULL
 - exhausted_modes stored in MissionNode as JSON (exhausted_modes_json)
 - Deep mining: removed break-on-first-success to ensure all pages 1–5 processed
@@ -77,7 +85,6 @@ progress:
 - Queue backpressure: simple depth limit (10,000) with Frontier stop-production on reject
 - Mission initial state set to `created` to satisfy orchestration contract; `_crawl_and_store` promotes to `active`.
 - V04 validation verifies atom DB-index consistency; source-level checks deferred to future phase.
-- [Phase 12-02]: assemble_all_sections uses index-preserving asyncio.gather with return_exceptions=True; LLM synthesis loop kept sequential for previous_context
 
 ## Issues
 

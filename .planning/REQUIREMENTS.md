@@ -16,7 +16,7 @@
 **Goal:** Reduce latency and increase throughput of retrieval and synthesis pipelines.
 
 **Requirements:**
-- **PERF-01:** Retrieval query latency P95 < 200ms (currently baseline unknown, must measure first)
+- [x] **PERF-01:** Retrieval query latency P95 < 200ms (currently baseline unknown, must measure first)
 - **PERF-02:** Synthesis throughput (sections/min) improved by ≥20% via batching/parallelization where safe
 - **PERF-03:** Chunk/atom storage efficiency: minimize redundant embeddings; deduplicate identical chunks across sources
 - **PERF-04:** Async bounds tuning: connection pool sizes, worker concurrency limits documented
