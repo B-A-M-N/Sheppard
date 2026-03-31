@@ -1,4 +1,10 @@
 """
+DEPRECATED: This module is dead production code.
+Active retriever is at src/research/reasoning/v3_retriever.py.
+Active types are at src/research/reasoning/retriever.py.
+This file is retained only because tests/retrieval/test_retriever.py imports from it.
+Do NOT add new functionality here. Do NOT import this in production code.
+
 V3-specific retriever that queries the V3 knowledge store.
 
 This retriever queries ChromaDB's knowledge_atoms collection and returns
