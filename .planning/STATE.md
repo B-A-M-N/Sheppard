@@ -1,14 +1,14 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.1
-milestone_name: Performance & Observability
-status: in_progress
-last_updated: "2026-03-30T00:10:00Z"
+milestone_name: milestone
+status: executing
+last_updated: "2026-03-31T02:30:56.623Z"
 progress:
-  total_phases: 7
+  total_phases: 1
   completed_phases: 0
-  total_plans: 7
-  completed_plans: 1
+  total_plans: 0
+  completed_plans: 0
 ---
 
 # Sheppard V3: Planning State
@@ -27,6 +27,7 @@ progress:
 ## Current Milestone: v1.1
 
 **Focus Areas:**
+
 1. Performance (latency, throughput, efficiency)
 2. Observability (metrics, tracing, debug APIs)
 3. High-evidence E2E coverage
@@ -76,6 +77,7 @@ progress:
 - Queue backpressure: simple depth limit (10,000) with Frontier stop-production on reject
 - Mission initial state set to `created` to satisfy orchestration contract; `_crawl_and_store` promotes to `active`.
 - V04 validation verifies atom DB-index consistency; source-level checks deferred to future phase.
+- [Phase 12-02]: assemble_all_sections uses index-preserving asyncio.gather with return_exceptions=True; LLM synthesis loop kept sequential for previous_context
 
 ## Issues
 
