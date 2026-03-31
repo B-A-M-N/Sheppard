@@ -81,13 +81,21 @@ class SynthesisService:
         sections_to_store = []  # Collect sections for batch storage after artifact creation
         citations_to_store = []  # Collect citations for batch storage after artifact creation
 
-        # 2. Write Sections Iteratively
+        # 2a. Retrieve evidence for ALL sections concurrently
+        console.print("[dim]  - Retrieving evidence for all sections concurrently...[/dim]")
+        all_packets = await self.assembler.assemble_all_sections(mission_id, topic_name, plan)
+        console.print(f"[dim]  - Evidence retrieved for {len(all_packets)} sections.[/dim]")
+
+        # 2b. Write Sections Iteratively (LLM synthesis must remain sequential for previous_context)
         for section in sorted(plan, key=lambda x: x.order):
             console.print(f"\n[bold blue][Section {section.order}][/bold blue] {section.title}")
-            console.print(f"[dim]  - Gathering Evidence ({', '.join(section.target_evidence_roles)})...[/dim]")
 
-            # Assemble Evidence with mission_id
-            packet = await self.assembler.build_evidence_packet(mission_id, topic_name, section)
+            # Use pre-fetched packet from concurrent retrieval
+            packet = all_packets.get(section.order, EvidencePacket(
+                topic_name=topic_name,
+                section_title=section.title,
+                section_objective=section.purpose
+            ))
 
             # Determine if evidence is sufficient
             # Only skip Archivist if there are NO atoms at all.

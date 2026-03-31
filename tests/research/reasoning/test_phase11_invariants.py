@@ -111,6 +111,7 @@ async def test_synthesis_service_propagates_mission_id():
         atom_ids_used=['atom1']
     )
     mock_assembler.build_evidence_packet = AsyncMock(return_value=mock_packet)
+    mock_assembler.assemble_all_sections = AsyncMock(return_value={1: mock_packet})
 
     # Archivist returns valid prose (must have lexical overlap and citation)
     mock_archivist = MagicMock(spec=ArchivistSynthAdapter)
@@ -260,6 +261,7 @@ async def test_insufficient_evidence_skips_synthesis():
         atom_ids_used=[]
     )
     mock_assembler.build_evidence_packet = AsyncMock(return_value=mock_packet)
+    mock_assembler.assemble_all_sections = AsyncMock(return_value={1: mock_packet})
 
     with patch('research.reasoning.synthesis_service.ArchivistSynthAdapter') as MockArchivist:
         mock_archivist = MagicMock()
