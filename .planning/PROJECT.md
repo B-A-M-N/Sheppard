@@ -1,7 +1,7 @@
 # Sheppard V3 — Project Definition
 
-**Current Milestone:** v1.2 — Deployment Scaling & Throughput Realization (planned)
-**Archived Milestones:** v1.0 (Truth Contract), v1.1 (Performance & Observability)
+**Current Milestone:** none (accepting new milestone)
+**Archived Milestones:** v1.0 (Truth Contract), v1.1 (Performance & Observability), v1.2 (Derived Insight & Report Excellence)
 
 ---
 
@@ -73,9 +73,28 @@ Synthesis throughput target (≥20% improvement) not met due to single-endpoint 
 
 </details>
 
+### v1.2 — Derived Insight & Report Excellence (Shipped 2026-04-01)
+
+<details>
+<summary>Expand to view v1.2 details</summary>
+
+**Status:** ✅ PASS
+
+**Accomplishments:**
+- ✅ Deterministic derived claim engine (7 transformation rules)
+- ✅ Evidence graph with analytical operators (6 pure functions)
+- ✅ Evidence-aware section planner with mode routing
+- ✅ Multi-pass composition pipeline (5 passes)
+- ✅ Longform verifier with 7 deterministic gates
+
+**Milestone Archive:** `.planning/milestones/v1.2-ROADMAP.md`  
+**Requirements Archive:** `.planning/milestones/v1.2-REQUIREMENTS.md`
+
+</details>
+
 ---
 
-## Current State (v1.1 Shipped)
+## Current State (no active milestone)
 
 The system is **production-grade, truth-safe, and fully observable**.
 
@@ -116,38 +135,9 @@ The system is **production-grade, truth-safe, and fully observable**.
 
 ---
 
-## Next Milestone Goals (v1.2 — Planned)
+## Next Milestone
 
-**Focus:** Scaling throughput to match multi-core inference capacity.
-
-**Hypothesized Work:**
-
-1. **Multi-endpoint inference routing**
-   - Load balance synthesis requests across multiple Ollama instances
-   - Remove `SYNTHESIS_CONCURRENCY_LIMIT=1` override
-   - Validate that parallel throughput improves as expected
-
-2. **Batch inference API**
-   - If provider supports it, send multiple section prompts in single LLM call
-   - Reduces per-request overhead and GPU idle time
-
-3. **Queue-aware scheduling**
-   - Backpressure to frontier when synthesis queue grows too large
-   - Adaptive concurrency based on observed latency
-
-4. **Throughput re-verification**
-   - Re-run PERF-02 tests after scaling improvements
-   - Document achieved sections/min vs. baseline
-
-5. **Observability enhancements** (if needed)
-   - Synthesis queue depth metrics
-   - Per-endpoint utilization tracking
-   - LLM request batching efficiency
-
-**Success Criteria:**
-- Synthesis throughput ≥ baseline +20% (target from PERF-02)
-- No degradation in truth contract invariants
-- All existing tests continue to pass
+No active milestone. Use `/gsd:new-milestone` to define the next set of work.
 - Observable scaling gains (metrics, logs)
 
 ---

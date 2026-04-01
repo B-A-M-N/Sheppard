@@ -1,11 +1,30 @@
 # Project Roadmap
 
-**Current Milestone:** v1.2 — Deployment Scaling & Throughput Realization (planned)
+**Current Milestone:** none (accepting new milestone)
 **Archived Milestones:**
 - v1.0 — Truth Contract Implementation (✅ Shipped 2026-03-30)
 - v1.1 — Performance & Observability (✅ Shipped 2026-03-31)
+- v1.2 — Derived Insight & Report Excellence Layer (✅ Shipped 2026-04-01)
 
 ---
+
+## v1.2 — Derived Insight & Report Excellence Layer (Archived)
+
+All phase details archived in `.planning/milestones/v1.2-ROADMAP.md`.
+
+<details>
+<summary>Expand for brief status</summary>
+
+- 12-A Derived Claim Engine ✅
+- 12-B Dual Validator Extension ✅
+- 12-C Evidence Graph / Claim Graph ✅
+- 12-D Evidence-Aware Section Planner ✅
+- 12-E Multi-Pass Composition Pipeline ✅
+- 12-F Longform Verifier ✅
+
+**Summary:** v1.2 delivers advanced analytical reasoning with deterministic derived claims, evidence graph clustering, multil-pass synthesis, and 7-gate longform verification.
+
+</details>
 
 ## v1.1 — Performance & Observability (Archived)
 
@@ -45,43 +64,9 @@ All phase details archived in `.planning/milestones/v1.0-ROADMAP.md`.
 
 ---
 
-## Future Work (Next: v1.2)
+## Future Work
 
-### Phase 06 — Discovery Engine
-
-| Plan | Name | Status | Tasks (C/T) |
-| ---- | ---- | ------ | ----------- |
-| 06-01 | Audit | ✅ Completed | 1/1 |
-| 06-02 | parent_node_id fix | ✅ Completed | 1/1 |
-| 06-03 | Deep mining fix | ✅ Completed | 1/1 |
-| 06-04 | Academic filtering | ✅ Completed | 1/1 |
-| 06-05 | exhausted_modes persistence | ✅ Completed | 1/1 |
-| 06-06 | Queue backpressure | ✅ Completed | 1/1 |
-| 06-XX | Validation / Integration | ⬜ Pending | 0/0 |
-
-### Phase 07 — Orchestration Validation
-
-| Plan | Name | Status | Tasks (C/T) |
-| ---- | ---- | ------ | ----------- |
-| 07-01 | Core invariants | ✅ Completed | 5/5 |
-
-### Phase 08 — Scraping / Content Normalization Audit
-
-| Plan | Name | Status | Tasks (C/T) |
-| ---- | ---- | ------ | ----------- |
-
-### Phase 09 — Smelter / Atom Extraction Audit
-
-| Plan | Name | Status | Tasks (C/T) |
-| ---- | ---- | ------ | ----------- |
-| 09-01 | Atom schema and extraction pipeline | ✅ Completed | 0/0 |
-| 09-XX | Gap Closure (soft acceptance) | ✅ Completed | 0/0 |
-
-### Phase 10–11.1 — Truth Contract Implementation (v1.0)
-
-**Status:** ✅ COMPLETE (archived 2026-03-30)
-
-*All phases consolidated under milestone v1.0. See `.planning/milestones/v1.0-ROADMAP.md` for full details.*
+*Next milestone to be defined via `/gsd:new-milestone`.*
 
 **Legend**: ✅ Completed, ⬜ Pending, 🔄 In Progress
 
@@ -90,4 +75,5 @@ All phase details archived in `.planning/milestones/v1.0-ROADMAP.md`.
 - All gaps from Phase 06-01 audit have been closed.
 - Database migration pending for `exhausted_modes_json` column.
 - v1.1 shipped with known limitation: PERF-02 throughput target not met due to deployment constraint (single-endpoint inference). Architecture ready for scaling in v1.2.
+- v1.2 shipped with complete derived insight pipeline; LongformVerifier integration ready for Pass 5 plug-in.
 
