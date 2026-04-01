@@ -6,6 +6,7 @@ import asyncio
 from typing import Any, Dict, Sequence, List, Optional
 import chromadb
 from src.memory.storage_adapter import SearchHit
+from src.memory.chroma_process_lock import with_chroma_lock
 
 JsonDict = dict[str, Any]
 
@@ -13,7 +14,7 @@ class ChromaSemanticStoreImpl:
     def __init__(self, client: chromadb.ClientAPI):
         self.client = client
         self._collections = {}
-        self._lock = asyncio.Lock()  # Serialize all ChromaDB operations to prevent ONNX thread-safety crashes
+        # Note: using global process-wide lock instead of per-instance asyncio.Lock()
 
     async def _get_collection(self, name: str):
         """Get or create collection (caller must hold lock)."""
@@ -24,7 +25,7 @@ class ChromaSemanticStoreImpl:
         return self._collections[name]
 
     async def index_document(self, collection: str, object_id: str, document: str, metadata: JsonDict, embedding: list[float] | None = None) -> None:
-        async with self._lock:
+        async with with_chroma_lock():
             coll = await self._get_collection(collection)
             if embedding is not None:
                 await asyncio.to_thread(
@@ -45,7 +46,7 @@ class ChromaSemanticStoreImpl:
     async def index_documents(self, collection: str, rows: Sequence[tuple[str, str, JsonDict]], embeddings: list[list[float]] | None = None) -> None:
         if not rows:
             return
-        async with self._lock:
+        async with with_chroma_lock():
             coll = await self._get_collection(collection)
             ids = [r[0] for r in rows]
             docs = [r[1] for r in rows]
@@ -58,7 +59,7 @@ class ChromaSemanticStoreImpl:
             await asyncio.to_thread(coll.upsert, **kwargs)
 
     async def search(self, collection: str, query_text: str, where: Optional[JsonDict] = None, limit: int = 20) -> list[SearchHit]:
-        async with self._lock:
+        async with with_chroma_lock():
             coll = await self._get_collection(collection)
             kwargs: Dict[str, Any] = {
                 "query_texts": [query_text],
@@ -101,7 +102,7 @@ class ChromaSemanticStoreImpl:
         else:
             raise ValueError("Must provide either query_text, query_texts, or query_embeddings")
 
-        async with self._lock:
+        async with with_chroma_lock():
             coll = await self._get_collection(collection)
             kwargs: Dict[str, Any] = {
                 "n_results": limit
@@ -119,13 +120,13 @@ class ChromaSemanticStoreImpl:
             return results
 
     async def delete_document(self, collection: str, object_id: str) -> None:
-        async with self._lock:
+        async with with_chroma_lock():
             coll = await self._get_collection(collection)
             await asyncio.to_thread(coll.delete, ids=[object_id])
 
     async def clear_collection(self, name: str) -> None:
         """Delete the entire collection. Ignores error if it doesn't exist."""
-        async with self._lock:
+        async with with_chroma_lock():
             try:
                 await asyncio.to_thread(self.client.delete_collection, name)
             except Exception:

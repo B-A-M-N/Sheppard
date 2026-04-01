@@ -25,6 +25,7 @@ from chromadb.config import Settings as ChromaSettings
 from src.config.settings import settings
 from src.memory.models import Memory, MemorySearchResult
 from src.llm.client import OllamaClient
+from src.memory.chroma_process_lock import with_chroma_lock
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ class MemoryManager:
         self.chroma: Optional[PersistentClient] = None
         self.ollama: Optional[OllamaClient] = None
         self._initialized = False
-        self._chroma_lock = asyncio.Lock()  # Serialize all ChromaDB operations to prevent ONNX thread-safety crashes
+        # Using global process-wide Chroma lock (no per-instance lock)
 
         # Collections map
         self._collections = {}
@@ -389,7 +390,7 @@ class MemoryManager:
             return [dict(r) for r in rows]
 
     async def chroma_query(self, collection: str, query_text: str, n_results: int = 5, where: Optional[Dict] = None) -> Dict:
-        async with self._chroma_lock:
+        async with with_chroma_lock():
             coll = self._collections.get(collection)
             if not coll:
                 # Try to get dynamically
@@ -403,7 +404,7 @@ class MemoryManager:
             )
 
     async def store_chunk(self, collection: str, topic_id: str, doc_id: str, content: str, embedding: List[float], metadata: Dict) -> str:
-        async with self._chroma_lock:
+        async with with_chroma_lock():
             coll = self._collections.get(collection)
             chunk_id = f"chk_{uuid.uuid4().hex[:12]}"
 

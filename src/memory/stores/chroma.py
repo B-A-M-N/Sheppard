@@ -18,6 +18,7 @@ from src.memory.models import Memory, MemorySearchResult
 from src.memory.stores.base import BaseMemoryStore, StoreOperationError
 from src.memory.exceptions import MemoryStoreConnectionError
 from src.llm.client import OllamaClient
+from src.memory.chroma_process_lock import with_chroma_lock
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ class ChromaMemoryStore(BaseMemoryStore):
         self.embedding_dimension = settings.EMBEDDING_DIMENSION  # Fixed dimension
         self._persist_dir = settings.CHROMADB_PERSIST_DIRECTORY
         self._initialized = False
-        self._lock = asyncio.Lock()  # Serialize all ChromaDB operations to prevent ONNX thread-safety crashes
+        # Using global process-wide Chroma lock instead of per-instance asyncio.Lock()
 
     async def initialize(self, ollama_client: OllamaClient) -> None:
         """Initialize ChromaDB connection and collection."""
@@ -82,7 +83,7 @@ class ChromaMemoryStore(BaseMemoryStore):
         if not self._initialized:
             raise StoreOperationError("ChromaDB store not initialized")
 
-        async with self._lock:
+        async with with_chroma_lock():
             try:
                 # Generate embedding if not present
                 if not memory.embedding and self.ollama_client:
@@ -117,7 +118,7 @@ class ChromaMemoryStore(BaseMemoryStore):
         if not self._initialized:
             raise StoreOperationError("ChromaDB store not initialized")
 
-        async with self._lock:
+        async with with_chroma_lock():
             try:
                 result = self.collection.get(
                     ids=[memory_id],
@@ -149,7 +150,7 @@ class ChromaMemoryStore(BaseMemoryStore):
         if not self._initialized:
             raise StoreOperationError("ChromaDB store not initialized")
 
-        async with self._lock:
+        async with with_chroma_lock():
             try:
                 # Generate query embedding
                 query_embedding = None
@@ -234,7 +235,7 @@ class ChromaMemoryStore(BaseMemoryStore):
         if not self._initialized:
             raise StoreOperationError("ChromaDB store not initialized")
 
-        async with self._lock:
+        async with with_chroma_lock():
             try:
                 self.collection.delete(ids=[memory_id])
                 return True
@@ -244,7 +245,7 @@ class ChromaMemoryStore(BaseMemoryStore):
 
     async def cleanup(self) -> None:
         """Clean up ChromaDB resources."""
-        async with self._lock:
+        async with with_chroma_lock():
             try:
                 if hasattr(self, 'collection') and self.collection:
                     try:
@@ -282,7 +283,7 @@ class ChromaMemoryStore(BaseMemoryStore):
         if not self._initialized:
             raise StoreOperationError("ChromaDB store not initialized")
 
-        async with self._lock:
+        async with with_chroma_lock():
             try:
                 count = self.collection.count()
 

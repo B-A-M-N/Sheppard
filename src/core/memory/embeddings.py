@@ -5,6 +5,7 @@ import json
 import asyncio
 from ollama import AsyncClient
 import numpy as np
+from src.memory.chroma_process_lock import with_chroma_lock
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,7 @@ class EmbeddingManager:
         self.embedding_cache = {}
         self.max_cache_size = 1000
         self.similarity_threshold = 0.95
-        self._chroma_lock = asyncio.Lock()  # Serialize ChromaDB operations to prevent ONNX thread-safety crashes
+        # Using global process-wide Chroma lock instead of per-instance asyncio.Lock()
 
     async def generate_embedding(self, text: str) -> Optional[List[float]]:
         """
@@ -114,7 +115,7 @@ class EmbeddingManager:
 
                 collection = chroma_collections.get(layer)
                 if collection:
-                    async with self._chroma_lock:
+                    async with with_chroma_lock():
                         collection.add(
                             documents=[text],
                             embeddings=[embedding],
@@ -140,7 +141,7 @@ class EmbeddingManager:
         try:
             collection = chroma_collections.get(layer)
             if collection:
-                async with self._chroma_lock:
+                async with with_chroma_lock():
                     results = collection.query(
                         query_embeddings=[embedding],
                         n_results=1
@@ -171,7 +172,7 @@ class EmbeddingManager:
             if not collection:
                 return []
 
-            async with self._chroma_lock:
+            async with with_chroma_lock():
                 results = collection.query(
                     query_embeddings=[query_embedding],
                     n_results=n_results
