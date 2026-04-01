@@ -12,6 +12,10 @@ from research.derivation.engine import (
     compute_delta,
     compute_percent_change,
     compute_rank,
+    compute_ratio,
+    compute_chronology,
+    compute_support_rollup,
+    compute_conflict_rollup,
 )
 
 __all__ = [
@@ -21,4 +25,8 @@ __all__ = [
     "compute_delta",
     "compute_percent_change",
     "compute_rank",
+    "compute_ratio",
+    "compute_chronology",
+    "compute_support_rollup",
+    "compute_conflict_rollup",
 ]

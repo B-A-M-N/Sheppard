@@ -8,6 +8,10 @@ Rules implemented (Phase 12-A scope):
   - delta: difference between two numeric values
   - percent_change: percentage change from old to new value
   - rank: ordering of atoms by numeric value
+  - ratio: division relationship between two numeric values
+  - chronology: temporal ordering of atoms by publish_date or recency_days
+  - simple_support_rollup: count of atoms grouped by entity/concept (threshold >= 2)
+  - simple_conflict_rollup: count of contradiction atoms grouped by concept
 
 All functions are pure: same inputs → same outputs. No LLM calls.
 Errors are silently skipped (never halt pipeline, never fabricate).
@@ -239,6 +243,210 @@ def compute_rank(
     )
 
 
+def compute_ratio(
+    atom_a: RetrievedItem,
+    atom_b: RetrievedItem,
+    config: Optional[DerivationConfig] = None,
+) -> Optional[DerivedClaim]:
+    """
+    Compute the ratio of two atoms with numeric values.
+
+    Formula: ratio = value_a / value_b
+
+    Returns None if either atom lacks a numeric value or value_b is zero.
+    Deterministic: atom IDs are sorted for canonical claim ID generation.
+    """
+    val_a = _extract_numeric_value(atom_a, config.extract_from_metadata if config else True)
+    val_b = _extract_numeric_value(atom_b, config.extract_from_metadata if config else True)
+
+    if val_a is None or val_b is None:
+        return None
+    if val_b == 0.0:
+        return None  # zero-division guard
+
+    result = val_a / val_b
+    id_a = atom_a.citation_key or atom_a.metadata.get('atom_id', '')
+    id_b = atom_b.citation_key or atom_b.metadata.get('atom_id', '')
+    claim_id = make_claim_id("ratio", [id_a, id_b], config.version if config else CONFIG_VERSION)
+
+    return DerivedClaim(
+        id=claim_id,
+        rule="ratio",
+        source_atom_ids=sorted([id_a, id_b]),
+        output=result,
+        metadata={
+            "atom_a_id": id_a,
+            "atom_b_id": id_b,
+            "atom_a_value": val_a,
+            "atom_b_value": val_b,
+            "formula": "A / B",
+        }
+    )
+
+
+def compute_chronology(
+    atoms: List[RetrievedItem],
+    config: Optional[DerivationConfig] = None,
+) -> Optional[DerivedClaim]:
+    """
+    Establish temporal ordering of atoms by publish_date (ISO string) or recency_days fallback.
+
+    For recency_days: higher value = older (published further in the past). Uses negative
+    offset from epoch so higher recency_days maps to smaller (earlier) timestamp.
+
+    Returns None if fewer than 2 atoms have parseable timestamps.
+    Deterministic: atom IDs are sorted for canonical claim ID generation.
+    """
+    from dateutil import parser as dateutil_parser
+
+    # Deduplicate by citation_key
+    seen_keys: set = set()
+    deduped = []
+    for atom in atoms:
+        key = atom.citation_key or atom.metadata.get('atom_id', '') if atom.metadata else atom.citation_key
+        if key not in seen_keys:
+            seen_keys.add(key)
+            deduped.append(atom)
+
+    timestamped = []
+    for atom in deduped:
+        atom_id = atom.citation_key or (atom.metadata.get('atom_id', '') if atom.metadata else '')
+        meta = atom.metadata or {}
+
+        publish_date = meta.get('publish_date')
+        if publish_date:
+            try:
+                ts = dateutil_parser.parse(str(publish_date)).timestamp()
+                timestamped.append((atom_id, ts))
+                continue
+            except Exception:
+                pass
+
+        recency_days = meta.get('recency_days')
+        if recency_days is not None:
+            try:
+                ts = -float(recency_days)
+                timestamped.append((atom_id, ts))
+                continue
+            except (TypeError, ValueError):
+                pass
+
+    if len(timestamped) < 2:
+        return None
+
+    timestamped.sort(key=lambda x: x[1])
+    earliest_id = timestamped[0][0]
+    latest_id = timestamped[-1][0]
+    delta_seconds = abs(timestamped[-1][1] - timestamped[0][1])
+
+    all_ids = sorted([pair[0] for pair in timestamped])
+    claim_id = make_claim_id("chronology", all_ids, config.version if config else CONFIG_VERSION)
+
+    return DerivedClaim(
+        id=claim_id,
+        rule="chronology",
+        source_atom_ids=all_ids,
+        output={"earliest_id": earliest_id, "latest_id": latest_id, "delta_seconds": delta_seconds},
+        metadata={"atom_count": len(timestamped), "sort_key_used": "publish_date or recency_days"},
+    )
+
+
+def compute_support_rollup(
+    atoms: List[RetrievedItem],
+    config: Optional[DerivationConfig] = None,
+) -> Optional[DerivedClaim]:
+    """
+    Group atoms by entity_id or concept_name metadata and count support per group.
+
+    Only emits groups with count >= 2 (threshold). Deduplicates by citation_key
+    before counting to avoid double-counting the same source.
+
+    Returns None if no group meets the threshold.
+    Deterministic: atom IDs are sorted for canonical claim ID generation.
+    """
+    from collections import defaultdict
+
+    # Deduplicate by citation_key
+    seen_keys: set = set()
+    deduped = []
+    for atom in atoms:
+        key = atom.citation_key or (atom.metadata.get('atom_id', '') if atom.metadata else '')
+        if key not in seen_keys:
+            seen_keys.add(key)
+            deduped.append(atom)
+
+    groups: dict = defaultdict(int)
+    atom_by_group: dict = defaultdict(list)
+    for atom in deduped:
+        meta = atom.metadata or {}
+        key = meta.get('entity_id') or meta.get('concept_name')
+        if key is None:
+            continue
+        atom_id = atom.citation_key or meta.get('atom_id', '')
+        groups[key] += 1
+        atom_by_group[key].append(atom_id)
+
+    qualifying = {k: v for k, v in groups.items() if v >= 2}
+    if not qualifying:
+        return None
+
+    # Collect all atom IDs that contributed to qualifying groups
+    contributing_ids = []
+    for k in qualifying:
+        contributing_ids.extend(atom_by_group[k])
+    all_ids = sorted(set(contributing_ids))
+
+    claim_id = make_claim_id("simple_support_rollup", all_ids, config.version if config else CONFIG_VERSION)
+
+    return DerivedClaim(
+        id=claim_id,
+        rule="simple_support_rollup",
+        source_atom_ids=all_ids,
+        output=qualifying,
+        metadata={"threshold": 2, "total_entities_found": len(groups)},
+    )
+
+
+def compute_conflict_rollup(
+    atoms: List[RetrievedItem],
+    config: Optional[DerivationConfig] = None,
+) -> Optional[DerivedClaim]:
+    """
+    Count atoms flagged as contradictions, grouped by concept_name.
+
+    Filters atoms where metadata['is_contradiction'] is strictly True.
+    Returns None if zero contradiction atoms are found.
+    Deterministic: atom IDs are sorted for canonical claim ID generation.
+    """
+    from collections import defaultdict
+
+    contradiction_atoms = [
+        a for a in atoms
+        if (a.metadata or {}).get('is_contradiction') is True
+    ]
+    if not contradiction_atoms:
+        return None
+
+    groups: dict = defaultdict(int)
+    for atom in contradiction_atoms:
+        concept = (atom.metadata or {}).get('concept_name', 'unknown')
+        groups[concept] += 1
+
+    all_ids = sorted(
+        a.citation_key or (a.metadata or {}).get('atom_id', '')
+        for a in contradiction_atoms
+    )
+    claim_id = make_claim_id("simple_conflict_rollup", all_ids, config.version if config else CONFIG_VERSION)
+
+    return DerivedClaim(
+        id=claim_id,
+        rule="simple_conflict_rollup",
+        source_atom_ids=all_ids,
+        output=dict(groups),
+        metadata={"total_contradictions": sum(groups.values())},
+    )
+
+
 # ──────────────────────────────────────────────────────────────
 # Engine orchestrator
 # ──────────────────────────────────────────────────────────────
@@ -286,6 +494,33 @@ class DerivationEngine:
         except Exception as e:
             logger.debug(f"[DerivationEngine] Rank computation failed: {e}")
 
+        try:
+            ratio_claims = self._compute_all_ratios(sorted_items)
+            claims.extend(ratio_claims)
+        except Exception as e:
+            logger.debug(f"[DerivationEngine] Ratio computation failed: {e}")
+
+        try:
+            chron_claim = self._compute_chronology(sorted_items)
+            if chron_claim is not None:
+                claims.append(chron_claim)
+        except Exception as e:
+            logger.debug(f"[DerivationEngine] Chronology computation failed: {e}")
+
+        try:
+            support_claim = self._compute_support_rollup(sorted_items)
+            if support_claim is not None:
+                claims.append(support_claim)
+        except Exception as e:
+            logger.debug(f"[DerivationEngine] Support rollup computation failed: {e}")
+
+        try:
+            conflict_claim = self._compute_conflict_rollup(sorted_items)
+            if conflict_claim is not None:
+                claims.append(conflict_claim)
+        except Exception as e:
+            logger.debug(f"[DerivationEngine] Conflict rollup computation failed: {e}")
+
         return claims
 
     def _compute_all_deltas(self, items: List[RetrievedItem]) -> List[DerivedClaim]:
@@ -321,6 +556,33 @@ class DerivationEngine:
     def _compute_all_ranks(self, items: List[RetrievedItem]) -> Optional[DerivedClaim]:
         """Rank all items by their numeric values."""
         return compute_rank(items, self.config)
+
+    def _compute_all_ratios(self, items: List[RetrievedItem]) -> List[DerivedClaim]:
+        """Compute ratio for all unique pairs of items with numeric values."""
+        claims = []
+        numeric_items = []
+        for item in items:
+            if _extract_numeric_value(item, self.config.extract_from_metadata) is not None:
+                numeric_items.append(item)
+
+        for i in range(len(numeric_items)):
+            for j in range(i + 1, len(numeric_items)):
+                claim = compute_ratio(numeric_items[i], numeric_items[j], self.config)
+                if claim is not None:
+                    claims.append(claim)
+        return claims
+
+    def _compute_chronology(self, items: List[RetrievedItem]) -> Optional[DerivedClaim]:
+        """Compute chronological ordering of items."""
+        return compute_chronology(items, self.config)
+
+    def _compute_support_rollup(self, items: List[RetrievedItem]) -> Optional[DerivedClaim]:
+        """Compute support rollup for items grouped by entity/concept."""
+        return compute_support_rollup(items, self.config)
+
+    def _compute_conflict_rollup(self, items: List[RetrievedItem]) -> Optional[DerivedClaim]:
+        """Compute conflict rollup for contradiction-flagged items."""
+        return compute_conflict_rollup(items, self.config)
 
 
 # ──────────────────────────────────────────────────────────────
