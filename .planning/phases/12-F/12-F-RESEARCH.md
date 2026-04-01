@@ -1,251 +1,181 @@
-# Phase 12-F Research: Adversarial Critic Loop
+# Phase 12-F: Adversarial Critic Loop - Research
 
-## Research Scope
+**Researched:** 2026-04-01
+**Domain:** Report-level quality assurance and adversarial validation
+**Confidence:** HIGH
 
-Add an automated adversarial critic pass that validates completed reports before publishing. The critic catches weak reports that pass per-sentence validation but have holistic quality issues — uncited claims, incorrect derived claims, ignored contradictions, duplication, vague language, and numeric inaccuracies.
+## Summary
 
----
+This phase implements the `CriticEngine`, an automated adversarial pass that validates completed Master Briefs before publication. Unlike the existing per-sentence grounding validator, the Critic operates holistically on the full report text and the complete evidence context. It identifies high-level quality issues such as ignored contradictions, near-duplicate content, vague language, and numeric inconsistencies that per-sentence validation misses.
 
-## Current Validation State
+**Primary recommendation:** Use a purely programmatic, deterministic engine for 5 of the 6 checks (Uncited, Derived, Contradictions, Duplication, Numbers) to ensure performance and reliability. Use a regex-based "weasel word" scanner for Vague Language, optionally surfacing issues as advisory warnings rather than blocking errors.
 
-### `_validate_grounding()` in `synthesis_service.py` (lines 236-285)
+<user_constraints>
+## User Constraints (from CONTEXT.md)
 
-The validator performs **per-sentence** checks:
-1. Every sentence has at least one citation `[A###]`
-2. Cited atom exists in the evidence packet
-3. At least one cited atom has ≥2 content words in common with the sentence
-4. Numbers in sentence appear in cited atoms (with 12-B extension: or are recomputed from multi-atom derivations)
+### Locked Decisions
+- **Critic Architecture:** Input is report text + EvidencePacket; output is CriticReport.
+- **Checks:** Uncited Claims, Incorrect Derived Claims, Ignored Contradictions, Duplication, Vague Language, Numeric Accuracy.
+- **Integration:** Runs after full report assembly in `synthesis_service.py`.
+- **Policy:** The critic is advisory. It logs issues but does not block publishing by default (Option C from context).
 
-### What Validation Catches
+### the agent's Discretion
+- **Implementation of Checks:** Choice of algorithms (e.g., Jaccard similarity for duplication) and regex patterns for vague language.
+- **Severity Mapping:** Defining which issues are "errors" vs "warnings".
+- **Refinement Logic:** How to handle transitional phrases and headings in "Uncited Claims" check.
 
-- "The company grew rapidly" → FAIL (no citation)
-- "The revenue was $50M [A001]" → PASS IF A001 contains "50" and "revenue"
-- "Company A exceeded B by 99% [A001, A002]" → PASS IF recomputed delta matches (with 12-B)
+### Deferred Ideas (OUT OF SCOPE)
+- **Automatic Retries:** While suggested as an option, the primary scope is detection and logging, not the "Option B" retry loop.
+- **LLM-based Criticism:** Using an LLM to "read" the whole report for flow or style is deferred in favor of deterministic checks for speed.
+</user_constraints>
 
-### What Validation Misses
+<phase_requirements>
+## Phase Requirements
 
-| Issue | Why Validator Misses It |
-|-------|------------------------|
-| **Near-duplicate sections** | Each sentence passes individually; two nearly identical paragraphs both pass |
-| **Ignored contradictions** | Validator checks per-sentence grounding, not whether contradictions in the packet were surfaced |
-| **Vague language** | "Many experts suggest" [A001] passes if A001 mentions "experts" |
-| **Overall report structure** | Validator doesn't see the full report; only individual sections |
-| **Numeric inconsistencies** | Validator checks per-sentence; doesn't cross-reference numbers between sections |
-| **Missing derived claims** | If a derived claim exists in EvidencePacket but the LLM didn't mention it, validator doesn't flag this |
+| ID | Description | Research Support |
+|----|-------------|-----------------|
+| CRITIC-01 | Uncited Claims detection | Sentence splitting + citation extraction logic. |
+| CRITIC-02 | Incorrect Derived Claims | Integration with `DerivationEngine` and ID mapping. |
+| CRITIC-03 | Ignored Contradictions | Set intersection of cited atoms vs known conflict pairs. |
+| CRITIC-04 | Duplication detection | Pairwise Jaccard similarity on content words. |
+| CRITIC-05 | Vague Language detection | "Weasel word" regex patterns for academic writing. |
+| CRITIC-06 | Numeric Accuracy | Global number extraction and cross-reference with atoms. |
+</phase_requirements>
 
----
+## Standard Stack
 
-## The Adversarial Critic Concept
+### Core
+| Library | Version | Purpose | Why Standard |
+|---------|---------|---------|--------------|
+| `re` | Python stdlib | Regex patterns for sentence splitting and vague language | Fast, reliable, no dependencies |
+| `math` | Python stdlib | Tolerance-based numeric comparison | Required for floating point safety |
+| `difflib` | Python stdlib | Secondary check for text similarity | Built-in, good for sequence matching |
 
-### Validation vs Criticism
+### Supporting
+| Library | Version | Purpose | When to Use |
+|---------|---------|---------|--------------|
+| `DerivationEngine` | Local (12-A) | Computing expected numeric values | Prerequisite for Check 2 |
 
-| Property | Per-Sentence Validation | Adversarial Critic |
-|----------|------------------------|-------------------|
-| Scope | Individual sentences | Full report context |
-| Approach | Grounding (is this claim supported?) | Quality (is this report well-formed?) |
-| Timing | Per section, during writing | After all sections, before publishing |
-| Determinism | Pure function (regex + set ops) | May use LLM for some checks |
-| Result | pass/fail per section | List of issues + publish recommendation |
+**Installation:**
+No new external packages required. The implementation relies on the Python standard library and existing project modules.
 
-### The Critic in the Pipeline
+## Architecture Patterns
 
+### Recommended Project Structure
 ```
-generate_master_brief()
-  → generate_section_plan()
-  → assemble_all_sections()
-  → For each section: write → validate (per-sentence)
-  → Combine all sections into full_report
-  → CRITIC.run(full_report, all_packets)    ← NEW
-  → If publishable: store artifact
-  → If not: log issues, store anyway (configurable)
+src/research/reasoning/
+├── critic.py          # NEW: CriticEngine, CriticReport, CriticIssue
+├── assembler.py       # (Ref) EvidencePacket structure
+└── synthesis_service.py # (Ref) Integration point
 ```
 
-### Integration Point (`synthesis_service.py`)
-
-After lines 176-214 where `full_report` is built but before lines 216-234 where it's stored:
+### Pattern 1: Deterministic Multi-Pass Critic
+The `CriticEngine` should execute a series of independent "Checkers" that populate a central `CriticReport`.
 
 ```python
-# After section text assembly complete:
-from research.reasoning.critic import CriticEngine
-critic = CriticEngine()
-critic_report = critic.run(full_report, all_packets)
-if not critic.is_publishable(critic_report):
-    logger.warning(f"[Critic] Report has {len(critic_report.issues)} issues:")
-    for issue in critic_report.issues:
-        logger.warning(f"  - {issue}")
-    # Option: attach critic_report to artifact metadata for audit trail
+class CriticEngine:
+    def run(self, report_text: str, packet: EvidencePacket) -> CriticReport:
+        report = CriticReport()
+        # 1. Holistic Text Analysis (Duplication, Uncited, Vague)
+        # 2. Evidence Context Analysis (Contradictions, Derived Claims)
+        # 3. Numeric Cross-Verification (Numbers vs Atoms)
+        return report
 ```
 
----
+### Anti-Patterns to Avoid
+- **Blocking on Warnings:** Do not fail the pipeline for `VAGUE_LANGUAGE` or `DUPLICATION` unless extremely high (e.g. >95% overlap). These are often stylistic choices.
+- **LLM for Math:** Never use an LLM to verify if `A - B = C`. Use the `DerivationEngine`.
 
-## Critic Check Design: The 6 Checks
+## Don't Hand-Roll
 
-### Check 1: Uncited Claims
+| Problem | Don't Build | Use Instead | Why |
+|---------|-------------|-------------|-----|
+| Numeric Comparison | `a == b` | `math.isclose(a, b, rel_tol=1e-9)` | Floating point precision issues |
+| Sentence Splitting | `text.split('.')` | `re.split(r'(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=\.|\?)\s', text)` | Handles "U.S.A." and "Dr." correctly |
+| Weasel Word Lists | Custom guessing | Standard Academic Lists (Quillbot/Proofed) | Based on established linguistic patterns |
 
-**Scope:** All declarative sentences in the report.
-**Method:** For each sentence without a citation marker, flag as uncited.
-**Already checked by validator?** Yes — but validator only checks per-section. This check re-verifies the complete combined report, catching any uncited text that slipped through per-section processing (e.g., in section transitions or introductions).
+## Common Pitfalls
 
-### Check 2: Incorrect Derived Claims
+### Pitfall 1: False Positives in Uncited Claims
+**What goes wrong:** Section headers (`## Analysis`) and bullet point prefixes are flagged as uncited claims.
+**How to avoid:** Filter out sentences that lack verbs, start with markdown header symbols, or are shorter than 5 words.
 
-**Scope:** Sentences expressing derived numeric relationships.
-**Method:** For sentences with ≥2 citations and comparative language:
-1. Extract the claimed numeric value
-2. Look up source atoms
-3. Recompute the value using 12-A derivation rules
-4. Compare: `abs(claimed - recomputed) <= tolerance`
+### Pitfall 2: Citation ID Mapping
+**What goes wrong:** The report uses `[A001]` but the packet uses `atom_id` UUIDs.
+**How to avoid:** `EvidencePacket` must provide a `id_map` that links `global_id` (the citation string) to the actual `atom_id`.
 
-**This overlaps with validator** but operates on the full report text, not per-section. The critic catches cases where:
-- The sentence passed section-level validation (with relaxed matching) but is globally wrong
-- Two sections cite the same atoms but make contradictory derived claims
+### Pitfall 3: Jaccard Performance
+**What goes wrong:** $O(n^2)$ comparison on a massive report takes seconds.
+**How to avoid:** Only compare sentences within a 3-paragraph window or only compare sentences between different sections.
 
-### Check 3: Ignored Contradictions
+## Code Examples
 
-**Scope:** All sections of the report.
-**Method:**
-1. Collect all contradictions from EvidencePacket (across all sections)
-2. Check if the report mentions either atom from the contradiction pair
-3. If both are mentioned but the contradiction is not flagged → issue
-**Policy:** Contradictions are NOT automatically errors. A good report should:
-- Surface contradictions explicitly ("Sources A and B disagree on X")
-- Or use only one side and acknowledge the other
-- Never silently present both sides as if they're both true
-
-### Check 4: Duplication
-
-**Scope:** All sentences in the report.
-**Method:**
-1. Tokenize all sentences into content words (stopword-removed)
-2. For each pair of sentences: compute Jaccard similarity on content words
-3. Flag pairs with similarity > 0.8 (nearly identical)
-4. Also flag sentences within same paragraph that share ≥80% content words
-
-**Edge case mitigation:** Two sections may legitimately reference the same facts (e.g., summary and detail). To avoid false positives:
-- Only flag near-duplicate sentences in DIFFERENT sections (same-section duplication is the writer's choice)
-- Summary sentences that paraphrase earlier detailed sentences are acceptable if they add new context
-
-### Check 5: Vague Language
-
-**Scope:** All sentences in the report.
-**Method:** Regex-based detection of vague patterns:
-- Undefined group references: "some say", "many believe", "experts claim", "research suggests"
-- Unquantified adjectives: "highly rated", "very popular", "extremely dangerous", "moderate increase"
-- Time references without dates: "recently", "in the past few years", "soon"
-
-**Tolerance level:** Vague claims from the CRITIC are WARNINGS, not errors. The validator would have checked that they're cited. The critic flags them for human review.
-
-### Check 6: Numeric Accuracy
-
-**Scope:** All numbers in the report.
-**Method:**
-1. Extract all numbers from report text
-2. For each number, find the cited atom(s) in that sentence
-3. Check the number appears in at least one cited atom (or is a derived value from 12-A rules)
-4. Flag numbers that don't appear in any cited atom AND don't match any derived claim
-
-**Difference from Check 2:** Check 6 is broader — it catches ALL numeric inconsistencies, not just derived claims. Check 2 is specifically for computed relationships (delta, percent). Check 6 catches typos, mis-copied numbers, and fabricated statistics.
-
----
-
-## LLM vs Programmatic Checks
-
-| Check | Method | Why |
-|-------|--------|-----|
-| UNCITED_CLAIMS | Programmatic (regex sentence split + citation extraction) | Precise, deterministic, fast |
-| INCORRECT_DERIVED | Programmatic (recompute from atoms) | Arithmetic is exact |
-| IGNORED_CONTRADICTIONS | Programmatic (set intersection: report mentions vs contradiction atoms) | Contradictions are structured data |
-| DUPLICATION | Programmatic (Jaccard similarity on token sets) | Text similarity is computational |
-| VAGUE_LANGUAGE | Hybrid (programmatic regex + optional LLM for context) | Regex catches patterns; LLM judges if vague language is justified |
-| NUMERIC_ACCURACY | Programmatic (number extraction + atom matching) | Numbers are exact |
-
-Only `VAGUE_LANGUAGE` has a potential LLM component (for context understanding). The other 5 are purely computational and deterministic.
-
----
-
-## CriticReport Dataclass
-
+### Vague Language Patterns (Source: Academic Writing Standards)
 ```python
-@dataclass
-class CriticIssue:
-    check: str                   # Which check failed
-    severity: str                # "error" | "warning"
-    location: str                # Section name or sentence index
-    detail: str                  # Human-readable description
-    sentence: str                # The offending sentence (if applicable)
-
-@dataclass
-class CriticReport:
-    issues: List[CriticIssue] = field(default_factory=list)
-    uncited_claims: List[str] = field(default_factory=list)
-    derived_errors: List[str] = field(default_factory=list)
-    ignored_contradictions: List[str] = field(default_factory=list)
-    duplicates: List[str] = field(default_factory=list)
-    vague_claims: List[str] = field(default_factory=list)
-    numeric_errors: List[str] = field(default_factory=list)
+WEASEL_WORDS_REGEX = re.compile(
+    r'\b(it is (said|thought|believed|claimed)|research shows|experts agree|'
+    r'studies (suggest|show)|critics claim|many|some|numerous|a (few|fraction|lot)|'
+    r'most|various|several|arguably|apparently|supposedly|seemingly|possibly|'
+    r'probably|relatively|fairly|quite|somewhat|rather|mostly|largely|'
+    r'virtually|potentially|reportedly|allegedly|may|might|could|'
+    r'appears to|tends to|seems to|clearly|obviously|extremely|very|'
+    r'really|significantly|substantially)\b', 
+    re.IGNORECASE
+)
 ```
 
----
-
-## Publishability Decision
-
+### Jaccard Similarity for Duplication
 ```python
-def is_publishable(self, report: CriticReport) -> bool:
-    """Publishable = no errors (warnings are acceptable)."""
-    return not any(issue.severity == "error" for issue in report.issues)
+def get_jaccard_sim(str1: str, str2: str) -> float:
+    a = set(re.findall(r'\w+', str1.lower()))
+    b = set(re.findall(r'\w+', str2.lower()))
+    # Remove citations from comparison
+    a = {t for t in a if not re.match(r'a\d+', t)}
+    b = {t for t in b if not re.match(r'a\d+', b)}
+    if not a or not b: return 0.0
+    return len(a & b) / len(a | b)
 ```
 
-| Condition | Action |
-|-----------|--------|
-| No issues | Publish normally |
-| Warnings only | Publish with warnings logged |
-| Errors present | Log issues, publish with warning |
+## Validation Architecture
 
-**Note:** The critic should NOT block publishing (per context: "Option C: log issues and publish anyway"). The critic is advisory, not a gate. Future phases can make it blocking for specific issue types.
+### Test Framework
+| Property | Value |
+|----------|-------|
+| Framework | pytest 7.4.3 |
+| Config file | pytest.ini |
+| Quick run command | `pytest tests/research/reasoning/test_critic.py` |
 
----
+### Phase Requirements → Test Map
+| Req ID | Behavior | Test Type | Automated Command | File Exists? |
+|--------|----------|-----------|-------------------|-------------|
+| CRITIC-01 | Flags sentences without `[A###]` | Unit | `pytest tests/research/reasoning/test_critic.py -k uncited` | ❌ Wave 0 |
+| CRITIC-02 | Verifies arithmetic of derived claims | Unit | `pytest tests/research/reasoning/test_critic.py -k derived` | ❌ Wave 0 |
+| CRITIC-03 | Flags ignored contradictions | Unit | `pytest tests/research/reasoning/test_critic.py -k contradictions` | ❌ Wave 0 |
+| CRITIC-04 | Detects >80% lexical overlap | Unit | `pytest tests/research/reasoning/test_critic.py -k duplicate` | ❌ Wave 0 |
+| CRITIC-05 | Identifies weasel words | Unit | `pytest tests/research/reasoning/test_critic.py -k vague` | ❌ Wave 0 |
+| CRITIC-06 | Cross-checks numbers with source atoms | Unit | `pytest tests/research/reasoning/test_critic.py -k numeric` | ❌ Wave 0 |
 
-## False Positive Mitigation
+### Wave 0 Gaps
+- [ ] `tests/research/reasoning/test_critic.py` — Mocked EvidencePackets with known errors.
+- [ ] `src/research/reasoning/critic.py` — Engine skeleton.
 
-### Uncited Claims
-- False positive: headings, section titles, transitional phrases
-- Mitigation: Only check sentences with >5 content words and declarative structure
+## Sources
 
-### Ignored Contradictions
-- False positive: Both sides mentioned but report correctly handles them (e.g., "A says X, but B says Y, and the evidence supports B")
-- Mitigation: Check if the report contains language indicating contradiction resolution ("however", "but", "disagrees", "conflicts")
+### Primary (HIGH confidence)
+- `12-F-CONTEXT.md` - Defined the 6 specific checks and integration point.
+- `src/research/derivation/engine.py` - Source of truth for derived claim arithmetic.
+- `src/retrieval/validator.py` - Existing per-sentence validation logic patterns.
 
-### Vague Language
-- False positive: legitimate contextual phrases that happen to contain vague words
-- Mitigation: Only flag if the vague phrase is NOT followed by a concrete fact in the same sentence
+### Secondary (MEDIUM confidence)
+- [Quillbot: Weasel Words in Academic Writing](https://quillbot.com/blog/weasel-words/) - Regex patterns for vague language.
+- [Proofed: Avoiding Vague Language](https://proofed.com/writing-tips/how-to-avoid-vague-language-in-academic-writing/) - Additional weasel word lists.
 
-### Duplication
-- False positive: legitimate repetition for emphasis across distant sections
-- Mitigation: Only flag if the same content appears >2 times AND the sections are adjacent
+## Metadata
 
----
+**Confidence breakdown:**
+- Standard stack: HIGH - Pure Python stdlib.
+- Architecture: HIGH - Deterministic engine matches project pattern.
+- Pitfalls: HIGH - Common issues in NLP/RAG systems.
 
-## Performance Impact
-
-| Check | Cost | Reason |
-|-------|------|--------|
-| Uncited claims | O(n sentences) — regex | Negligible |
-| Derived errors | O(n sentences) — set lookup + arithmetic | Negligible (~0.1ms per sentence) |
-| Contradictions | O(n sentences × m contradictions) — small sets | Negligible |
-| Duplication | O(n² sentences) — pairwise comparison | For 80 sentences, ~3200 comparisons — ~5ms |
-| Vague language | O(n sentences) — regex | Negligible |
-| Numeric accuracy | O(n sentences) — set lookup | Negligible |
-
-Total: ~10ms for a full 8-section report. The LLM-based vagueness check (if used) would add ~1 LLM call for the full report, ~2-5 seconds.
-
----
-
-## Dependencies on Upstream Phases
-
-| Phase | What It Provides | Used By |
-|-------|-----------------|---------|
-| 12-A | DerivedClaim objects on EvidencePacket | Check 2 (derived errors) |
-| 12-B | Extended validator knowledge | The critic uses the same derived claim rules as the dual validator |
-| 12-C | Claim graph with structured contradictions | Check 3 (ignored contradictions) |
-| 12-D | Section plans with claim groups | The critic reports issue locations as section names |
-| 12-E | Claim graph on EvidencePacket | Check 3 (contradictions) — graph is the canonical source |
-| Synthesis | Full report text (all sections combined) | All checks operate on final report text |
+**Research date:** 2026-04-01
+**Valid until:** 2026-05-01
