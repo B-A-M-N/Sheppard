@@ -21,6 +21,7 @@ from research.reasoning.v3_retriever import V3Retriever
 from research.reasoning.ranking import RankingConfig, apply_ranking
 from research.derivation.engine import DerivationEngine
 from research.reasoning.analytical_operators import run_all_operators
+from research.graph.claim_graph import build_evidence_graph
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ class EvidencePacket:
     retrieval_profile: Optional[Dict[str, float]] = None  # populated during diagnostics only
     derived_claims: List = field(default_factory=list)
     analytical_bundles: List = field(default_factory=list)
+    evidence_graph: Any = None
 
 class EvidenceAssembler:
     def __init__(self, ollama: OllamaClient, memory: MemoryManager, retriever: V3Retriever, adapter=None):
@@ -190,6 +192,11 @@ Output ONLY valid JSON in this format:
         # Capture detailed retrieval profile if available (diagnostics only)
         if hasattr(context, '_profile'):
             packet.retrieval_profile = context._profile
+
+        # Evidence graph: connect atoms, derived claims, bundles, contradictions (Phase 12-C)
+        packet.evidence_graph = build_evidence_graph(
+            items_parallel, packet.derived_claims, packet.analytical_bundles, packet.contradictions
+        )
 
     async def _get_unresolved_contradictions(self, mission_id: str, limit: int = 5) -> List[Dict]:
         """V3-native contradiction retrieval via direct PG adapter query.
