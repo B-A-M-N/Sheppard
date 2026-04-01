@@ -2,12 +2,12 @@
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from research.reasoning.assembler import EvidenceAssembler, EvidencePacket, SectionPlan
-from research.reasoning.v3_retriever import V3Retriever
-from research.reasoning.retriever import RetrievalQuery, RetrievedItem
-from research.reasoning.synthesis_service import SynthesisService, MIN_EVIDENCE_FOR_SECTION
-from research.archivist.synth_adapter import ArchivistSynthAdapter
-from research.domain_schema import SynthesisArtifact
+from src.research.reasoning.assembler import EvidenceAssembler, EvidencePacket, SectionPlan
+from src.research.reasoning.v3_retriever import V3Retriever
+from src.research.reasoning.retriever import RetrievalQuery, RetrievedItem
+from src.research.reasoning.synthesis_service import SynthesisService, MIN_EVIDENCE_FOR_SECTION
+from src.research.archivist.synth_adapter import ArchivistSynthAdapter
+from src.research.domain_schema import SynthesisArtifact
 
 
 def make_retrieved_item(atom_id, text, citation_key=None):
@@ -151,7 +151,7 @@ async def test_synthesis_service_propagates_mission_id():
 
 def test_archivist_prompt_constraints():
     """Prompt must not contain MINIMUM 1000 WORDS and must forbid inference."""
-    from research.archivist.synth_adapter import SCHOLARLY_ARCHIVIST_PROMPT
+    from src.research.archivist.synth_adapter import SCHOLARLY_ARCHIVIST_PROMPT
     prompt = SCHOLARLY_ARCHIVIST_PROMPT.upper()
     assert "MINIMUM 1000 WORDS" not in SCHOLARLY_ARCHIVIST_PROMPT
     assert "NO INFERENCE" in prompt
@@ -160,7 +160,7 @@ def test_archivist_prompt_constraints():
 
 def test_grounding_validator_logic():
     """Validator must enforce per-sentence citation and lexical support."""
-    from research.reasoning.synthesis_service import SynthesisService
+    from src.research.reasoning.synthesis_service import SynthesisService
     # We create a service instance without needing real dependencies to test _validate_grounding
     mock_service = SynthesisService(
         ollama=MagicMock(),

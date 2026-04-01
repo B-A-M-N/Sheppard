@@ -23,10 +23,10 @@ from src.research.acquisition.frontier import AdaptiveFrontier
 from src.research.condensation.pipeline import DistillationPipeline
 # V2 Reasoning (deprecated — not used in V3)
 # from src.research.reasoning.retriever import HybridRetriever, RetrievalQuery
-from research.reasoning.retriever import RetrievalQuery  # Shared types only
-from research.reasoning.v3_retriever import V3Retriever
-from research.reasoning.assembler import EvidenceAssembler
-from research.reasoning.synthesis_service import SynthesisService
+from src.research.reasoning.retriever import RetrievalQuery  # Shared types only
+from src.research.reasoning.v3_retriever import V3Retriever
+from src.research.reasoning.assembler import EvidenceAssembler
+from src.research.reasoning.synthesis_service import SynthesisService
 # LLM & Memory
 from src.llm.client import OllamaClient
 from src.llm.model_router import ModelRouter, TaskType

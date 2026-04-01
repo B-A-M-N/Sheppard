@@ -39,7 +39,8 @@ class MemoryManager:
         self.chroma: Optional[PersistentClient] = None
         self.ollama: Optional[OllamaClient] = None
         self._initialized = False
-        
+        self._chroma_lock = asyncio.Lock()  # Serialize all ChromaDB operations to prevent ONNX thread-safety crashes
+
         # Collections map
         self._collections = {}
 
@@ -388,33 +389,35 @@ class MemoryManager:
             return [dict(r) for r in rows]
 
     async def chroma_query(self, collection: str, query_text: str, n_results: int = 5, where: Optional[Dict] = None) -> Dict:
-        coll = self._collections.get(collection)
-        if not coll:
-            # Try to get dynamically
-            coll = self.chroma.get_collection(name=collection)
-            self._collections[collection] = coll
-            
-        return coll.query(
-            query_texts=[query_text],
-            n_results=n_results,
-            where=where
-        )
+        async with self._chroma_lock:
+            coll = self._collections.get(collection)
+            if not coll:
+                # Try to get dynamically
+                coll = self.chroma.get_collection(name=collection)
+                self._collections[collection] = coll
+
+            return coll.query(
+                query_texts=[query_text],
+                n_results=n_results,
+                where=where
+            )
 
     async def store_chunk(self, collection: str, topic_id: str, doc_id: str, content: str, embedding: List[float], metadata: Dict) -> str:
-        coll = self._collections.get(collection)
-        chunk_id = f"chk_{uuid.uuid4().hex[:12]}"
-        
-        # Ensure topic_id is in metadata for filtering
-        metadata['topic_id'] = topic_id
-        metadata['doc_id'] = doc_id
-        
-        coll.add(
-            ids=[chunk_id],
-            embeddings=[embedding],
-            documents=[content],
-            metadatas=[metadata]
-        )
-        return chunk_id
+        async with self._chroma_lock:
+            coll = self._collections.get(collection)
+            chunk_id = f"chk_{uuid.uuid4().hex[:12]}"
+
+            # Ensure topic_id is in metadata for filtering
+            metadata['topic_id'] = topic_id
+            metadata['doc_id'] = doc_id
+
+            coll.add(
+                ids=[chunk_id],
+                embeddings=[embedding],
+                documents=[content],
+                metadatas=[metadata]
+            )
+            return chunk_id
 
     # ────────────────────────────────────────────────────────────
     # META-MEMORY & LOGGING

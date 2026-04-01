@@ -22,7 +22,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from retrieval.validator import validate_response_grounding, COMPARATIVE_PATTERNS
+from src.retrieval.validator import validate_response_grounding, COMPARATIVE_PATTERNS
 
 logger = logging.getLogger(__name__)
 

@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
-from research.reasoning.ranking import RankingConfig
+from src.research.reasoning.ranking import RankingConfig
 
 logger = logging.getLogger(__name__)
 

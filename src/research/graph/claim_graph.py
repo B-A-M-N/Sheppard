@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set
 
-from retrieval.models import RetrievedItem
+from src.retrieval.models import RetrievedItem
 
 import logging
 logger = logging.getLogger(__name__)

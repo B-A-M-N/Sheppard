@@ -25,7 +25,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from retrieval.models import RetrievedItem
+from src.retrieval.models import RetrievedItem
 
 import logging
 logger = logging.getLogger(__name__)

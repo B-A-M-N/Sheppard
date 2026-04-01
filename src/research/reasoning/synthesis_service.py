@@ -9,9 +9,9 @@ import logging
 import uuid
 from typing import Optional
 
-from llm.client import OllamaClient
-from research.reasoning.assembler import EvidenceAssembler, EvidencePacket
-from research.archivist.synth_adapter import ArchivistSynthAdapter
+from src.llm.client import OllamaClient
+from src.research.reasoning.assembler import EvidenceAssembler, EvidencePacket
+from src.research.archivist.synth_adapter import ArchivistSynthAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +28,8 @@ class SynthesisService:
 
     async def generate_master_brief(self, mission_id: str) -> Optional[str]:
         """Generate a full Master Brief for a given topic."""
-        from utils.console import console
-        from research.domain_schema import SynthesisArtifact
+        from src.utils.console import console
+        from src.research.domain_schema import SynthesisArtifact
 
         # Retrieve mission to get topic name and validate
         if self.adapter:

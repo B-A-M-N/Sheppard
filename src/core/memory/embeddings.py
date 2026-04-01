@@ -22,6 +22,7 @@ class EmbeddingManager:
         self.embedding_cache = {}
         self.max_cache_size = 1000
         self.similarity_threshold = 0.95
+        self._chroma_lock = asyncio.Lock()  # Serialize ChromaDB operations to prevent ONNX thread-safety crashes
 
     async def generate_embedding(self, text: str) -> Optional[List[float]]:
         """
@@ -82,10 +83,10 @@ class EmbeddingManager:
             self.processing = False
 
     async def _process_single_embedding(
-        self, 
-        text: str, 
-        key: str, 
-        layer: str, 
+        self,
+        text: str,
+        key: str,
+        layer: str,
         importance_score: float,
         chroma_collections: Dict
     ) -> bool:
@@ -110,15 +111,16 @@ class EmbeddingManager:
                     "importance_score": importance_score,
                     "timestamp": datetime.now().isoformat()
                 }
-                
+
                 collection = chroma_collections.get(layer)
                 if collection:
-                    collection.add(
-                        documents=[text],
-                        embeddings=[embedding],
-                        metadatas=[metadata],
-                        ids=[f"{layer}_{key}_{datetime.now().isoformat()}"]
-                    )
+                    async with self._chroma_lock:
+                        collection.add(
+                            documents=[text],
+                            embeddings=[embedding],
+                            metadatas=[metadata],
+                            ids=[f"{layer}_{key}_{datetime.now().isoformat()}"]
+                        )
                     return True
             return False
 
@@ -127,8 +129,8 @@ class EmbeddingManager:
             return False
 
     async def _check_similar_embeddings(
-        self, 
-        embedding: List[float], 
+        self,
+        embedding: List[float],
         layer: str,
         chroma_collections: Dict
     ) -> bool:
@@ -138,11 +140,12 @@ class EmbeddingManager:
         try:
             collection = chroma_collections.get(layer)
             if collection:
-                results = collection.query(
-                    query_embeddings=[embedding],
-                    n_results=1
-                )
-                
+                async with self._chroma_lock:
+                    results = collection.query(
+                        query_embeddings=[embedding],
+                        n_results=1
+                    )
+
                 if results and 'distances' in results and results['distances']:
                     distance = results['distances'][0][0]
                     similarity = 1.0 - distance
@@ -153,7 +156,7 @@ class EmbeddingManager:
             return False
 
     async def query_similar_embeddings(
-        self, 
+        self,
         query_embedding: List[float],
         layer: str,
         chroma_collections: Dict,
@@ -168,18 +171,19 @@ class EmbeddingManager:
             if not collection:
                 return []
 
-            results = collection.query(
-                query_embeddings=[query_embedding],
-                n_results=n_results
-            )
-            
+            async with self._chroma_lock:
+                results = collection.query(
+                    query_embeddings=[query_embedding],
+                    n_results=n_results
+                )
+
             similar_items = []
             if results and isinstance(results, dict):
                 for idx, doc in enumerate(results.get('documents', [[]])[0]):
                     try:
                         distance = results.get('distances', [[]])[0][idx] if 'distances' in results else 1.0
                         similarity = 1.0 - distance
-                        
+
                         if similarity >= similarity_threshold:
                             metadata = results.get('metadatas', [[]])[0][idx] if 'metadatas' in results else {}
                             similar_items.append({
@@ -190,7 +194,7 @@ class EmbeddingManager:
                     except Exception as e:
                         logger.error(f"Error processing query result {idx}: {str(e)}")
                         continue
-                        
+
             return similar_items
 
         except Exception as e:
