@@ -8,6 +8,14 @@ Uses a surgical UI update pattern to ensure typing is never interrupted.
 import faulthandler
 faulthandler.enable()
 
+import os as _main_os
+_main_os.environ.setdefault("OMP_NUM_THREADS", "1")
+_main_os.environ.setdefault("MKL_NUM_THREADS", "1")
+_main_os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+_main_os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+_main_os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+del _main_os
+
 import asyncio
 import logging
 import sys

@@ -25,9 +25,27 @@ from chromadb.config import Settings as ChromaSettings
 from src.config.settings import settings
 from src.memory.models import Memory, MemorySearchResult
 from src.llm.client import OllamaClient
-from src.memory.chroma_process_lock import with_chroma_lock
+from src.memory.chroma_process_lock import chroma_lock_ctx
 
 logger = logging.getLogger(__name__)
+
+
+# ── Safe wrappers: lock acquired INSIDE the executor worker thread ──
+
+def _manager_chroma_query_safe(coll, **kwargs):
+    with chroma_lock_ctx():
+        return coll.query(**kwargs)
+
+
+def _manager_chroma_add_safe(coll, **kwargs):
+    with chroma_lock_ctx():
+        return coll.add(**kwargs)
+
+
+def _manager_get_coll_safe(client, **kwargs):
+    with chroma_lock_ctx():
+        return client.get_or_create_collection(**kwargs)
+
 
 class MemoryManager:
     """
@@ -390,35 +408,34 @@ class MemoryManager:
             return [dict(r) for r in rows]
 
     async def chroma_query(self, collection: str, query_text: str, n_results: int = 5, where: Optional[Dict] = None) -> Dict:
-        async with with_chroma_lock():
-            coll = self._collections.get(collection)
-            if not coll:
-                # Try to get dynamically
-                coll = self.chroma.get_collection(name=collection)
-                self._collections[collection] = coll
-
-            return coll.query(
-                query_texts=[query_text],
-                n_results=n_results,
-                where=where
+        coll = self._collections.get(collection)
+        if not coll:
+            coll = await asyncio.to_thread(
+                _manager_get_coll_safe, self.chroma, name=collection
             )
+            self._collections[collection] = coll
+
+        return await asyncio.to_thread(_manager_chroma_query_safe, coll,
+            query_texts=[query_text],
+            n_results=n_results,
+            where=where
+        )
 
     async def store_chunk(self, collection: str, topic_id: str, doc_id: str, content: str, embedding: List[float], metadata: Dict) -> str:
-        async with with_chroma_lock():
-            coll = self._collections.get(collection)
-            chunk_id = f"chk_{uuid.uuid4().hex[:12]}"
+        coll = self._collections.get(collection)
+        chunk_id = f"chk_{uuid.uuid4().hex[:12]}"
 
-            # Ensure topic_id is in metadata for filtering
-            metadata['topic_id'] = topic_id
-            metadata['doc_id'] = doc_id
+        # Ensure topic_id is in metadata for filtering
+        metadata['topic_id'] = topic_id
+        metadata['doc_id'] = doc_id
 
-            coll.add(
-                ids=[chunk_id],
-                embeddings=[embedding],
-                documents=[content],
-                metadatas=[metadata]
-            )
-            return chunk_id
+        await asyncio.to_thread(_manager_chroma_add_safe, coll,
+            ids=[chunk_id],
+            embeddings=[embedding],
+            documents=[content],
+            metadatas=[metadata]
+        )
+        return chunk_id
 
     # ────────────────────────────────────────────────────────────
     # META-MEMORY & LOGGING

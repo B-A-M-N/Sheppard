@@ -5,9 +5,20 @@ import json
 import asyncio
 from ollama import AsyncClient
 import numpy as np
-from src.memory.chroma_process_lock import with_chroma_lock
+from src.memory.chroma_process_lock import chroma_lock_ctx
 
 logger = logging.getLogger(__name__)
+
+
+def _chroma_add_safe(collection, **kwargs):
+    with chroma_lock_ctx():
+        return collection.add(**kwargs)
+
+
+def _chroma_query_safe(collection, **kwargs):
+    with chroma_lock_ctx():
+        return collection.query(**kwargs)
+
 
 class EmbeddingManager:
     """
@@ -115,13 +126,13 @@ class EmbeddingManager:
 
                 collection = chroma_collections.get(layer)
                 if collection:
-                    async with with_chroma_lock():
-                        collection.add(
-                            documents=[text],
-                            embeddings=[embedding],
-                            metadatas=[metadata],
-                            ids=[f"{layer}_{key}_{datetime.now().isoformat()}"]
-                        )
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(None, lambda: _chroma_add_safe(collection,
+                        documents=[text],
+                        embeddings=[embedding],
+                        metadatas=[metadata],
+                        ids=[f"{layer}_{key}_{datetime.now().isoformat()}"]
+                    ))
                     return True
             return False
 
@@ -141,11 +152,11 @@ class EmbeddingManager:
         try:
             collection = chroma_collections.get(layer)
             if collection:
-                async with with_chroma_lock():
-                    results = collection.query(
-                        query_embeddings=[embedding],
-                        n_results=1
-                    )
+                loop = asyncio.get_event_loop()
+                results = await loop.run_in_executor(None, lambda: _chroma_query_safe(collection,
+                    query_embeddings=[embedding],
+                    n_results=1
+                ))
 
                 if results and 'distances' in results and results['distances']:
                     distance = results['distances'][0][0]
@@ -172,11 +183,11 @@ class EmbeddingManager:
             if not collection:
                 return []
 
-            async with with_chroma_lock():
-                results = collection.query(
-                    query_embeddings=[query_embedding],
-                    n_results=n_results
-                )
+            loop = asyncio.get_event_loop()
+            results = await loop.run_in_executor(None, lambda: _chroma_query_safe(collection,
+                query_embeddings=[query_embedding],
+                n_results=n_results
+            ))
 
             similar_items = []
             if results and isinstance(results, dict):
