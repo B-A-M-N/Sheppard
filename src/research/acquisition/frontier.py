@@ -353,6 +353,7 @@ Output valid JSON:
         return self._select_next_action()
 
     async def _engineer_queries(self, node: FrontierNode, mode: str) -> List[str]:
+        logger.debug(f"[Frontier] _engineer_queries START: node={node.concept}, mode={mode}")
         prompt = f"""
 SUBJECT: {self.topic_name}
 CONCEPT: {node.concept}
@@ -369,7 +370,9 @@ CRITICAL:
 - Think like a professional researcher in this specific field.
 - Response must be 3 lines, one query per line.
 """
+        logger.debug("[Frontier] About to call ollama.complete")
         resp = await self.sm.ollama.complete(TaskType.QUERY_EXPANSION, prompt)
+        logger.debug(f"[Frontier] ollama.complete returned, resp_len={len(resp) if resp else 0}")
         clean_queries = []
         for q in resp.split('\n'):
             # Aggressive cleaning of prefixes and junk

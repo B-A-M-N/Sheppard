@@ -5,6 +5,9 @@ main.py — Sheppard V2 Entry Point (Non-Blocking UI Edition)
 Uses a surgical UI update pattern to ensure typing is never interrupted.
 """
 
+import faulthandler
+faulthandler.enable()
+
 import asyncio
 import logging
 import sys
@@ -18,6 +21,9 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, DownloadColumn
 from rich.table import Table
+
+# Ensure src/ is on the Python path for absolute imports
+sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
 # Sheppard V2 Core
 from src.core.system import system_manager

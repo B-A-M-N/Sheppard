@@ -80,23 +80,30 @@ class OllamaClient:
         """Generate embeddings using the dedicated embedding host."""
         config = self.router.get(TaskType.EMBEDDING)
         last_error = None
-        
+
         safe_text = text.strip()[:2000]
-        
+
         for attempt in range(self.MAX_RETRIES):
             try:
-                session = await self._get_session(config.api_host)
-                payload = {'model': config.model_name, 'prompt': safe_text}
-                
-                async with session.post("/api/embeddings", json=payload) as response:
-                    if response.status != 200:
-                        await self._handle_api_error(response, "embedding", safe_text)
-                    result = await response.json()
-                    return result.get('embedding', [])
+                # Fresh session per request to avoid segfaults
+                timeout = aiohttp.ClientTimeout(
+                    total=settings.REQUEST_TIMEOUT,
+                    connect=settings.CONNECTION_TIMEOUT,
+                    sock_read=settings.REQUEST_TIMEOUT
+                )
+                connector = aiohttp.TCPConnector(force_close=True)
+                async with aiohttp.ClientSession(base_url=config.api_host, timeout=timeout, connector=connector) as session:
+                    payload = {'model': config.model_name, 'prompt': safe_text}
+
+                    async with session.post("/api/embeddings", json=payload) as response:
+                        if response.status != 200:
+                            await self._handle_api_error(response, "embedding", safe_text)
+                        result = await response.json()
+                        return result.get('embedding', [])
             except Exception as e:
                 last_error = e
                 await asyncio.sleep(self.RETRY_DELAY * (attempt + 1))
-        
+
         raise EmbeddingError(f"Embedding failed after retries: {last_error}")
 
     async def embed(self, text: str) -> List[float]:
@@ -123,12 +130,20 @@ class OllamaClient:
             payload['options']['seed'] = config.seed
 
         try:
-            session = await self._get_session(config.api_host)
-            async with session.post("/api/chat", json=payload) as response:
-                if response.status != 200:
-                    await self._handle_api_error(response, "completion")
-                result = await response.json()
-                return result['message']['content']
+            # Create a fresh session each time to avoid reuse issues leading to segfaults
+            timeout = aiohttp.ClientTimeout(
+                total=settings.REQUEST_TIMEOUT,
+                connect=settings.CONNECTION_TIMEOUT,
+                sock_read=settings.REQUEST_TIMEOUT
+            )
+            # Use force_close to prevent connection reuse
+            connector = aiohttp.TCPConnector(force_close=True)
+            async with aiohttp.ClientSession(base_url=config.api_host, timeout=timeout, connector=connector) as session:
+                async with session.post("/api/chat", json=payload) as response:
+                    if response.status != 200:
+                        await self._handle_api_error(response, "completion")
+                    result = await response.json()
+                    return result['message']['content']
         except Exception as e:
             logger.error(f"Completion failed on {config.api_host}: {e}")
             return ""
@@ -162,18 +177,25 @@ class OllamaClient:
         }
 
         try:
-            session = await self._get_session(config.api_host)
-            async with session.post("/api/chat", json=payload) as response:
-                if response.status != 200:
-                    await self._handle_api_error(response, "chat_stream")
-                
-                async for line in response.content:
-                    if line:
-                        try:
-                            chunk = json.loads(line)
-                            if 'message' in chunk and 'content' in chunk['message']:
-                                yield chunk['message']['content']
-                        except: continue
+            # Fresh session with force_close to avoid segfaults from connection reuse
+            timeout = aiohttp.ClientTimeout(
+                total=settings.REQUEST_TIMEOUT,
+                connect=settings.CONNECTION_TIMEOUT,
+                sock_read=settings.REQUEST_TIMEOUT
+            )
+            connector = aiohttp.TCPConnector(force_close=True)
+            async with aiohttp.ClientSession(base_url=config.api_host, timeout=timeout, connector=connector) as session:
+                async with session.post("/api/chat", json=payload) as response:
+                    if response.status != 200:
+                        await self._handle_api_error(response, "chat_stream")
+
+                    async for line in response.content:
+                        if line:
+                            try:
+                                chunk = json.loads(line)
+                                if 'message' in chunk and 'content' in chunk['message']:
+                                    yield chunk['message']['content']
+                            except: continue
         except Exception as e:
             logger.error(f"Chat stream failed on {config.api_host}: {e}")
 

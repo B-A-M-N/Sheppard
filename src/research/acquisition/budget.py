@@ -117,8 +117,11 @@ class BudgetMonitor:
         """
         async with self._lock:
             if mission_id not in self._budgets:
-                logger.warning(f"[Budget] Unknown mission_id: {mission_id}")
+                # Missing budget registration can occur after a restart with stale Redis jobs.
+                # Rather than spamming warnings, we'll log at debug level.
+                logger.debug(f"[Budget] No budget tracking for mission {mission_id} (may be from previous run)")
                 return
+
             budget = self._budgets[mission_id]
             budget.raw_bytes += raw_bytes
 
