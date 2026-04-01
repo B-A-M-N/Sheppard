@@ -391,8 +391,10 @@ class SystemManager:
                 result = await self.crawler._scrape_with_retry(url)
                 if result:
                     # Atomic Ingestion via V3 Adapter
+                    topic_id = job.get("topic_id", mission_id)
                     source_meta = {
                         "mission_id": mission_id,
+                        "topic_id": topic_id,
                         "url": url,
                         "normalized_url": url,
                         "normalized_url_hash": result.checksum,

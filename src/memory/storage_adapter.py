@@ -166,7 +166,7 @@ class ApplicationStore(Protocol):
     ) -> None: ...
 
 class RuntimeStore(Protocol):
-    async def enqueue_job(self, queue_name: str, payload: JsonDict) -> None: ...
+    async def enqueue_job(self, queue_name: str, payload: JsonDict) -> bool: ...
     async def dequeue_job(self, queue_name: str, timeout_s: int = 0) -> JsonDict | None: ...
     async def schedule_retry(self, queue_name: str, payload: JsonDict, when_epoch_s: int) -> None: ...
     async def move_due_retries(self, queue_name: str, now_epoch_s: int) -> int: ...
@@ -380,7 +380,7 @@ class PostgresStore(Protocol):
     async def delete_where(self, table: str, where: JsonDict) -> None: ...
 
 class RedisQueueStore(Protocol):
-    async def enqueue_job(self, queue_name: str, payload: JsonDict) -> None: ...
+    async def enqueue_job(self, queue_name: str, payload: JsonDict) -> bool: ...
     async def dequeue_job(self, queue_name: str, timeout_s: int = 0) -> JsonDict | None: ...
     async def schedule_retry(self, queue_name: str, payload: JsonDict, when_epoch_s: int) -> None: ...
     async def move_due_retries(self, queue_name: str, now_epoch_s: int) -> int: ...
@@ -782,6 +782,18 @@ class SheppardStorageAdapter(StorageAdapter):
         """Atomic ingestion of a source across the V3 triad."""
         # uuid and hashlib imported at module level
 
+        mission_id = source["mission_id"]
+        normalized_url_hash = source.get("normalized_url_hash", source.get("content_hash"))
+
+        # 0. Idempotency check: if source already exists for this mission+normalized_url_hash, return it
+        existing = await self.pg.fetch_one("corpus.sources", {
+            "mission_id": mission_id,
+            "normalized_url_hash": normalized_url_hash
+        })
+        if existing:
+            # Source already ingested; skip creating new text_ref/chunks to avoid FK issues
+            return existing["source_id"]
+
         # 1. Create Text Reference (The Blob)
         blob_id = str(uuid.uuid4())
         await self.pg.insert_row("corpus.text_refs", {
@@ -799,11 +811,11 @@ class SheppardStorageAdapter(StorageAdapter):
         # Map fields to match V3 schema in a single complete row
         pg_row = {
             "source_id": source_id,
-            "mission_id": source["mission_id"],
+            "mission_id": mission_id,
             "topic_id": source["topic_id"],
             "url": source["url"],
             "normalized_url": source.get("normalized_url", source["url"]),
-            "normalized_url_hash": source.get("normalized_url_hash", source["content_hash"]),
+            "normalized_url_hash": normalized_url_hash,
             "domain": source.get("domain"),
             "title": source.get("title"),
             "source_class": source.get("source_class", "web"),
@@ -813,7 +825,18 @@ class SheppardStorageAdapter(StorageAdapter):
             "metadata_json": json.dumps(source.get("metadata", {}))
         }
 
-        await self.pg.upsert_row("corpus.sources", ["mission_id", "normalized_url_hash"], pg_row)
+        try:
+            await self.pg.insert_row("corpus.sources", pg_row)
+        except Exception as e:
+            # If another vampire beat us to it, fetch the existing record
+            if "already exists" in str(e) or "duplicate key" in str(e):
+                existing = await self.pg.fetch_one("corpus.sources", {
+                    "mission_id": mission_id,
+                    "normalized_url_hash": normalized_url_hash
+                })
+                if existing:
+                    return existing["source_id"]
+            raise
 
         # 3. Create Chunks (V3 Lineage Bridge)
         # Import chunking function lazily to avoid circular imports
@@ -827,7 +850,7 @@ class SheppardStorageAdapter(StorageAdapter):
             chunk_rows.append({
                 "chunk_id": chunk_id,
                 "source_id": source_id,
-                "mission_id": source["mission_id"],
+                "mission_id": mission_id,
                 "topic_id": source["topic_id"],
                 "chunk_index": idx,
                 "chunk_hash": chunk_hash,
@@ -871,8 +894,8 @@ class SheppardStorageAdapter(StorageAdapter):
     # RuntimeStore
     # =====================================================
 
-    async def enqueue_job(self, queue_name: str, payload: JsonDict) -> None:
-        await self.redis_queue.enqueue_job(queue_name, payload)
+    async def enqueue_job(self, queue_name: str, payload: JsonDict) -> bool:
+        return await self.redis_queue.enqueue_job(queue_name, payload)
 
     async def dequeue_job(self, queue_name: str, timeout_s: int = 0) -> JsonDict | None:
         return await self.redis_queue.dequeue_job(queue_name, timeout_s=timeout_s)

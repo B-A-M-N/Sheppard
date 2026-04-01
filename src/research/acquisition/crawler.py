@@ -45,9 +45,7 @@ class CrawlResult:
 class CrawlerConfig:
     firecrawl_url: str = os.getenv("FIRECRAWL_BASE_URL", "http://127.0.0.1:3002")
     searxng_urls: List[str] = field(default_factory=lambda: [
-        "http://127.0.0.1:8080",
-        "http://10.9.66.45:8080",
-        "http://10.9.66.154:8080"
+        "http://127.0.0.1:8080"
     ])
     # Redis queues for Two-Lane Pipeline
     fast_lane_queue: str = "firecrawl:fast"

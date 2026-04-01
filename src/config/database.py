@@ -47,12 +47,12 @@ class DatabaseConfig:
 
     # PostgreSQL database URLs
     DB_URLS = {
-        "episodic_memory": "postgresql://sheppard:1234@10.9.66.198:5432/episodic_memory",
-        "semantic_memory": "postgresql://sheppard:1234@10.9.66.198:5432/semantic_memory",
-        "contextual_memory": "postgresql://sheppard:1234@10.9.66.198:5432/contextual_memory",
-        "general_memory": "postgresql://sheppard:1234@10.9.66.198:5432/general_memory",
-        "abstracted_memory": "postgresql://sheppard:1234@10.9.66.198:5432/abstracted_memory",
-        "sheppard_v3": "postgresql://sheppard:1234@10.9.66.198:5432/sheppard_v3"
+        "episodic_memory": "postgresql://sheppard:1234@localhost:5432/episodic_memory",
+        "semantic_memory": "postgresql://sheppard:1234@localhost:5432/semantic_memory",
+        "contextual_memory": "postgresql://sheppard:1234@localhost:5432/contextual_memory",
+        "general_memory": "postgresql://sheppard:1234@localhost:5432/general_memory",
+        "abstracted_memory": "postgresql://sheppard:1234@localhost:5432/abstracted_memory",
+        "sheppard_v3": "postgresql://sheppard:1234@localhost:5432/sheppard_v3"
     }
 
     # Redis configuration for different memory layers
