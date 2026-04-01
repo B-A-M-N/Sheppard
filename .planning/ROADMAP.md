@@ -26,7 +26,7 @@
 
 **Goal:** Reduce total retrieval latency from ~1200ms to ≤200-300ms by parallelizing section retrieval in EvidenceAssembler.
 **Requirements:** [PERF-01]
-**Plans:** 3/3 plans complete
+**Plans:** 1/1 plans complete
 
 Plans:
 - [x] 12-02-01-PLAN.md — Instrumentation, dead code deprecation, test scaffolding

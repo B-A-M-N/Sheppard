@@ -3,9 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: milestone
 status: executing
-last_updated: "2026-03-31T03:00:00Z"
+last_updated: "2026-04-01T01:26:16.677Z"
 progress:
-  total_phases: 1
+  total_phases: 5
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
@@ -55,6 +55,7 @@ progress:
 | 12-02 | 01 | ~10 minutes | 2 | 3 |
 | 12-02 | 02 | ~15 minutes | 1 | 2 |
 | 12-02 | 03 | ~28 minutes | 2 | 1 |
+| Phase 12-07 P01 | 25 | 3 tasks | 4 files |
 
 ## Requirements Traceability
 
@@ -85,6 +86,9 @@ progress:
 - Queue backpressure: simple depth limit (10,000) with Frontier stop-production on reject
 - Mission initial state set to `created` to satisfy orchestration contract; `_crawl_and_store` promotes to `active`.
 - V04 validation verifies atom DB-index consistency; source-level checks deferred to future phase.
+- [Phase 12-07]: RankingConfig defaults match RetrievedItem.composite_score weights for zero-delta behavior at first adoption
+- [Phase 12-07]: enable_ranking=False by default; all existing call sites unaffected unless explicitly opted in
+- [Phase 12-07]: apply_ranking is a pure function: does not mutate inputs, deterministic via (-score, global_id) key
 
 ## Issues
 
