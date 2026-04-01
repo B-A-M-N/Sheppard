@@ -120,11 +120,11 @@ Output ONLY valid JSON in this format:
         )
 
         # Build packet from retrieved context
-        await self._build_from_context(mission_id, section, retrieved_context, packet)
+        await self._build_from_context(mission_id, section, retrieved_context, packet, q)
 
         return packet
 
-    async def _build_from_context(self, mission_id: str, section: SectionPlan, context: RoleBasedContext, packet: EvidencePacket) -> None:
+    async def _build_from_context(self, mission_id: str, section: SectionPlan, context: RoleBasedContext, packet: EvidencePacket, query: Optional[RetrievalQuery] = None) -> None:
         """
         Fill an EvidencePacket from a retrieved context.
         Extracted to share logic between single-query and batched paths.
@@ -132,7 +132,8 @@ Output ONLY valid JSON in this format:
         """
         # Deduplicate and extract the raw atom dictionaries, capturing atom IDs
         seen_ids = set()
-        collected = []  # list of (atom_dict, atom_id) for deterministic sorting
+        collected = []        # list of (atom_dict, atom_id) for deterministic sorting
+        items_parallel = []   # parallel RetrievedItem list for ranking signals
         for item in context.all_items:
             # Atom ID is stored in metadata as 'atom_id' (from V3Retriever/Chroma index)
             if item.metadata and item.metadata.get('atom_id'):
@@ -146,9 +147,17 @@ Output ONLY valid JSON in this format:
                         "metadata": {"source": item.source}
                     }
                     collected.append((atom_dict, aid))
+                    items_parallel.append(item)
 
-        # Sort atoms by global_id to ensure deterministic order (invariant: deterministic sampling)
-        collected.sort(key=lambda pair: pair[0]['global_id'])
+        # Opt-in ranking: sort by composite score (desc) with global_id tiebreaker (RANK-01/02/03/04)
+        # Default (enable_ranking=False) preserves current global_id sort for backward compatibility.
+        if query is not None and getattr(query, 'enable_ranking', False):
+            from research.reasoning.ranking import apply_ranking, RankingConfig
+            cfg = query.ranking_config if query.ranking_config is not None else RankingConfig()
+            collected = apply_ranking(collected, items_parallel, cfg)
+        else:
+            # Current behavior: deterministic lexical sort by global_id
+            collected.sort(key=lambda pair: pair[0]['global_id'])
 
         # Unpack into packet
         for atom_dict, atom_id in collected:
@@ -157,22 +166,71 @@ Output ONLY valid JSON in this format:
 
         # If the section targets contradictions, pull explicitly from the contradictions table
         if "contradictions" in [r.lower() for r in section.target_evidence_roles] or "risks" in section.title.lower():
-            if self.memory is not None:
-                # Use memory to get unresolved contradictions for the mission/topic
-                # Note: get_unresolved_contradictions expects topic_id; using mission_id as topic_id per V3 convention
-                conflicts = await self.memory.get_unresolved_contradictions(mission_id, limit=5)
-                for c in conflicts:
-                    packet.contradictions.append({
-                        "description": c['description'],
-                        "claim_a": c['atom_a_content'],
-                        "claim_b": c['atom_b_content']
-                    })
+            conflicts = await self._get_unresolved_contradictions(mission_id, limit=5)
+            for c in conflicts:
+                packet.contradictions.append({
+                    "description": c['description'],
+                    "claim_a": c['atom_a_content'],
+                    "claim_b": c['atom_b_content'],
+                    "atom_a_id": c.get('atom_a_global_id', ''),
+                    "atom_b_id": c.get('atom_b_global_id', ''),
+                })
 
         # Capture detailed retrieval profile if available (diagnostics only)
         if hasattr(context, '_profile'):
             packet.retrieval_profile = context._profile
 
-    async def assemble_all_sections(
+    async def _get_unresolved_contradictions(self, mission_id: str, limit: int = 5) -> List[Dict]:
+        """V3-native contradiction retrieval via direct PG adapter query.
+
+        Returns contradictions from the knowledge.contradictions table
+        (FK-linked to knowledge_atoms). Uses atomic global_ids for
+        citation-compatible formatting.
+        """
+        import uuid as _uuid
+        from src.config.database import DatabaseConfig
+
+        dsn = DatabaseConfig.DB_URLS.get("sheppard_v3")
+        if not dsn:
+            logger.warning("[Assembler] No PG connection available; skipping contradictions")
+            return []
+
+        pool = getattr(self, "_contradiction_pool", None)
+        if pool is None:
+            import asyncpg
+            pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+            self._contradiction_pool = pool
+
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT c.description,
+                       a.global_id as atom_a_global_id,
+                       a.content as atom_a_content,
+                       b.global_id as atom_b_global_id,
+                       b.content as atom_b_content
+                FROM contradictions c
+                JOIN knowledge_atoms a ON a.id = c.atom_a_id
+                JOIN knowledge_atoms b ON b.id = c.atom_b_id
+                WHERE c.topic_id = $1 AND c.resolved = FALSE
+                LIMIT $2
+                """,
+                _uuid.UUID(str(mission_id)), limit
+            )
+            return [dict(r) for r in rows]
+
+    async def assemble_all_sections(        self, mission_id: str, topic_name: str, sections: List[SectionPlan]
+    ) -> Dict[int, EvidencePacket]:
+        """
+        Retrieve evidence for all sections using batched retrieval when possible.
+        Falls back to sequential per-section retrieval on batch failure.
+        Returns dict keyed by section.order -> EvidencePacket.
+        """
+        from utils.structured_logger import async_span_ctx
+        async with async_span_ctx("retrieval", mission_id):
+            return await self._assemble_all_sections_impl(mission_id, topic_name, sections)
+
+    async def _assemble_all_sections_impl(
         self, mission_id: str, topic_name: str, sections: List[SectionPlan]
     ) -> Dict[int, EvidencePacket]:
         """
@@ -201,13 +259,13 @@ Output ONLY valid JSON in this format:
 
         if not batch_failed and len(contexts) == len(sorted_sections):
             # Build packets from batched contexts
-            for section, ctx in zip(sorted_sections, contexts):
+            for i, (section, ctx) in enumerate(zip(sorted_sections, contexts)):
                 packet = EvidencePacket(
                     topic_name=topic_name,
                     section_title=section.title,
                     section_objective=section.purpose
                 )
-                await self._build_from_context(mission_id, section, ctx, packet)
+                await self._build_from_context(mission_id, section, ctx, packet, queries[i])
                 packets[section.order] = packet
         else:
             # Fallback: sequential per-section retrieval (preserves original behavior)
