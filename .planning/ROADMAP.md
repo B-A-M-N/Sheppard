@@ -16,9 +16,9 @@
 | 12-02 | Retrieval Latency Optimization | ✅ Completed | 5/5 |
 | 12-02.1 | Retrieval Latency Diagnosis | ✅ Completed | 4/4 |
 | 12-02.2 | Batch Multi-Query Retrieval | ✅ Completed | 4/4 |
-| 12-03 | Synthesis throughput improvements | 🔄 In Progress | 0/5 |
-| 12-04 | Structured metrics & tracing | ⏳ Pending | 0/0 |
-| 12-05 | Contradiction system V3 upgrade | ⏳ Pending | 0/0 |
+| 12-03 | Synthesis throughput improvements | ✅ Partial PASS | 2/2 |
+| 12-04 | Structured metrics & tracing | ✅ Completed | 1/1 |
+| 12-05 | Contradiction system V3 upgrade | ✅ Completed | 1/1 |
 | 12-06 | High-evidence E2E integration test | ⏳ Pending | 0/0 |
 | 12-07 | Ranking improvements (constraint-safe) | ⏳ Pending | 0/0 |
 
@@ -75,6 +75,23 @@ Plans:
 - Validator runs on every section; no skipping.
 - Citations assigned after all sections complete.
 - Forbidden: skip validator, batch prompts, modify citation logic, shared mutable state.
+
+### Phase 12-07: Ranking Improvements (Constraint-Safe)
+
+**Goal:** Activate post-retrieval composite scoring to reorder atoms before synthesis, opt-in via enable_ranking, deterministic, no atoms dropped.
+**Requirements:** [RANK-01, RANK-02, RANK-03, RANK-04]
+**Plans:** 2 plans
+
+Plans:
+- [ ] 12-07-01-PLAN.md — Create ranking.py, extend RetrievalQuery, wire _build_from_context
+- [ ] 12-07-02-PLAN.md — Test suite: unit + assembler integration tests (TDD)
+
+**Guardrails:**
+- No weakening of Phase 10/11 truth contract invariants.
+- All existing tests must pass unchanged.
+- No atoms dropped in any retrieval path.
+- Default behavior (enable_ranking=False) must be byte-for-byte identical to current behavior.
+- No new third-party dependencies.
 
 ---
 
