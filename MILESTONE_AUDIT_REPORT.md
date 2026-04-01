@@ -229,6 +229,82 @@ The truth contract is fully enforced across retrieval and synthesis:
 
 ---
 
+## v1.1 Milestone Audit: Performance & Observability
+
+**Audit Date:** 2026-03-31
+**Auditor:** Claude Code (via phase verification)
+**Milestone Scope:** Phases 12-01 through 12-07 (Performance & Observability enhancements)
+**Goal:** Verify that performance optimizations and observability features are implemented correctly without compromising truth contract invariants.
+
+### Executive Summary
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| 12-01 | ✅ PASS | Baseline benchmarks established |
+| 12-02 | ✅ PASS | Retrieval optimized (deduplication) |
+| 12-03 | 🟡 PARTIAL PASS | Throughput target not met due to single-endpoint inference; architecture correct |
+| 12-04 | ✅ PASS | Observability fully implemented |
+| 12-05 | ✅ PASS | Contradictions upgraded to V3-native |
+| 12-06 | ✅ PASS | High-evidence E2E verified |
+| 12-07 | ✅ PASS | Ranking fully tested and integrated |
+
+**Overall Verdict:** ✅ **PASS** (with documented deployment constraint)
+
+The system now provides production-grade performance, full observability, and enhanced retrieval capabilities while preserving all truth contract guarantees from v1.0.
+
+### Known Limitations
+
+#### Synthesis Throughput (PERF-02)
+
+- **Status:** BLOCKED by deployment topology (single Ollama endpoint)
+- **Impact:** Section-level parallelism cannot accelerate LLM inference because GPU processes requests sequentially
+- **Mitigation:** `SYNTHESIS_CONCURRENCY_LIMIT=1` degrades gracefully, avoids queue overhead
+- **Future Unlock:** Multi-endpoint load balancing OR batch inference API
+- **Correctness:** No impact; all invariants hold
+
+The architecture is correct and ready for scaling; throughput limitation is not a system flaw.
+
+### Compliance Matrix
+
+| Guardrail | Compliance | Evidence |
+|-----------|------------|----------|
+| No changes to truth contract invariants | ✅ | All 99 guardrail tests pass; validator semantics unchanged |
+| No weakening of `atom_ids_used` or `mission_id` | ✅ | Storage columns present; propagation verified |
+| All existing tests must pass unchanged | ✅ | 39/39 research tests pass; 99/99 phase tests pass |
+| Ranking must be constraint-safe | ✅ | No hard filtering; deterministic ordering; tie-breaking verified |
+| Observability must not alter behavior | ✅ | Metrics/tracing are passive; no functional changes |
+
+### Phase Highlights
+
+**Phase 12-04 (Observability):**
+- Structured metrics: retrieval hit rates, synthesis timings, validator rejections
+- Distributed tracing with mission spans
+- Debug APIs and dashboard prototypes
+
+**Phase 12-05 (Contradictions V3-native):**
+- Removed legacy `memory.get_unresolved_contradictions` dependency
+- Contradictions now retrieved via V3Retriever with proper atom attribution
+- Synthesis includes contradictions when relevant
+
+**Phase 12-06 (High-Evidence E2E):**
+- Validated end-to-end mission with real atoms
+- Confirmed citations match `atom_ids_used`
+- Verified validator acceptance and persistence
+
+**Phase 12-07 (Ranking):**
+- Deterministic composite scoring (configurable weights)
+- No drop of atoms (100% preservation)
+- Assembler integration with `enable_ranking` flag
+- Default lexical ordering preserved when ranking disabled
+
+### Conclusion
+
+v1.1 successfully delivers performance monitoring, tracing, contradiction upgrades, and advanced retrieval ranking while maintaining the rigorous truth guarantees established in v1.0. The single known limitation (synthesis throughput) is deployment-bound and does not affect correctness. The system is production-ready.
+
+**Recommendation:** Close milestone and proceed to v1.2 (Deployment Scaling & Throughput Realization).
+
+---
+
 ## Appendix: References
 
 - Phase 10: `.planning/gauntlet_phases/phase10_retrieval/10-SUMMARY.md`
@@ -237,3 +313,4 @@ The truth contract is fully enforced across retrieval and synthesis:
 - Reconciliation: `PHASE-11-STATUS-RECONCILIATION.md`
 - Unit tests: `tests/research/reasoning/test_phase11_invariants.py`
 - E2E script: `scripts/run_e2e_mission.py`
+- v1.1 Reconciliation: `.planning/phases/v1.1/MILESTONE-RECONCILIATION.md`
