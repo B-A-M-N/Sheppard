@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
+from research.reasoning.ranking import RankingConfig
+
 logger = logging.getLogger(__name__)
 
 
@@ -89,6 +91,9 @@ class RetrievalQuery:
     knowledge_levels: List[str] = field(
         default_factory=lambda: ["B", "C", "D"]
     )
+    # Ranking controls (RANK-04)
+    enable_ranking: bool = False                    # default preserves current global_id sort
+    ranking_config: Optional[RankingConfig] = None  # None → use RankingConfig() defaults
 
 
 @dataclass
