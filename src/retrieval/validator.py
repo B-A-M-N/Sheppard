@@ -9,6 +9,18 @@ import re
 from typing import List, Dict, Any, Tuple, Optional
 from .models import RetrievedItem
 
+# Comparative language patterns for derived claim detection
+COMPARATIVE_PATTERNS = [
+    r'\bexceeds?\b', r'\bexceeded\b',
+    r'\bhigher\s*(than|by)?\b', r'\blower\s*(than|by)?\b',
+    r'\bincreased\s*(by)?\b', r'\bdecreased\s*(by)?\b',
+    r'\bdifference\s*(of)?\b',
+    r'\bmore\s*than\b', r'\bless\s*than\b',
+    r'\bfirst\b', r'\bsecond\b', r'\bthird\b',
+    r'\branked\b', r'\btop\b', r'\bbottom\b',
+    r'\bpercent\b', r'%',
+]
+
 # Common English stopwords to ignore during lexical overlap comparison
 STOPWORDS = {
     # Articles, conjunctions, prepositions, pronouns, auxiliaries
@@ -50,11 +62,131 @@ def extract_entities(text: str) -> List[str]:
     Extract candidate named entities using a simple heuristic:
     Any word (length > 1) containing at least one uppercase letter, excluding words that are all lowercase.
     This captures proper nouns, acronyms, and mixed-case words like "SpaceX".
+    Excludes sentence-initial capitalized words (common false positives: "The", "A", etc.).
     """
-    # Split into word tokens
+    # Split into word tokens with position info
     words = re.findall(r'\b\w+\b', text)
-    entities = [word for word in words if any(c.isupper() for c in word) and len(word) > 1]
+    entities = []
+    for i, word in enumerate(words):
+        if len(word) <= 1:
+            continue
+        if any(c.isupper() for c in word):
+            # Exclude sentence-initial capitalized words (false positives)
+            # A word is "sentence-initial" if it's the first word OR preceded by sentence-ending punctuation
+            if i == 0:
+                continue
+            prev_word = words[i - 1] if i > 0 else ''
+            if prev_word.endswith('.') or prev_word.endswith('!') or prev_word.endswith('?'):
+                continue
+            entities.append(word)
     return entities
+
+def _is_comparative_claim(text: str) -> bool:
+    """Check if text contains comparative language indicating a derived claim."""
+    return any(
+        re.search(p, text, re.IGNORECASE) for p in COMPARATIVE_PATTERNS
+    )
+
+
+def _verify_derived_claim(
+    text: str,
+    claim_nums: List[str],
+    citations: List[str],
+    item_map: Dict[str, RetrievedItem],
+) -> Dict[str, Any]:
+    """
+    Verify a derived (multi-atom numeric) claim.
+
+    Given text containing a numeric relationship between 2+ cited atoms,
+    recompute the expected value from the atom contents and compare to the claimed value.
+
+    Returns:
+        {'passed': True} or {'passed': False, 'errors': [...]}
+    """
+    if len(citations) < 2 or not claim_nums:
+        return {'passed': True}
+
+    # Look up cited atoms
+    items = [item_map.get(c) for c in citations if c in item_map]
+    if len(items) < 2:
+        return {'passed': True}  # Can't verify → skip (existing path handles missing citations)
+
+    claimed_value = None
+    # The claimed number is typically the LAST numeric in the sentence (the relationship),
+    # not the raw values that appear in the atoms. Filter out numbers already in atoms.
+    atom_all_nums = set()
+    for it in items:
+        for n in extract_numbers(it.content):
+            atom_all_nums.add(n.replace(',', ''))
+    for num in claim_nums:
+        norm_num = num.replace(',', '')
+        if norm_num not in atom_all_nums:
+            claimed_value = float(norm_num)
+
+    if claimed_value is None:
+        return {'passed': True}  # No unique number found → can't verify derived claim
+
+    # Recompute from first two cited atoms
+    atom_a = items[0]
+    atom_b = items[1]
+
+    a_nums = extract_numbers(atom_a.content)
+    b_nums = extract_numbers(atom_b.content)
+
+    if not a_nums or not b_nums:
+        return {'passed': True}  # No numbers in atoms → skip (can't derive)
+
+    a_val = float(a_nums[0].replace(',', ''))
+    b_val = float(b_nums[0].replace(',', ''))
+
+    # Determine expected value based on comparative language
+    text_lower = text.lower()
+
+    # Delta: "exceeds by X", "difference of X"
+    if _is_delta_pattern(text_lower):
+        expected = a_val - b_val
+        if abs(claimed_value - expected) > 1e-9:
+            return {
+                'passed': False,
+                'errors': [
+                    f"Derived claim mismatch: claimed delta {claimed_value}, "
+                    f"computed {a_val} - {b_val} = {expected} from citations {citations[0]}, {citations[1]}."
+                ]
+            }
+
+    # Percent change: "X% higher/lower", "increased/decreased by X%"
+    elif r'\bpercent\b' in text_lower or '%' in text_lower:
+        if a_val == 0:
+            return {'passed': True}  # Skip division by zero
+        expected_pct = ((b_val - a_val) / a_val) * 100.0
+        # Handle "higher/lower" language: if text says "X% lower", claimed is negative
+        if 'lower' in text_lower or 'decrease' in text_lower or 'dropped' in text_lower:
+            # Text expresses decrease as positive number: "25% lower" means -25%
+            if claimed_value > 0 and expected_pct < 0:
+                claimed_value = -claimed_value
+        if abs(claimed_value - expected_pct) > 1e-9:
+            return {
+                'passed': False,
+                'errors': [
+                    f"Derived claim mismatch: claimed {claimed_value}%, "
+                    f"computed (({b_val} - {a_val}) / {a_val}) * 100 = {expected_pct}% "
+                    f"from citations {citations[0]}, {citations[1]}."
+                ]
+            }
+
+    # Default: no specific rule matched → skip verification
+    return {'passed': True}
+
+
+def _is_delta_pattern(text_lower: str) -> bool:
+    """Check if text expresses a delta relationship."""
+    delta_patterns = [
+        r'\bexceeds?\b', r'\bexceeded\b',
+        r'\bdifference\s*(of)?\b',
+        r'\bhigher\s*(than|by)?\b', r'\blower\s*(than|by)?\b',
+    ]
+    return any(re.search(p, text_lower) for p in delta_patterns)
+
 
 def validate_response_grounding(
     response_text: str,
@@ -105,62 +237,103 @@ def validate_response_grounding(
                 # Citation at start? That's odd but treat as separate segment
                 segments.append({'text': '', 'citation': part})
 
+    # Collect all citations for each text block
+    # Merge segments where multiple citations follow the same text
+    merged_segments: List[Dict[str, Any]] = []
+    for seg in segments:
+        text = seg['text'].strip()
+        cite = seg['citation']
+        if text:
+            # Start of a new text block
+            merged_segments.append({'text': text, 'citations': [cite] if cite else []})
+        elif cite:
+            # Citation-only segment — append to previous text block
+            if merged_segments:
+                merged_segments[-1]['citations'].append(cite)
+
     # If the response ends with text without a citation, that last segment will have no citation.
     # That's okay if it's just a concluding phrase; but we'll flag it if it contains substantive claims.
     # We will treat uncited text as a claim without citation -> error.
 
-    for seg in segments:
-        text = seg['text'].strip()
-        cite = seg['citation']
+    for seg in merged_segments:
+        text = seg['text']
+        citations = seg['citations']  # List of all citations for this text block
 
         if not text:
             continue
 
+        # Filter out None citations
+        valid_citations = [c for c in citations if c is not None]
+
         # If segment has no citation, it's uncited
-        if not cite:
+        if not valid_citations:
             errors.append(f"Uncited claim: '{text[:60]}...'")
             details.append({'claim': text, 'cited': False, 'error': 'missing_citation'})
             continue
 
-        # Look up the cited item
-        if cite not in item_map:
-            errors.append(f"Citation {cite} referenced but not found in retrieved items.")
-            details.append({'claim': text, 'cited': cite, 'error': 'citation_not_found'})
-            continue
-
-        atom = item_map[cite]
-        atom_content = atom.content
-
-        # --- Lexical Overlap ---
-        claim_words = set(tokenize(text))
-        atom_words = set(tokenize(atom_content))
-        content_words = claim_words - STOPWORDS
-        overlap = content_words & atom_words
-        if len(overlap) < 2:
-            errors.append(f"Insufficient lexical overlap for {cite}: only {len(overlap)} content words in common.")
-            details.append({'claim': text, 'cited': cite, 'error': 'lexical_overlap', 'overlap_count': len(overlap)})
-
-        # --- Numeric Consistency ---
+        # --- Derived claim detection (Phase 12-B) ---
+        # If segment cites 2+ atoms AND contains numbers AND comparative language,
+        # treat as derived claim → skip single-atom numeric check, verify multi-atom instead.
         claim_nums = extract_numbers(text)
-        atom_nums = extract_numbers(atom_content)
-        # Normalize numbers by removing commas for comparison
-        norm_atom_nums = [n.replace(',', '') for n in atom_nums]
-        for num in claim_nums:
-            norm_num = num.replace(',', '')
-            if norm_num not in norm_atom_nums:
-                errors.append(f"Number '{num}' in claim {cite} not present in supporting atom.")
-                details.append({'claim': text, 'cited': cite, 'error': 'number_mismatch', 'number': num})
+        has_comparative_language = any(
+            re.search(p, text, re.IGNORECASE) for p in COMPARATIVE_PATTERNS
+        )
+        is_multi_citation = len(valid_citations) >= 2
 
-        # --- Entity Consistency ---
-        claim_entities = extract_entities(text)
-        atom_entities = [e.lower() for e in extract_entities(atom_content)]
-        for ent in claim_entities:
-            if ent.lower() not in atom_entities:
-                errors.append(f"Entity '{ent}' in claim {cite} not present in supporting atom.")
-                details.append({'claim': text, 'cited': cite, 'error': 'entity_missing', 'entity': ent})
+        if is_multi_citation and claim_nums and has_comparative_language:
+            # Derived claim detected: verify the numeric relationship against cited atoms
+            derived_validated = _verify_derived_claim(text, claim_nums, valid_citations, item_map)
+            if not derived_validated['passed']:
+                errors.extend(derived_validated['errors'])
+                for err in derived_validated['errors']:
+                    details.append({'claim': text, 'cited': valid_citations, 'error': 'derived_mismatch', 'detail': err})
+            # Continue with lexical/entity checks for derived claims too
+        # else: skip derived check (single citation or no comparative language) -> existing path
+
+        # --- Existing checks for ALL segments ---
+        for cite in valid_citations:
+            # Look up the cited item
+            if cite not in item_map:
+                errors.append(f"Citation {cite} referenced but not found in retrieved items.")
+                details.append({'claim': text, 'cited': cite, 'error': 'citation_not_found'})
+                continue
+
+            atom = item_map[cite]
+            atom_content = atom.content
+
+            # --- Lexical Overlap ---
+            claim_words = set(tokenize(text))
+            atom_words = set(tokenize(atom_content))
+            content_words = claim_words - STOPWORDS
+            overlap = content_words & atom_words
+            if len(overlap) < 2:
+                errors.append(f"Insufficient lexical overlap for {cite}: only {len(overlap)} content words in common.")
+                details.append({'claim': text, 'cited': cite, 'error': 'lexical_overlap', 'overlap_count': len(overlap)})
+
+            # --- Numeric Consistency (SKIP for derived claims) ---
+            # Derived claims are verified via _verify_derived_claim above.
+            # For single-citation claims, existing numeric check still runs.
+            if not (is_multi_citation and claim_nums and has_comparative_language):
+                atom_nums = extract_numbers(atom_content)
+                norm_atom_nums = [n.replace(',', '') for n in atom_nums]
+                for num in claim_nums:
+                    norm_num = num.replace(',', '')
+                    if norm_num not in norm_atom_nums:
+                        errors.append(f"Number '{num}' in claim {cite} not present in supporting atom.")
+                        details.append({'claim': text, 'cited': cite, 'error': 'number_mismatch', 'number': num})
+
+            # --- Entity Consistency ---
+            claim_entities = extract_entities(text)
+            atom_entities = [e.lower() for e in extract_entities(atom_content)]
+            for ent in claim_entities:
+                if ent.lower() not in atom_entities:
+                    # Also check if entity appears anywhere in the atom text (case-insensitive)
+                    if ent.lower() not in atom_content.lower():
+                        errors.append(f"Entity '{ent}' in claim {cite} not present in supporting atom.")
+                        details.append({'claim': text, 'cited': cite, 'error': 'entity_missing', 'entity': ent})
 
         # If all checks passed for this segment, note success
-        details.append({'claim': text, 'cited': cite, 'valid': True})
+        details.append({'claim': text, 'cited': valid_citations, 'valid': True})
 
     is_valid = len(errors) == 0
     return {

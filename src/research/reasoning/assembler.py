@@ -18,6 +18,8 @@ from llm.model_router import TaskType
 from memory.manager import MemoryManager
 from research.reasoning.retriever import RetrievalQuery, RoleBasedContext
 from research.reasoning.v3_retriever import V3Retriever
+from research.reasoning.ranking import RankingConfig, apply_ranking
+from research.derivation.engine import DerivationEngine
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,7 @@ class EvidencePacket:
     contradictions: List[Dict] = field(default_factory=list)
     atom_ids_used: List[str] = field(default_factory=list)
     retrieval_profile: Optional[Dict[str, float]] = None  # populated during diagnostics only
+    derived_claims: List = field(default_factory=list)
 
 class EvidenceAssembler:
     def __init__(self, ollama: OllamaClient, memory: MemoryManager, retriever: V3Retriever, adapter=None):
@@ -158,6 +161,9 @@ Output ONLY valid JSON in this format:
         else:
             # Current behavior: deterministic lexical sort by global_id
             collected.sort(key=lambda pair: pair[0]['global_id'])
+
+        # Derivation: compute derived claims from sorted atoms (Phase 12-A)
+        packet.derived_claims = DerivationEngine().run(items_parallel)
 
         # Unpack into packet
         for atom_dict, atom_id in collected:
