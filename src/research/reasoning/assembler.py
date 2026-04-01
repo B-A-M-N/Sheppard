@@ -20,6 +20,7 @@ from research.reasoning.retriever import RetrievalQuery, RoleBasedContext
 from research.reasoning.v3_retriever import V3Retriever
 from research.reasoning.ranking import RankingConfig, apply_ranking
 from research.derivation.engine import DerivationEngine
+from research.reasoning.analytical_operators import run_all_operators
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,7 @@ class EvidencePacket:
     atom_ids_used: List[str] = field(default_factory=list)
     retrieval_profile: Optional[Dict[str, float]] = None  # populated during diagnostics only
     derived_claims: List = field(default_factory=list)
+    analytical_bundles: List = field(default_factory=list)
 
 class EvidenceAssembler:
     def __init__(self, ollama: OllamaClient, memory: MemoryManager, retriever: V3Retriever, adapter=None):
@@ -164,6 +166,9 @@ Output ONLY valid JSON in this format:
 
         # Derivation: compute derived claims from sorted atoms (Phase 12-A)
         packet.derived_claims = DerivationEngine().run(items_parallel)
+
+        # Analytical operators: compute comparative bundles (Phase 12-B)
+        packet.analytical_bundles = run_all_operators(items_parallel)
 
         # Unpack into packet
         for atom_dict, atom_id in collected:
