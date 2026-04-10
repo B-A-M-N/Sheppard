@@ -27,6 +27,9 @@ dump.rdb
 .claude/worktrees/
 .claude/settings.local.json
 
+# Planning docs (local tracking only)
+.planning/
+
 # IDE / Editors
 .idea/
 .vscode/
@@ -41,3 +44,10 @@ Thumbs.db
 
 # Excluded source file
 src/core/system_v2.py
+
+# Root-level audit/status reports (tracking docs only)
+GS D_HARDENING_GAUNTLET_COMMAND_PACK.md
+MILESTONE_AUDIT_REPORT.md
+MILESTONE_V1.0_AUDIT.md
+PHASE-02-BLOCKERS.md
+PHASE-11-STATUS-RECONCILIATION.md
