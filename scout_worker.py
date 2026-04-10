@@ -111,40 +111,64 @@ async def vampire_worker(worker_id: int = 0):
                             source_id = str(uuid.uuid4())
                             url_hash = hashlib.md5(url.encode()).hexdigest()
 
-                            # A. Store text content in corpus.text_refs (inline_text)
-                            blob_id = f"blob:{source_id}"
-                            await conn.execute('''
-                                INSERT INTO corpus.text_refs (
-                                    blob_id, inline_text, metadata_json
-                                ) VALUES ($1, $2, $3)
-                                ON CONFLICT (blob_id) DO UPDATE SET inline_text = EXCLUDED.inline_text
-                            ''', blob_id, markdown, json.dumps({
-                                "title": title,
-                                "source_url": url,
-                            }))
+                            try:
+                                # A. Store text content in corpus.text_refs (inline_text)
+                                blob_id = f"blob:{source_id}"
+                                await conn.execute('''
+                                    INSERT INTO corpus.text_refs (
+                                        blob_id, inline_text, metadata_json
+                                    ) VALUES ($1, $2, $3)
+                                    ON CONFLICT (blob_id) DO UPDATE SET inline_text = EXCLUDED.inline_text
+                                ''', blob_id, markdown, json.dumps({
+                                    "title": title,
+                                    "source_url": url,
+                                }))
 
-                            # B. Corpus Source — WITH canonical_text_ref
-                            await conn.execute('''
-                                INSERT INTO corpus.sources (
-                                    source_id, mission_id, topic_id, url, normalized_url,
-                                    normalized_url_hash, title, source_class, status, domain,
-                                    canonical_text_ref, content_hash
-                                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'fetched', $9, $10, $11)
-                                ON CONFLICT (mission_id, normalized_url_hash) DO UPDATE
-                                SET status = 'fetched', canonical_text_ref = $10, content_hash = $11
-                            ''', source_id, mission_id, topic_id, url, url,
-                                 url_hash, title, "web", urlparse(url).netloc, blob_id, checksum)
+                                # B. Corpus Source — WITH canonical_text_ref
+                                await conn.execute('''
+                                    INSERT INTO corpus.sources (
+                                        source_id, mission_id, topic_id, url, normalized_url,
+                                        normalized_url_hash, title, source_class, status, domain,
+                                        canonical_text_ref, content_hash
+                                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'fetched', $9, $10, $11)
+                                    ON CONFLICT (mission_id, normalized_url_hash) DO UPDATE
+                                    SET status = 'fetched', canonical_text_ref = $10, content_hash = $11
+                                ''', source_id, mission_id, topic_id, url, url,
+                                     url_hash, title, "web", urlparse(url).netloc, blob_id, checksum)
 
-                            # C. Legacy Source (for refinery support)
-                            await conn.execute('''
-                                INSERT INTO sources (topic_id, url, title, domain, content_hash, fetch_status)
-                                VALUES ($1, $2, $3, $4, $5, 'fetched')
-                                ON CONFLICT (topic_id, url) DO UPDATE SET fetch_status = 'fetched'
-                            ''', uuid.UUID(topic_id), url, title, urlparse(url).netloc, checksum)
+                                # C. Legacy Source (for refinery support)
+                                await conn.execute('''
+                                    INSERT INTO sources (topic_id, url, title, domain, content_hash, fetch_status)
+                                    VALUES ($1, $2, $3, $4, $5, 'fetched')
+                                    ON CONFLICT (topic_id, url) DO UPDATE SET fetch_status = 'fetched'
+                                ''', uuid.UUID(topic_id), url, title, urlparse(url).netloc, checksum)
 
-                            # D. Create chunks for the source (needed by distillery pipeline)
-                            await _create_chunks_for_source(conn, source_id, mission_id, topic_id, markdown, blob_id)
-                            
+                                # D. Create chunks for the source (needed by distillery pipeline)
+                                await _create_chunks_for_source(conn, source_id, mission_id, topic_id, markdown, blob_id)
+
+                            except Exception as inner_e:
+                                import traceback as tb
+                                # Dead-letter: log failure to audit.pipeline_runs
+                                scrape_run_id = f"scrape-{hashlib.sha256(url.encode()).hexdigest()[:8]}"
+                                try:
+                                    await conn.execute('''
+                                        INSERT INTO audit.pipeline_runs (
+                                            run_id, mission_id, topic_id, pipeline_type, pipeline_version,
+                                            status, error_stage, error_class, error_detail, error_traceback
+                                        ) VALUES ($1, $2, $3, 'scraping', 'v1.3.0-phase13',
+                                                  'failed', 'source_ingest', $4, $5, $6)
+                                        ON CONFLICT (run_id) DO UPDATE SET
+                                            status = 'failed',
+                                            error_stage = 'source_ingest',
+                                            error_class = EXCLUDED.error_class,
+                                            error_detail = EXCLUDED.error_detail,
+                                            error_traceback = EXCLUDED.error_traceback
+                                    ''', scrape_run_id, mission_id, topic_id,
+                                        type(inner_e).__name__, str(inner_e), tb.format_exc())
+                                except Exception:
+                                    pass  # Don't let audit failure hide the original exception
+                                raise
+
                         print(f"[✓] [Vampire-{worker_id}] Consumed: {url}")
                     else:
                         print(f"[!] [Vampire-{worker_id}] Firecrawl failed for {url}")

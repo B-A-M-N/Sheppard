@@ -192,23 +192,24 @@ class MemoryManager:
         async with self.pg_pool.acquire() as conn:
             # We use content_hash for dedup
             content_hash = data.get('checksum') or hashlib.md5(data['content'].encode()).hexdigest()
-            
-            row = await conn.fetchrow(
-                """
-                INSERT INTO sources (topic_id, url, title, domain, source_type, raw_bytes, content_hash, raw_file_path)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                ON CONFLICT (topic_id, content_hash) DO UPDATE SET last_captured_at = NOW()
-                RETURNING id
-                """,
-                uuid.UUID(topic_id), data['url'], data.get('title'), data.get('domain'),
-                data.get('source_type', 'web'), data.get('raw_bytes', 0), content_hash, data.get('raw_file_path')
-            )
-            
-            # Update topic total
-            await conn.execute(
-                "UPDATE topics SET raw_bytes_total = raw_bytes_total + $1, source_count = source_count + 1 WHERE id = $2",
-                data.get('raw_bytes', 0), uuid.UUID(topic_id)
-            )
+
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO sources (topic_id, url, title, domain, source_type, raw_bytes, content_hash, raw_file_path)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    ON CONFLICT (topic_id, content_hash) DO UPDATE SET last_captured_at = NOW()
+                    RETURNING id
+                    """,
+                    uuid.UUID(topic_id), data['url'], data.get('title'), data.get('domain'),
+                    data.get('source_type', 'web'), data.get('raw_bytes', 0), content_hash, data.get('raw_file_path')
+                )
+
+                # Update topic total
+                await conn.execute(
+                    "UPDATE topics SET raw_bytes_total = raw_bytes_total + $1, source_count = source_count + 1 WHERE id = $2",
+                    data.get('raw_bytes', 0), uuid.UUID(topic_id)
+                )
             return str(row['id'])
 
     async def get_uncondensed_sources(self, topic_id: str, limit: int = 10) -> List[Dict]:
@@ -247,31 +248,32 @@ class MemoryManager:
     async def store_atom(self, topic_id: str, session_id: Optional[str], **data) -> str:
         async with self.pg_pool.acquire() as conn:
             import uuid
-            row = await conn.fetchrow(
-                """
-                INSERT INTO knowledge_atoms (topic_id, session_id, atom_type, content, source_ids, confidence, is_contested)
-                VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id
-                """,
-                uuid.UUID(str(topic_id)), 
-                uuid.UUID(str(session_id)) if session_id else None,
-                data['atom_type'], data['content'], 
-                [uuid.UUID(str(sid)) for sid in data['source_ids']],
-                data.get('confidence', 0.7),
-                True if data['atom_type'] == 'contradiction' else False
-            )
-            atom_id = str(row['id'])
-            
-            # If it's a contradiction, register it in the contradictions table for the courtroom
-            if data['atom_type'] == 'contradiction':
-                # For extraction-time contradictions, we mark the atom itself as the clash record
-                # In a full pass, we'd link to atom_a and atom_b, but here we just register the event
-                await conn.execute(
-                    "INSERT INTO contradictions (topic_id, description, resolved) VALUES ($1, $2, FALSE)",
-                    uuid.UUID(str(topic_id)), data['content']
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO knowledge_atoms (topic_id, session_id, atom_type, content, source_ids, confidence, is_contested)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id
+                    """,
+                    uuid.UUID(str(topic_id)),
+                    uuid.UUID(str(session_id)) if session_id else None,
+                    data['atom_type'], data['content'],
+                    [uuid.UUID(str(sid)) for sid in data['source_ids']],
+                    data.get('confidence', 0.7),
+                    True if data['atom_type'] == 'contradiction' else False
                 )
+                atom_id = str(row['id'])
 
-            # Update topic count
-            await conn.execute("UPDATE topics SET atom_count = atom_count + 1 WHERE id = $1", uuid.UUID(str(topic_id)))
+                # If it's a contradiction, register it in the contradictions table for the courtroom
+                if data['atom_type'] == 'contradiction':
+                    # For extraction-time contradictions, we mark the atom itself as the clash record
+                    # In a full pass, we'd link to atom_a and atom_b, but here we just register the event
+                    await conn.execute(
+                        "INSERT INTO contradictions (topic_id, description, resolved) VALUES ($1, $2, FALSE)",
+                        uuid.UUID(str(topic_id)), data['content']
+                    )
+
+                # Update topic count
+                await conn.execute("UPDATE topics SET atom_count = atom_count + 1 WHERE id = $1", uuid.UUID(str(topic_id)))
             return atom_id
 
     async def update_atom_chroma_id(self, atom_id: str, chroma_id: str) -> None:
