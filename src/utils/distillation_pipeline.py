@@ -34,6 +34,65 @@ class ExtractionError(Exception):
     """Raised when atom extraction fails due to LLM failure, not empty content."""
     pass
 
+
+def _ngram_overlap(text1: str, text2: str, n: int = 3) -> float:
+    """Cheap n-gram overlap for same-source corroboration detection."""
+    import re
+    def ngrams(text):
+        words = re.sub(r'[^\w\s]', '', text.lower()).split()
+        if len(words) < n:
+            return {' '.join(words)}
+        return {' '.join(words[i:i+n]) for i in range(len(words) - n + 1)}
+    sig1, sig2 = ngrams(text1), ngrams(text2)
+    if not sig1 or not sig2:
+        return 0.0
+    return len(sig1 & sig2) / len(sig1 | sig2)
+
+
+def compute_confidence(
+    atom: dict,
+    source_type: str,
+    all_atoms: list = None,
+) -> float:
+    """
+    Compute atom confidence from measurable signals (EXTRACT-05).
+    Replaces LLM self-assessed confidence.
+
+    Formula: (source_reliability × 0.20) + (corroboration × 0.05, max 0.20) + (quality × 0.10)
+    Phase 16 range: 0.25-0.55 (intentionally lower than old 0.8-0.95).
+    """
+    from src.utils.atom_scorer import score_atom
+
+    # Source reliability: academic=0.9, standard=0.6, skip=0.0
+    source_reliability = {"academic": 0.9, "standard": 0.6, "skip": 0.0}
+    source_score = source_reliability.get(source_type, 0.5)
+
+    # Corroboration: n-gram overlap with other atoms (same-source only for Phase 16)
+    corroborating_count = 0
+    if all_atoms and len(all_atoms) > 1:
+        content = atom.get("text", "")
+        if content:
+            for other in all_atoms:
+                if other is atom:
+                    continue
+                other_content = other.get("text", "")
+                if _ngram_overlap(content, other_content) > 0.6:
+                    corroborating_count += 1
+
+    corroboration_score = min(corroborating_count * 0.05, 0.20)
+
+    # Quality score from atom_scorer
+    content = atom.get("text", "")
+    if content:
+        quality_score = score_atom(content)
+    else:
+        quality_score = 0.3
+
+    # Formula: source × 0.20 + corroboration × 0.05 (max 0.20) + quality × 0.10
+    confidence = (source_score * 0.20) + corroboration_score + (quality_score * 0.10)
+    return max(0.0, min(1.0, round(confidence, 3)))
+
+
 from src.utils.llm_schema_guard import (
     _call_llm_with_schema_guard,
     _normalize_single_atom,
@@ -183,7 +242,7 @@ DOCUMENT:
     )
 
 
-async def _atomize_fragments(llm_client, raw_atoms, topic):
+async def _atomize_fragments(llm_client, raw_atoms, topic, source_type='standard'):
     """Pass 2: Atomization — rewrite fragments into complete sentences."""
     valid_atoms = []
     fragments = []
@@ -235,7 +294,9 @@ FRAGMENTS:
         norm = normalize_atom_schema(rw)
         content = norm.get('text', '').strip()
         if len(content) >= 30:
-            result.append(_make_unit(text=content, confidence=0.6, atom_type='claim'))
+            unit = _make_unit(text=content, confidence=0.6, atom_type='claim')
+            unit["confidence"] = compute_confidence(unit, source_type, result)
+            result.append(unit)
 
     return result
 
@@ -435,7 +496,7 @@ async def extract_technical_atoms(
         fragment_pct = (quality_report['FRAGMENT'] + quality_report['WEAK']) / max(len(raw_atoms), 1)
         if fragment_pct > 0.30:
             logger.info(f"[Distillery] Pass 2: {fragment_pct:.0%} fragments — activating atomization")
-            atomized = await _atomize_fragments(llm_client, raw_atoms, topic)
+            atomized = await _atomize_fragments(llm_client, raw_atoms, topic, source_type)
             logger.info(f"[Distillery] Pass 2: Atomized to {len(atomized)} atoms")
         else:
             logger.info(f"[Distillery] Pass 2: {fragment_pct:.0%} fragments — skipping atomization")
@@ -533,11 +594,12 @@ async def extract_technical_atoms(
                     best = best.strip()
                     if not best.endswith(('.', '!', '?')):
                         best = best.rsplit('.', 1)[0] + '.' if '.' in best else best + '.'
-                    final_atoms.append(_make_unit(
+                    unit = _make_unit(
                         text=best, confidence=0.2,
                         atom_type='claim', tags=['compressed', 'fallback', 'emergency'],
-                    ))
-                    logger.info(f"[Distillery] Emergency: created single KnowledgeUnit from text")
+                    )
+                    unit["confidence"] = compute_confidence(unit, source_type)
+                    final_atoms.append(unit)
 
         if final_atoms:
             logger.info(f"[Distillery] Final: {len(final_atoms)} atoms stored for '{topic}'")
