@@ -14,6 +14,7 @@ from src.utils.distillation_pipeline import ExtractionError
 from src.utils.normalize_atom_schema import normalize_atom_schema
 from src.research.state_machine import transition_source_status
 from src.utils.pipeline_metrics import MetricsCollector
+from src.research.consolidation import ConsolidationEngine
 import json
 import logging
 import math
@@ -64,6 +65,7 @@ class DistillationPipeline:
         self.budget = budget
         self.adapter = adapter
         self._semaphore = asyncio.Semaphore(2)
+        self.consolidation_engine = ConsolidationEngine(adapter, ollama) if adapter and ollama else None
 
     async def _check_source_already_extracted(
         self, source_id: str, content_hash: str | None
@@ -158,6 +160,19 @@ class DistillationPipeline:
                         })
                     except Exception:
                         pass
+
+                # Run consolidation + contradiction resolution
+                if self.consolidation_engine and self._total_atoms > 0:
+                    try:
+                        consolidation_summary = await self.consolidation_engine.consolidate_atoms(mission_id)
+                        logger.info(f"[Consolidation] {consolidation_summary['golden_atoms_created']} golden atoms created, "
+                                    f"{consolidation_summary['atoms_obsoleted']} atoms obsoleted")
+
+                        contradiction_summary = await self.consolidation_engine.resolve_contradictions(mission_id)
+                        logger.info(f"[Contradictions] {contradiction_summary['verified_contradictions']} verified, "
+                                    f"{contradiction_summary['resolved']} resolved")
+                    except Exception as e:
+                        logger.warning(f"[Consolidation] Consolidation failed: {e}")
 
             except Exception as e:
                 tb = traceback.format_exc()
@@ -400,10 +415,12 @@ class DistillationPipeline:
 
     async def resolve_contradictions(self, mission_id: str):
         """The Courtroom: Actively resolves open contradictions."""
-        # Implementation pending V3 migration...
-        pass
+        if self.consolidation_engine:
+            return await self.consolidation_engine.resolve_contradictions(mission_id)
+        return {"mission_id": mission_id, "candidates": 0, "verified_contradictions": 0, "resolved": 0}
 
     async def consolidate_atoms(self, mission_id: str):
         """The Forgetting Curve: Merges redundant atoms into Golden Atoms."""
-        # Implementation pending V3 migration...
-        pass
+        if self.consolidation_engine:
+            return await self.consolidation_engine.consolidate_atoms(mission_id)
+        return {"mission_id": mission_id, "total_atoms": 0, "clusters": 0, "golden_atoms_created": 0, "atoms_obsoleted": 0}
