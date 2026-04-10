@@ -13,8 +13,10 @@ from src.memory.storage_adapter import LockHandle
 logger = logging.getLogger(__name__)
 JsonDict = dict[str, Any]
 
-# Queue backpressure configuration
+# Queue backpressure configuration — INFRA-01
 MAX_QUEUE_DEPTH = 10000
+QUEUE_DEPTH_WARNING = 5000    # 50% — log warning
+QUEUE_DEPTH_CRITICAL = 8000   # 80% — log error
 
 class RedisStoresImpl:
     """

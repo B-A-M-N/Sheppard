@@ -160,7 +160,10 @@ class SystemManager:
             self._monitor_task = asyncio.create_task(self.budget.run_monitor_loop())
             
             # 8. Unleash Local Vampires
-            num_vampires = 8 # Balanced greed for Ryzen 9
+            # INFRA-01: Configurable vampire count with clamped range
+            num_vampires = int(os.environ.get("NUM_VAMPIRES", "8"))
+            num_vampires = max(1, min(num_vampires, 32))  # Clamp 1-32
+            logger.info(f"[System] Launching {num_vampires} vampire workers")
             for i in range(num_vampires):
                 self._vampire_tasks.append(asyncio.create_task(self._vampire_loop(i)))
 
@@ -484,6 +487,17 @@ class SystemManager:
 
                     if _dequeued % 50 == 0:
                         console.print(f"[bold red][Vampire-{vampire_id}][/bold red] Stats: dequeued={_dequeued}, scraped={_scraped}, failed={_failed}, filtered={_skipped_filtered}, skipped_lock={_skipped_lock}, skipped_existing={_skipped_existing}")
+
+                    # INFRA-01: Queue depth monitoring every 100 dequeues
+                    if _dequeued % 100 == 0:
+                        try:
+                            queue_depth = await self.adapter.get_queue_depth("queue:scraping")
+                            if queue_depth > 8000:
+                                logger.error(f"[Backpressure] Queue depth CRITICAL: {queue_depth} (>80%)")
+                            elif queue_depth > 5000:
+                                logger.warning(f"[Backpressure] Queue depth HIGH: {queue_depth} (>50%)")
+                        except Exception:
+                            pass
                 
             except asyncio.CancelledError:
                 console.set_quiet(False)

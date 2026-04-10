@@ -8,8 +8,12 @@ Firecrawl-local client wrapper with Asynchronous Dual-Lane Metabolism.
 
 import asyncio
 import hashlib
-import logging
 import os
+
+# INFRA-01: Configurable Firecrawl concurrency with clamped range
+FIRECRAWL_MAX_CONCURRENT = int(os.environ.get("FIRECRAWL_MAX_CONCURRENT", "8"))
+FIRECRAWL_MAX_CONCURRENT = max(1, min(FIRECRAWL_MAX_CONCURRENT, 32))  # Clamp 1-32
+import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
