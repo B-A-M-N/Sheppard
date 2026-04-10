@@ -81,7 +81,8 @@ class OllamaClient:
         config = self.router.get(TaskType.EMBEDDING)
         last_error = None
 
-        safe_text = text.strip()[:2000]
+        # Conservative truncation: 2048 tokens ≈ 8000 chars max, use 1500 for safety
+        safe_text = text.strip()[:1500]
 
         for attempt in range(self.MAX_RETRIES):
             try:
@@ -175,6 +176,10 @@ class OllamaClient:
                 'top_p': kwargs.get('top_p', 0.9),
             }
         }
+
+        # Force JSON output when requested — no regex repair needed
+        if kwargs.get('json_mode'):
+            payload['format'] = 'json'
 
         try:
             # Fresh session with force_close to avoid segfaults from connection reuse

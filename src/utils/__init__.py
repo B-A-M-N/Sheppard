@@ -21,6 +21,18 @@ from .validation import (
     sanitize_filename
 )
 
+# Export embedding distiller (NEW: embedding-safe pipeline)
+from .embedding_distiller import (
+    safe_embed,
+    gate_source,
+    distill_for_embedding,
+    rough_token_count,
+    clean_boilerplate,
+    split_sentences,
+    extract_atomic_claims,
+    pool_vectors
+)
+
 # Export text processing functions if they exist
 try:
     from .text_processing import (
@@ -32,7 +44,7 @@ except ImportError:
     def sanitize_text(text):
         """Fallback sanitize text function."""
         return text.strip() if text else ""
-        
+
     def clean_string(text):
         """Fallback clean string function."""
         return text.strip() if text else ""
@@ -43,7 +55,7 @@ __all__ = [
     'validate_message_content',
     'validate_metadata',
     'validate_user_preferences',
-    
+
     # Validation
     'validate_content',
     'validate_embedding',
@@ -53,7 +65,17 @@ __all__ = [
     'validate_timestamp',
     'validate_dict_fields',
     'sanitize_filename',
-    
+
+    # Embedding distiller (NEW)
+    'safe_embed',
+    'gate_source',
+    'distill_for_embedding',
+    'rough_token_count',
+    'clean_boilerplate',
+    'split_sentences',
+    'extract_atomic_claims',
+    'pool_vectors',
+
     # Text processing
     'sanitize_text',
     'clean_string'
