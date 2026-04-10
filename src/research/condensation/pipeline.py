@@ -44,6 +44,47 @@ class DistillationPipeline:
         self.adapter = adapter
         self._semaphore = asyncio.Semaphore(2)
 
+    async def _check_source_already_extracted(
+        self, source_id: str, content_hash: str | None
+    ) -> bool:
+        """
+        Tier 1 + Tier 2 idempotency check.
+        Returns True if this source has already been extracted.
+        """
+        # Fast path: Redis cache (ephemeral, skip on failure)
+        if content_hash:
+            try:
+                cache_key = f"pipeline:extracted:{source_id}:{content_hash}"
+                exists = await self.adapter.redis_runtime.get(cache_key)
+                if exists:
+                    logger.info(f"[Idempotency] SKIP {source_id}: found in Redis cache")
+                    return True
+            except Exception:
+                pass
+
+        # Authoritative: Postgres state check
+        if content_hash:
+            row = await self.adapter.pg.fetch_one(
+                "corpus.sources",
+                {"source_id": source_id, "content_hash": content_hash},
+            )
+        else:
+            row = await self.adapter.pg.fetch_one(
+                "corpus.sources", {"source_id": source_id}
+            )
+
+        if row and row.get("status") in ("extracted", "condensed", "indexed"):
+            if content_hash:
+                try:
+                    cache_key = f"pipeline:extracted:{source_id}:{content_hash}"
+                    await self.adapter.redis_runtime.set(cache_key, "1", ttl_s=3600)
+                except Exception:
+                    pass
+            logger.info(f"[Idempotency] SKIP {source_id}: status={row['status']}")
+            return True
+
+        return False
+
     async def run(self, mission_id: str, priority: CondensationPriority):
         """Metabolic Distillation pass using V3 Triad (Sequential-Atomic)."""
         console.print(f"[bold magenta][Distillery][/bold magenta] Starting distillation pass for mission {mission_id[:8]}... (priority={priority.value})")
@@ -129,6 +170,11 @@ class DistillationPipeline:
                 continue
 
             source_id = s.get("source_id", "unknown")
+
+            # Idempotency check: skip if already extracted
+            content_hash = s.get("content_hash")
+            if await self._check_source_already_extracted(source_id, content_hash):
+                continue
 
             # Get the content
             text_ref = s.get("canonical_text_ref")
