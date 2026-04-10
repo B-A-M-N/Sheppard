@@ -264,11 +264,15 @@ def distill_for_embedding(raw_text: str) -> Tuple[List[str], Dict[str, int]]:
     atoms = extract_atomic_claims(sentences)
     stats["sentences_filtered"] = len(atoms)
     
-    # Fallback if nothing survived filtering
+    # Fallback if nothing survived filtering — summarize to facts, NOT raw truncation
     if not atoms:
-        logger.warning("[Distillery] Zero atoms after filtering, using raw truncation")
+        logger.warning("[Distillery] Zero atoms after filtering — summarizing to facts (not raw truncation)")
         stats["overflow"] = True
-        return [text[:1000]], stats
+        facts = _summarize_to_facts(text)
+        if facts:
+            return facts[:5], stats  # Cap at 5 summary facts
+        # Last resort: split into short meaningful chunks
+        return _split_to_meaningful_chunks(text, max_chunks=5), stats
     
     # Layer 3: Size check + windowing if needed
     combined = " ".join(atoms)
@@ -333,19 +337,22 @@ async def safe_embed(
         logger.warning("[Distillery] safe_embed: zero chunks after distillation")
         return None, stats
     
-    # Embed each chunk
+    # Embed each chunk — with safety net for oversized chunks
     vectors = []
     for i, chunk in enumerate(chunks):
-        stats["embeddings_attempted"] += 1
-        try:
-            vector = await embed_fn(chunk)
-            if vector:
-                vectors.append(vector)
-                stats["embeddings_succeeded"] += 1
-            else:
-                logger.warning(f"[Distillery] safe_embed: chunk {i} returned None")
-        except Exception as e:
-            logger.warning(f"[Distillery] safe_embed: chunk {i} failed: {e}")
+        # Safety: split oversized chunks before embedding
+        sub_chunks = chunk_text(chunk, max_chars=4000) if len(chunk) > 4000 else [chunk]
+        for sub in sub_chunks:
+            stats["embeddings_attempted"] += 1
+            try:
+                vector = await embed_fn(sub)
+                if vector:
+                    vectors.append(vector)
+                    stats["embeddings_succeeded"] += 1
+                else:
+                    logger.warning(f"[Distillery] safe_embed: chunk {i} returned None")
+            except Exception as e:
+                logger.warning(f"[Distillery] safe_embed: chunk {i} failed: {e}")
     
     if not vectors:
         logger.error("[Distillery] safe_embed: all embeddings failed")
@@ -369,19 +376,118 @@ async def safe_embed(
 def gate_source(raw_text: str) -> Tuple[str, int]:
     """
     Pre-flight check: should this source be embedded at all?
-    
+
     Returns:
-      ("OK", token_count) or ("DROP", token_count)
+      ("OK", token_count) or ("DROP", token_count) or ("DISTILL", token_count)
     """
     cleaned = clean_boilerplate(raw_text)
     tokens = rough_token_count(cleaned)
-    
+
     # Hard limit: sources this large are likely full HTML dumps
     if tokens > 8000:
         return ("DROP", tokens)
-    
+
     # Medium sources need distillation but are usable
     if tokens > MAX_TOKENS * 3:
         return ("DISTILL", tokens)
-    
+
     return ("OK", tokens)
+
+
+def chunk_text(text: str, max_chars: int = 2000) -> List[str]:
+    """
+    Split text into safe-size chunks for embedding.
+    Falls back when distillation produces oversized chunks.
+    """
+    if len(text) <= max_chars:
+        return [text]
+    # Split on sentence boundaries when possible
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    chunks = []
+    current = ""
+    for s in sentences:
+        if len(current) + len(s) > max_chars and current:
+            chunks.append(current.strip())
+            current = s
+        else:
+            current = (current + " " + s).strip()
+    if current.strip():
+        chunks.append(current.strip())
+    # Fallback: hard split if sentences are too long
+    if not chunks or any(len(c) > max_chars * 2 for c in chunks):
+        chunks = [text[i:i+max_chars] for i in range(0, len(text), max_chars)]
+    return chunks
+
+
+# ─────────────────────────────────────────────
+# SUMMARIZE TO FACTS (replaces raw truncation)
+# ─────────────────────────────────────────────
+
+def _summarize_to_facts(text: str) -> List[str]:
+    """
+    Extract fact-like statements from text when semantic filtering fails.
+    NOT truncation — attempts to find meaningful content.
+
+    Strategy: find sentences with numbers, named entities, or technical terms.
+    These are most likely to be embeddable as atomic knowledge.
+    """
+    if not text or len(text) < 50:
+        return []
+
+    sentences = split_sentences(text)
+    if not sentences:
+        return []
+
+    scored = []
+    for s in sentences:
+        if len(s) < MIN_SENTENCE_LEN:
+            continue
+        s_score = 0
+        # Numbers = specific measurements
+        if re.search(r'\d+', s):
+            s_score += 2
+        # Capitalized words = named entities
+        caps = re.findall(r'\b[A-Z][a-z]{2,}\b', s)
+        s_score += len(caps)
+        # Technical indicators
+        if re.search(r'(?:use|provid|achiev|implement|requir|support|enabl)', s, re.IGNORECASE):
+            s_score += 1
+        # Has a verb
+        if re.search(r'\b(is|are|was|were|has|have|can|will|use|provide|achieve)\b', s, re.IGNORECASE):
+            s_score += 1
+
+        if s_score >= 2:
+            scored.append((s_score, s))
+
+    # Return top sentences, sorted by fact-likeness
+    scored.sort(key=lambda x: -x[0])
+    return [s for _, s in scored[:10]]
+
+
+def _split_to_meaningful_chunks(text: str, max_chunks: int = 5, chunk_size: int = 200) -> List[str]:
+    """
+    Last-resort chunking: split text into short, meaningful segments.
+    Better than raw truncation because it respects sentence boundaries.
+    """
+    if not text:
+        return []
+
+    sentences = split_sentences(text)
+    if not sentences:
+        return [text[:chunk_size]]
+
+    chunks = []
+    current = ""
+    for s in sentences:
+        if len(current) + len(s) > chunk_size and current:
+            chunks.append(current.strip())
+            if len(chunks) >= max_chunks:
+                return chunks
+            current = s
+        else:
+            current = (current + " " + s).strip()
+
+    if current and len(chunks) < max_chunks:
+        chunks.append(current.strip())
+
+    return chunks

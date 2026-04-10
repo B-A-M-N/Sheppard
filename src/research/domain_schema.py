@@ -201,8 +201,122 @@ class Chunk(BaseModel):
 
 
 # ──────────────────────────────────────────────────────────────
-# 2. KNOWLEDGE ATOM (The Reusable Unit)
+# 1. KNOWLEDGE UNIT — Canonical Schema Contract
 # ──────────────────────────────────────────────────────────────
+#
+# SINGLE SCHEMA across ALL pipeline stages:
+#   Distillery → KnowledgeUnit
+#   LLM compression → KnowledgeUnit
+#   Fallback → KnowledgeUnit
+#   Refinery → KnowledgeUnit
+#   Embedding layer → KnowledgeUnit.text
+#
+# Replaces: atoms, claims, summary_claim (all unified here)
+
+
+class KnowledgeUnit(BaseModel):
+    """
+    The single canonical knowledge representation.
+
+    Every pipeline stage produces and consumes this exact structure.
+    No more schema drift between atoms, claims, and fallbacks.
+    """
+    id: str = Field(description="Unique identifier, e.g. 'ku_001' or sha256 hash")
+    text: str = Field(description="The knowledge content — complete sentence, standalone")
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    source: str = Field(default="", description="Origin: URL, filename, or 'fallback_truncation'")
+    tags: List[str] = Field(default_factory=list, description="Classification: claim, definition, mechanism, compressed, fallback, etc.")
+
+    # Optional rich metadata (not required for basic pipeline flow)
+    topic: str = Field(default="")
+    atom_type: str = Field(default="claim", description="claim, definition, mechanism, constraint, tradeoff, failure_mode, contradiction, example, metric")
+    importance: float = Field(default=0.5, ge=0.0, le=1.0)
+    novelty: float = Field(default=0.5, ge=0.0, le=1.0)
+    stability: str = Field(default="medium")
+    lineage: Dict[str, Any] = Field(default_factory=dict)
+    scoring: Dict[str, Any] = Field(default_factory=dict)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    def to_embedding_text(self) -> str:
+        """Return text suitable for embedding — just the content."""
+        return self.text
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Export as plain dict for legacy compatibility."""
+        return self.model_dump()
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "KnowledgeUnit":
+        """
+        Create KnowledgeUnit from any legacy dict format.
+        Handles: atom format, claim format, compressed format, fallback format.
+        """
+        # Extract text from various field names
+        text = (
+            d.get("text")
+            or d.get("content")
+            or d.get("statement")
+            or d.get("fact", "")
+        )
+
+        # Extract type from various field names
+        unit_type = (
+            d.get("atom_type")
+            or d.get("type")
+            or d.get("item_type")
+            or "claim"
+        )
+
+        # Extract confidence
+        confidence = float(d.get("confidence", 0.5))
+        confidence = max(0.0, min(1.0, confidence))  # Clamp
+
+        # Build ID
+        unit_id = d.get("id") or d.get("atom_id") or d.get("unit_id", "")
+        if not unit_id:
+            import hashlib
+            unit_id = "ku_" + hashlib.sha256(text.encode()).hexdigest()[:12]
+
+        # Extract source
+        source = d.get("source", "")
+        if not source:
+            lineage = d.get("lineage", {})
+            if isinstance(lineage, dict):
+                source = lineage.get("source_url", "")
+            elif isinstance(lineage, AtomLineage):
+                source = ""
+
+        # Extract tags
+        tags = list(d.get("tags", []))
+        if not tags:
+            tags = [unit_type]
+        if d.get("compressed"):
+            tags.append("compressed")
+        if unit_type not in tags:
+            tags.insert(0, unit_type)
+
+        return cls(
+            id=unit_id,
+            text=text,
+            confidence=confidence,
+            source=source,
+            tags=tags,
+            topic=d.get("topic", d.get("topic_id", "")),
+            atom_type=unit_type,
+            importance=float(d.get("importance", 0.5)),
+            novelty=float(d.get("novelty", 0.5)),
+            stability=d.get("stability", "medium"),
+            lineage=d.get("lineage", {}),
+            scoring=d.get("scoring", {}),
+            metadata=d.get("metadata", {}),
+        )
+
+
+# ──────────────────────────────────────────────────────────────
+# 2. KNOWLEDGE ATOM (Legacy — backward compatibility layer)
+# ──────────────────────────────────────────────────────────────
+# New code should use KnowledgeUnit. KnowledgeAtom remains for
+# existing database records and rich-metadata workflows.
 
 class AtomScope(BaseModel):
     applies_to: List[str] = Field(default_factory=list)
