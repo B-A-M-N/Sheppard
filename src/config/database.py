@@ -56,31 +56,32 @@ class DatabaseConfig:
     }
 
     # Redis configuration for different memory layers
+    # Local primary (localhost:6379). Remote 10.9.66.198 available as fallback.
     REDIS_CONFIG = {
         "ephemeral": {
-            "host": "10.9.66.198",
-            "port": 6370,
+            "host": "localhost",
+            "port": 6379,
             "db": 0
         },
         "contextual": {
-            "host": "10.9.66.198", 
-            "port": 6371,
-            "db": 0
+            "host": "localhost",
+            "port": 6379,
+            "db": 1
         },
         "episodic": {
-            "host": "10.9.66.198",
-            "port": 6372,
-            "db": 0
+            "host": "localhost",
+            "port": 6379,
+            "db": 2
         },
         "semantic": {
-            "host": "10.9.66.198",
-            "port": 6373,
-            "db": 0
+            "host": "localhost",
+            "port": 6379,
+            "db": 3
         },
         "abstracted": {
-            "host": "10.9.66.198",
-            "port": 6374,
-            "db": 0
+            "host": "localhost",
+            "port": 6379,
+            "db": 4
         }
     }
 

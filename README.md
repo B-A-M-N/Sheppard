@@ -1,100 +1,158 @@
-First and foremost, a special thanks to:
+<p align="center">
+  <img src="https://img.shields.io/github/stars/B-A-M-N/Sheppard?style=for-the-badge&color=gold" alt="Stars">
+  <img src="https://img.shields.io/github/forks/B-A-M-N/Sheppard?style=for-the-badge&color=lightblue" alt="Forks">
+  <img src="https://img.shields.io/github/license/B-A-M-N/Sheppard?style=for-the-badge&color=blue" alt="License">
+  <img src="https://img.shields.io/badge/python-3.10+-blue?style=for-the-badge&logo=python" alt="Python">
+  <img src="https://img.shields.io/badge/Ollama-Local%20LLM-green?style=for-the-badge" alt="Ollama">
+</p>
 
-Dallan Loomis (https://github.com/DallanL): without your interactions and heads up, I would still somewhat be lost and trying to figure things out more some. 
+<h1 align="center">Sheppard Agency V3</h1>
+<p align="center">
+  <b>AI research agent for Ollama</b><br>
+  <i>Search, scrape, extract, and synthesize knowledge — all on local hardware.</i>
+</p>
 
-My parents: without your support, I would be dead in the water.
+---
 
-and My son: without you, I would be dead period. 
-______________________________________________________________
-Benchmark Results Summary:
-Research Effectiveness: 71.4/100
-Memory Effectiveness: 100.0/100
-System Integration: 73.3/100
-Overall Score: 82.0/100
+## What It Is
 
-Results Interpretation:
-----------------------
-Research Effectiveness (71.4/100):
-  - GOOD: Research system is performing well.
+Sheppard is an async Python chat agent backed by Ollama that can do two things:
 
-Memory Effectiveness (100.0/100):
-  - GOOD: Memory system is performing well.
-  - Consider optimizing recall speed for better performance.
+1. **Chat** — normal conversation with persistent memory across sessions
+2. **Research** — give it `/learn <topic>` and it will search, scrape, extract, and synthesize knowledge on that topic, storing everything in a structured memory system
 
-System Integration (73.3/100):
-  - GOOD: Systems are well integrated.
-  - Consider optimizing multi-step reasoning capabilities.
+The research pipeline works like this:
 
-Overall System Performance (82.0/100):
-  - GOOD: System is performing well overall.
-  - Focus on fine-tuning specific capabilities for optimal performance.
-**THESE RESULTS ONLY REFLECT THE RESEARCH FUNCTION OF THE APPLICATION
+- **Searches** via SearXNG to find relevant sources
+- **Scrapes** them via Firecrawl (local) with Playwright
+- **Distills** content into structured knowledge atoms — facts, claims, contradictions
+- **Stores** everything in Postgres + ChromaDB + Redis
+- **Generates** citable reports on demand
 
-*On an i9-12900k 32gb 6000mhz DDR5, a4000 16gb GPU, running PopOS! on 4tb gen 4 silicone power m2.
-______________________________________________________________
+> Benchmarked at **82.0/100** on research and memory tasks — i9-12900K, 32GB DDR5, RTX A4000.
 
-# Sheppard Agency V3: Universal Domain Authority Foundry
+## Tech Stack
 
-## Overview
-Sheppard Agency V3 is a **Universal Domain Authority Foundry**. It is an agentic research institute that recursively "eats" complex technical subjects, distilling vast amounts of distributed web data into high-fidelity, structured Knowledge Atoms. 
+| Component | Role |
+|-----------|------|
+| [Ollama](https://ollama.com) | Local LLM inference (rnj-1:8b default, configurable) |
+| [PostgreSQL](https://www.postgresql.org) | Structured storage — topics, sources, atoms, lineage |
+| [ChromaDB](https://www.trychroma.com) | Semantic vector search for RAG retrieval |
+| [Redis](https://redis.io) | Scraping queue, distributed locks, volatile state |
+| [Firecrawl](https://github.com/mendableai/firecrawl) (local) | Web scraper with built-in Playwright |
+| [SearXNG](https://docs.searxng.org) | Self-hosted search engine for discovery |
 
-V3 introduces a **Distributed Triple-Engine Architecture** designed for non-blocking, asynchronous research at massive scales.
+## Memory Design
 
-## Core Architecture (V3 Triad)
+```
+Postgres  →  Canonical truth. Topics, sources, atoms, lineage.
+ChromaDB  →  Semantic projections. Fast similarity search for RAG.
+Redis     →  Operational state. Scraping queue, locks, caching.
+```
 
-Sheppard V3 enforces a strict **Triad Memory Stack** to ensure canonical truth, semantic speed, and operational heat:
-1.  **Postgres (The Truth):** The immutable system of record for all identity, structure, and lineage.
-2.  **Chroma (The Proximity):** Semantic projections used exclusively for discovery and RAG.
-3.  **Redis (The Motion):** Volatile state, distributed locks, and the global scraping queue.
+ChromaDB is treated as a projection — it can be wiped and rebuilt from Postgres at any time.
 
-### 1. The Adaptive Frontier (Intelligence)
-- **Taxonomic Decomposition:** Generates deep technical research trees (15-50 nodes) to exhaustively map a subject.
-- **Epistemic Modes:** Dynamically selects between **Grounding**, **Verification**, **Dialectic**, and **Expansion**.
-- **Deep Mine Discovery:** Automatically scans multiple search pages (Page 1-5) via a **Parallel Discovery Race** to find obscure technical ore.
-
-### 2. Distributed "Vampire" Metabolism (Acquisition)
-Bypasses hardware bottlenecks and rate limits with a decentralized scraping swarm:
-- **Global Redis Queue:** Discovered URLs are pushed to `queue:scraping` for distributed consumption.
-- **Parallel Vampires:** 8-12 concurrent local workers on the main machine feast on the queue.
-- **Scout Offloaders:** Passive nodes (Laptops, remote servers) pull from the same queue to "vampire" slow PDFs and static sites on separate IPs.
-
-### 3. The Smelter (Refinery)
-- **Atomic Distillation:** Sources are smelted sequentially into standalone **Knowledge Atoms** (Facts, Claims, Tradeoffs).
-- **Native JSON Recovery:** Nuclear repair logic for malformed local LLM responses ensures zero-crash extraction.
-- **Lineage First:** Every atom maintains an immutable link back to its source research mission and evidence.
-
-## Distributed Topology
-
-| Node | Role | Hardware Profile |
-| :--- | :--- | :--- |
-| **Main Brain** | Orchestrator / DBs | Ryzen 5900X, 64GB, RTX 3090 |
-| **Reasoning Rig** | Heavy Inference / Extraction | Remote Node (.90) - Uncensored 8B Models |
-| **Vampire Scout** | High-Core Scraper / Summarizer | 20-Core Node (.154) - Scraping Swarm |
-| **Lazy Scout** | Stealth / Slow-Lane Offloader | i5 Laptop (.45) - PDF/Static Processing |
-
-## Installation
+## Quick Start
 
 ### Requirements
+
 - Python 3.10+
 - PostgreSQL 14+ (with `btree_gin` extension)
 - Redis 6.2+
-- Ollama (Distributed or Local)
-- Firecrawl-Local & SearXNG
+- Ollama (local or remote)
+- Firecrawl-Local
+- SearXNG
 
-### Quick Start
-1.  **Start Services:** `./start_research_stack.sh`
-2.  **Initialize V3 Memory:** `python3 src/memory/setup_v3.py` (Applies `schema_v3.sql`)
-3.  **Launch Brain:** `python3 main.py`
-4.  **Unleash Workers:** `python3 scout_worker.py` (On all auxiliary nodes)
+### Setup
 
-## Commands
-- `/learn <topic>` - Trigger a Deep Accretive Mission.
-- `/status` - View the smelting backlog and vampire health.
-- `/nudge <instruction>` - Steer the frontier in real-time.
-- `/report <id>` - Generate a Tier 4 Master Brief from extracted atoms.
+```bash
+# 1. Clone and install
+git clone https://github.com/B-A-M-N/Sheppard.git
+cd Sheppard
+pip install -r requirements.txt
+
+# 2. Start supporting services
+./start_research_stack.sh
+
+# 3. Initialize database schema
+python3 src/memory/setup_v3.py
+
+# 4. Run the agent
+python3 main.py
+```
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `/learn <topic>` | Start a background research mission |
+| `/stop` | Stop an active mission |
+| `/missions` | View mission status |
+| `/nudge <instruction>` | Adjust research direction mid-mission |
+| `/query <topic>` | Ask questions about previously learned topics |
+| `/report <id>` | Generate a synthesis report from stored knowledge |
+| `/status` | View system health and backlog |
+
+## Architecture
+
+### Research Pipeline
+
+```
+  Discovery          Acquisition          Condensation         Storage            Synthesis
+┌─────────────┐    ┌───────────────┐    ┌───────────────┐    ┌──────────┐    ┌───────────────┐
+│  SearXNG    │───▶│  Firecrawl    │───▶│  LLM Extract  │───▶│  Postgres│───▶│  Report Gen   │
+│  search     │    │  + Playwright │    │  atoms        │    │  Chroma  │    │  w/ citations │
+└─────────────┘    └───────────────┘    └───────────────┘    └──────────┘    └───────────────┘
+                                                                  ▲
+                                                                  │
+                                                              Redis (queue)
+```
+
+1. **Discovery** — SearXNG returns results across multiple pages
+2. **Acquisition** — Firecrawl scrapes pages via Playwright; PDFs offloaded to slower workers
+3. **Condensation** — LLM extracts structured atoms (facts, claims, tradeoffs) from raw content
+4. **Storage** — Atoms stored in Postgres with full source lineage; embeddings indexed in ChromaDB
+5. **Synthesis** — Evidence assembler pulls relevant atoms and generates citable reports
+
+### Project Structure
+
+```
+Sheppard/
+├── main.py                    # Entry point — interactive chat loop
+├── scout_worker.py            # Auxiliary scraping worker
+├── start_research_stack.sh    # Service bootstrap
+├── requirements.txt
+├── src/
+│   ├── core/
+│   │   ├── sheppard/          # Chat agent, response generation, tool usage
+│   │   ├── commands.py        # Slash command handler
+│   │   ├── memory/            # Storage adapters (Postgres, Chroma, Redis)
+│   │   └── system.py          # System initialization and lifecycle
+│   ├── research/
+│   │   ├── acquisition/       # Firecrawl client, search, crawling
+│   │   ├── condensation/      # Knowledge distillation pipeline
+│   │   ├── reasoning/         # Evidence assembly and report synthesis
+│   │   ├── archivist/         # Research loop, chunking, indexing
+│   │   └── config.py          # Research system configuration
+│   ├── memory/
+│   │   ├── manager.py         # Memory coordination (PG + Chroma)
+│   │   ├── stores/            # Individual store adapters
+│   │   └── schema_v3.sql      # Database schema
+│   ├── llm/                   # Ollama client, model routing
+│   └── config/                # Application settings
+└── tests/
+```
 
 ## Design Principle
+
 > *Postgres is Truth. Chroma is a projection. Redis is motion. Lineage is permanent.*
 
-## Licensing
-Core functionality is licensed under the Mozilla Public License 2.0.
+## Acknowledgments
+
+- **[Dallan Loomis](https://github.com/DallanL)** — for the interactions and guidance that kept this project on track
+- **My parents** — for the support that made all of this possible
+- **My son** — the reason I build
+
+## License
+
+[MPL-2.0](LICENSE)

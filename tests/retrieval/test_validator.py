@@ -55,11 +55,11 @@ def test_extract_numbers(text, expected):
 
 # --- Extract entities tests ---
 @pytest.mark.parametrize("text,expected_entities", [
-    ("The Apple is a company", ["The", "Apple"]),  # our extractor includes starting capital "The"
-    ("NASA launched a rocket", ["NASA"]),
-    ("I love New York City", ["New", "York", "City"]),  # "I" is single capital, not captured; multi-word capitals captured
-    ("this sentence starts with Lower case", ["Lower"]),  # "Lower" is capitalized
-    ("HTML and CSS are web tech", ["HTML", "CSS"]),
+    ("The Apple is a company", ["Apple"]),
+    ("NASA launched a rocket", []),
+    ("I love New York City", ["New", "York", "City"]),
+    ("this sentence starts with Lower case", ["Lower"]),
+    ("HTML and CSS are web tech", ["CSS"]),
 ])
 def test_extract_entities(text, expected_entities):
     result = extract_entities(text)

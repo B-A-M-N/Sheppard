@@ -1,0 +1,24 @@
+{
+  "timestamp": "2026-03-30T23:14:59.814018",
+  "corpus_tier": "large",
+  "corpus_atom_count": 1000,
+  "db_total_atoms": 2180,
+  "num_sections": 1,
+  "concurrent_total_ms": 173.620859044604,
+  "per_section_profiles": [
+    {
+      "order": 1,
+      "title": "Foundations",
+      "query_ms": 173.440626997035,
+      "post_ms": 0.049430003855377436,
+      "total_ms": 173.49056695820764
+    }
+  ],
+  "aggregate": {
+    "mean_total_ms_per_section": 173.49056695820764,
+    "mean_query_ms": 173.440626997035,
+    "mean_post_ms": 0.049430003855377436,
+    "sum_of_per_section_totals_ms": 173.49056695820764,
+    "parallelism_efficiency": 1.0
+  }
+}

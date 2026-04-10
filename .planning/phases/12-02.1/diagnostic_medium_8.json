@@ -1,0 +1,73 @@
+{
+  "timestamp": "2026-03-30T23:14:29.195503",
+  "corpus_tier": "medium",
+  "corpus_atom_count": 500,
+  "db_total_atoms": 1180,
+  "num_sections": 8,
+  "concurrent_total_ms": 1296.0870759561658,
+  "per_section_profiles": [
+    {
+      "order": 1,
+      "title": "Introduction",
+      "query_ms": 518.266140948981,
+      "post_ms": 0.07656100206077099,
+      "total_ms": 518.3432619669475
+    },
+    {
+      "order": 2,
+      "title": "History of Python Development",
+      "query_ms": 841.6656220215373,
+      "post_ms": 0.042760977521538734,
+      "total_ms": 841.7087529669516
+    },
+    {
+      "order": 3,
+      "title": "Core Concepts and Syntax",
+      "query_ms": 1270.668332988862,
+      "post_ms": 0.039371021557599306,
+      "total_ms": 1270.7079739775509
+    },
+    {
+      "order": 4,
+      "title": "Data Types, Operators, and Control Structures",
+      "query_ms": 1129.0349189657718,
+      "post_ms": 0.03187998663634062,
+      "total_ms": 1129.0670189773664
+    },
+    {
+      "order": 5,
+      "title": "Object-Oriented Programming (OOP) Concepts",
+      "query_ms": 899.8459990252741,
+      "post_ms": 0.039440987166017294,
+      "total_ms": 899.8856300022453
+    },
+    {
+      "order": 6,
+      "title": "Error Handling, Debugging, and Testing",
+      "query_ms": 1293.3629569597542,
+      "post_ms": 0.030310009606182575,
+      "total_ms": 1293.3934669708833
+    },
+    {
+      "order": 7,
+      "title": "Popular Libraries and Frameworks",
+      "query_ms": 1283.3377940114588,
+      "post_ms": 0.03942096373066306,
+      "total_ms": 1283.377735002432
+    },
+    {
+      "order": 8,
+      "title": "Use Cases, Applications, and Industries",
+      "query_ms": 1136.837909987662,
+      "post_ms": 0.020149978809058666,
+      "total_ms": 1136.8587499600835
+    }
+  ],
+  "aggregate": {
+    "mean_total_ms_per_section": 1046.6678237280576,
+    "mean_query_ms": 1046.6274593636626,
+    "mean_post_ms": 0.039986865886021405,
+    "sum_of_per_section_totals_ms": 8373.34258982446,
+    "parallelism_efficiency": 6.46
+  }
+}

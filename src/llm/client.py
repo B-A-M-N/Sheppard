@@ -149,18 +149,25 @@ class OllamaClient:
             logger.error(f"Completion failed on {config.api_host}: {e}")
             return ""
 
-    async def chat(self, messages: List[dict], stream: bool = True, **kwargs) -> AsyncGenerator[Any, None]:
+    async def chat(self, messages: List[dict], stream: bool = True, format: Optional[Union[str, Dict[str, Any]]] = None, **kwargs) -> AsyncGenerator[Any, None]:
         model_cfg = self.router.get(TaskType.CHAT)
         model = kwargs.pop('model', model_cfg.model_name)
-        
+
         class ChunkWrap:
             def __init__(self, content): self.content = content
 
-        async for token in self.chat_stream(model=model, messages=messages, **kwargs):
+        async for token in self.chat_stream(model=model, messages=messages, format=format, **kwargs):
             yield ChunkWrap(token)
 
-    async def chat_stream(self, model: str, messages: List[dict], system_prompt: Optional[str] = None, **kwargs) -> AsyncGenerator[str, None]:
-        """Streaming chat routed to the primary reasoning host."""
+    async def chat_stream(self, model: str, messages: List[dict], system_prompt: Optional[str] = None, format: Optional[Union[str, Dict[str, Any]]] = None, **kwargs) -> AsyncGenerator[str, None]:
+        """Streaming chat routed to the primary reasoning host.
+
+        Args:
+            format: Ollama format constraint. Can be:
+                - 'json': Force valid JSON output (grammar-constrained decoding)
+                - dict: JSON Schema object for schema-constrained decoding
+                - None: No constraint (free text)
+        """
         config = self.router.get(TaskType.CHAT)
         full_messages = []
         if system_prompt:
@@ -177,8 +184,11 @@ class OllamaClient:
             }
         }
 
-        # Force JSON output when requested — no regex repair needed
-        if kwargs.get('json_mode'):
+        # Grammar-constrained decoding: force valid JSON or schema-compliant JSON
+        # Ollama >= 0.1.30 supports both 'format': 'json' and 'format': {schema}
+        if format is not None:
+            payload['format'] = format
+        elif kwargs.get('json_mode'):
             payload['format'] = 'json'
 
         try:

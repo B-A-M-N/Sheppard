@@ -348,37 +348,19 @@ def strip_markdown(text: str) -> str:
 
 def repair_json(bad_json: str) -> dict:
     """
-    Aggressive repair for common LLM JSON failures.
-    Handles missing commas, trailing commas, and conversational noise.
+    Repair broken LLM JSON using json_repair library — a proper parser, not regex.
+    Handles: missing commas, trailing commas, unquoted keys, conversational noise,
+    truncated JSON, markdown formatting, etc.
     """
-    import json
-    import re
+    from json_repair import repair_json as json_repair
+
+    result = json_repair(bad_json, return_objects=True)
     
-    # 1. Basic extraction: find the first { and last }
-    match = re.search(r'\{.*\}', bad_json, re.DOTALL)
-    if not match:
-        raise ValueError("No JSON object found in response")
-    content = match.group(0)
+    if isinstance(result, dict):
+        return result
     
-    # 2. Fix missing commas between fields (e.g., "key": "val" "next": ...)
-    content = re.sub(r'(":[^,}\]]+)\s+"', r'\1,\n"', content)
+    # If it extracted an array or primitive instead, wrap it
+    if isinstance(result, list):
+        return {"atoms": result}
     
-    # 3. Fix missing commas after objects/arrays (e.g., { ... } "next": ... or [ ... ] "next": ...)
-    content = re.sub(r'([}\]]+)\s+"', r'\1,\n"', content)
-    
-    # 4. Fix unquoted property names (e.g., key: "value")
-    content = re.sub(r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":', content)
-    
-    # 5. Fix trailing commas before closing braces/brackets
-    content = re.sub(r',\s*([}\]])', r'\1', content)
-    
-    # 5. Try to parse
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError:
-        # Last resort cleanup: remove non-printable chars
-        try:
-            cleaned = "".join(c for c in content if c.isprintable() or c in "\n\r\t")
-            return json.loads(cleaned)
-        except:
-            raise
+    raise ValueError(f"json_repair returned non-dict: {type(result)}")

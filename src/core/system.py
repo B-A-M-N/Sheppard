@@ -19,6 +19,7 @@ from typing import AsyncGenerator, List, Optional, Dict, Any, Tuple
 from src.research.acquisition.budget import BudgetMonitor, BudgetConfig, CondensationPriority
 from src.research.acquisition.crawler import FirecrawlLocalClient, CrawlerConfig
 from src.research.acquisition.frontier import AdaptiveFrontier
+from src.utils.console import console
 # V2 Condensation
 from src.research.condensation.pipeline import DistillationPipeline
 # V2 Reasoning (deprecated — not used in V3)
@@ -349,17 +350,70 @@ class SystemManager:
     async def _vampire_loop(self, vampire_id: int):
         """Greedy consumer loop: Eats URLs from Redis and stores technical ore."""
         logger.info(f"[Vampire-{vampire_id}] Unleashed.")
+        _dequeued = 0
+        _scraped = 0
+        _skipped_lock = 0
+        _skipped_existing = 0
+        _skipped_filtered = 0
+        _failed = 0
+
+        # Domain failure memory: tracks domains with high failure rates
+        domain_failures: Dict[str, int] = {}
+        DOMAIN_FAILURE_THRESHOLD = 5  # Skip domain after N failures
+
+        def _is_valid_target(url: str) -> bool:
+            """Pre-scrape filter: reject known-bad URL patterns."""
+            blocked_patterns = [
+                "taylorfrancis.com/books",  # paywalled
+                "login",
+                "signup",
+                "register",
+                "captcha",
+                "javascript:",
+                "mailto:",
+            ]
+            for pattern in blocked_patterns:
+                if pattern in url.lower():
+                    return False
+
+            # Check if domain has high failure rate
+            from urllib.parse import urlparse
+            try:
+                domain = urlparse(url).netloc.lower()
+                if domain_failures.get(domain, 0) >= DOMAIN_FAILURE_THRESHOLD:
+                    return False
+            except Exception:
+                pass
+
+            return True
+
         while True:
             try:
                 # Dequeue next job
                 job = await self.adapter.dequeue_job("queue:scraping", timeout_s=10)
+                _dequeued += 1
                 if not job: continue
-                
+
                 url = job.get("url")
                 mission_id = job.get("mission_id")
                 if not mission_id:
                     logger.warning(f"[Vampire-{vampire_id}] Job missing mission_id, skipping")
                     continue
+
+                # Pre-scrape filter: reject known-bad URLs before wasting resources
+                if not _is_valid_target(url):
+                    _skipped_filtered += 1
+                    if _dequeued % 100 == 0:
+                        console.print(f"[dim][Vampire-{vampire_id}] Stats: dequeued={_dequeued}, scraped={_scraped}, filtered={_skipped_filtered}, failed={_failed}[/dim]")
+                    continue  # Don't requeue — URL is known-bad
+
+                # Skip URLs from missions that are no longer tracked by the budget monitor
+                # This drains stale URLs from previous/cancelled missions without requeuing
+                if not self.budget.get_status(mission_id):
+                    _skipped_existing += 1
+                    if _dequeued % 500 == 0:
+                        console.print(f"[dim][Vampire-{vampire_id}] Draining {mission_id[:8]}... (stale mission, not requeuing)[/dim]")
+                    continue  # Don't requeue — let stale URLs drain naturally
 
                 # Check if already processed (Greedy de-duplication)
                 existing = await self.adapter.get_source_by_url_hash(
@@ -367,7 +421,9 @@ class SystemManager:
                     normalized_url_hash=job.get("url_hash", "")
                 )
                 if existing and existing.get("status") == "fetched":
-                    logger.debug(f"[Vampire-{vampire_id}] Already fetched: {url}")
+                    _skipped_existing += 1
+                    if _dequeued % 100 == 0:
+                        console.print(f"[dim][Vampire-{vampire_id}] Stats: dequeued={_dequeued}, scraped={_scraped}, skipped_existing={_skipped_existing}, skipped_lock={_skipped_lock}, failed={_failed}[/dim]")
                     continue
 
                 # Check budget before eating
@@ -384,12 +440,14 @@ class SystemManager:
                 lock_key = f"lock:scraping:{job.get('url_hash', '')}"
                 acquired = await self.adapter.acquire_lock(lock_key, ttl_s=300)
                 if not acquired:
+                    _skipped_lock += 1
                     logger.debug(f"[Vampire-{vampire_id}] Skipping already-processing URL: {url}")
                     continue
 
                 # Scrape
                 result = await self.crawler._scrape_with_retry(url)
                 if result:
+                    _scraped += 1
                     # Atomic Ingestion via V3 Adapter
                     topic_id = job.get("topic_id", mission_id)
                     source_meta = {
@@ -408,7 +466,22 @@ class SystemManager:
                     # Trigger budget accounting to enable distillation
                     await self.budget.record_bytes(mission_id, result.raw_bytes)
 
-                    logger.info(f"[Vampire-{vampire_id}] Consumed: {url}")
+                    logger.info(f"[Vampire-{vampire_id}] Consumed: {url} ({result.raw_bytes} bytes)")
+                else:
+                    _failed += 1
+
+                    # Track domain failures for pre-scrape filtering
+                    from urllib.parse import urlparse
+                    try:
+                        domain = urlparse(url).netloc.lower()
+                        domain_failures[domain] = domain_failures.get(domain, 0) + 1
+                        if domain_failures[domain] >= DOMAIN_FAILURE_THRESHOLD:
+                            logger.info(f"[Vampire-{vampire_id}] Domain {domain} blocked ({domain_failures[domain]} failures)")
+                    except Exception:
+                        pass
+
+                    if _dequeued % 50 == 0:
+                        console.print(f"[bold red][Vampire-{vampire_id}][/bold red] Stats: dequeued={_dequeued}, scraped={_scraped}, failed={_failed}, filtered={_skipped_filtered}, skipped_lock={_skipped_lock}, skipped_existing={_skipped_existing}")
                 
             except asyncio.CancelledError:
                 break
@@ -441,6 +514,15 @@ class SystemManager:
                         f"[DEAD] [Vampire-{vampire_id}] Terminal failure on {_url} "
                         f"after {_retry} attempt(s): {e}. Job dropped."
                     )
+                    # Track domain failure even on terminal drop
+                    from urllib.parse import urlparse
+                    try:
+                        domain = urlparse(_url).netloc.lower()
+                        domain_failures[domain] = domain_failures.get(domain, 0) + 1
+                        if domain_failures[domain] >= DOMAIN_FAILURE_THRESHOLD:
+                            logger.info(f"[Vampire-{vampire_id}] Domain {domain} blocked after terminal failure ({domain_failures[domain]} failures)")
+                    except Exception:
+                        pass
 
     async def _crawl_and_store(self, mission_id: str, topic_name: str, query: str) -> None:
         """Background task: adaptive frontier research mission."""
@@ -500,7 +582,28 @@ class SystemManager:
         return await self.synthesis_service.generate_master_brief(mission_id)
 
     async def _condensation_callback(self, mission_id: str, priority: CondensationPriority) -> None:
-        await self.condenser.run(mission_id, priority)
+        try:
+            console.print(f"[bold magenta][Distillery][/bold magenta] Budget triggered {priority.value} condensation for mission {mission_id[:8]}")
+            if not self.condenser:
+                console.print(f"[bold red][Distillery][/bold red] Condenser not initialized!")
+                return
+            await self.condenser.run(mission_id, priority)
+            console.print(f"[bold green][Distillery][/bold green] Condensation pass complete for mission {mission_id[:8]}")
+        except asyncio.CancelledError:
+            logger.warning(f"[Distillery] Condensation cancelled for mission {mission_id[:8]}")
+            console.print(f"[yellow][Distillery][/yellow] Condensation cancelled for {mission_id[:8]}")
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            logger.error(f"[Distillery] Condensation failed for mission {mission_id[:8]}: {e}\n{tb}")
+            console.print(f"[bold red][Distillery][/bold red] ERROR for {mission_id[:8]}: {e}")
+        finally:
+            # Always reset budget flag so it can retry
+            if self.budget:
+                budget = self.budget.get_status(mission_id)
+                if budget:
+                    budget.condensation_running = False
+                    budget.last_trigger = None
 
     def _build_system_prompt(self, context: str, project: Optional[str]) -> str:
         return (

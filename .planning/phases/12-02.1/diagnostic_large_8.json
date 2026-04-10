@@ -1,0 +1,73 @@
+{
+  "timestamp": "2026-03-30T23:15:33.916009",
+  "corpus_tier": "large",
+  "corpus_atom_count": 1000,
+  "db_total_atoms": 3180,
+  "num_sections": 8,
+  "concurrent_total_ms": 1324.690961977467,
+  "per_section_profiles": [
+    {
+      "order": 1,
+      "title": "Context",
+      "query_ms": 1291.9616869767196,
+      "post_ms": 0.022249994799494743,
+      "total_ms": 1291.984446987044
+    },
+    {
+      "order": 2,
+      "title": "Foundational Principles",
+      "query_ms": 871.8304200447164,
+      "post_ms": 0.05186098860576749,
+      "total_ms": 871.8826110125519
+    },
+    {
+      "order": 3,
+      "title": "Key Features and Capabilities",
+      "query_ms": 718.8873249688186,
+      "post_ms": 0.07014104630798101,
+      "total_ms": 718.9577560056932
+    },
+    {
+      "order": 4,
+      "title": "Use Cases and Applications",
+      "query_ms": 1001.3868740061298,
+      "post_ms": 0.06880098953843117,
+      "total_ms": 1001.456035010051
+    },
+    {
+      "order": 5,
+      "title": "Development Tools and Ecosystem",
+      "query_ms": 1291.7542539653368,
+      "post_ms": 0.03853102680295706,
+      "total_ms": 1291.7930849944241
+    },
+    {
+      "order": 6,
+      "title": "Best Practices and Guidelines",
+      "query_ms": 1323.981502035167,
+      "post_ms": 0.02738996408879757,
+      "total_ms": 1324.0093020140193
+    },
+    {
+      "order": 7,
+      "title": "Challenges and Controversies",
+      "query_ms": 1288.236784050241,
+      "post_ms": 0.04330999217927456,
+      "total_ms": 1288.2805140106939
+    },
+    {
+      "order": 8,
+      "title": "Future Developments and Directions",
+      "query_ms": 1105.7605980313383,
+      "post_ms": 0.0288509763777256,
+      "total_ms": 1105.7898889994249
+    }
+  ],
+  "aggregate": {
+    "mean_total_ms_per_section": 1111.7692048792378,
+    "mean_query_ms": 1111.7249305098085,
+    "mean_post_ms": 0.04389187233755365,
+    "sum_of_per_section_totals_ms": 8894.153639033902,
+    "parallelism_efficiency": 6.71
+  }
+}

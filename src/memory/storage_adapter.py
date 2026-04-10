@@ -168,6 +168,7 @@ class ApplicationStore(Protocol):
 class RuntimeStore(Protocol):
     async def enqueue_job(self, queue_name: str, payload: JsonDict) -> bool: ...
     async def dequeue_job(self, queue_name: str, timeout_s: int = 0) -> JsonDict | None: ...
+    async def get_queue_depth(self, queue_name: str) -> int: ...
     async def schedule_retry(self, queue_name: str, payload: JsonDict, when_epoch_s: int) -> None: ...
     async def move_due_retries(self, queue_name: str, now_epoch_s: int) -> int: ...
 
@@ -251,6 +252,20 @@ class SemanticProjectionBuilder:
     """Builds deterministic semantic documents for Chroma."""
 
     @staticmethod
+    def _parse_json_field(value: Any) -> Any:
+        """Safely parse a JSON string field that may come from model_dump_json()."""
+        if value is None:
+            return {}
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except (json.JSONDecodeError, TypeError):
+                return {}
+        return {}
+
+    @staticmethod
     def build_chunk_document(chunk: JsonDict) -> str:
         text = chunk.get("inline_text") or chunk.get("text", "")
         return str(text).strip()
@@ -277,7 +292,8 @@ class SemanticProjectionBuilder:
             atom.get("statement", ""),
             atom.get("summary", ""),
         ]
-        qualifiers = atom.get("qualifiers_json") or atom.get("qualifiers") or {}
+        raw_q = atom.get("qualifiers_json") or atom.get("qualifiers") or {}
+        qualifiers = SemanticProjectionBuilder._parse_json_field(raw_q)
         caveats = qualifiers.get("caveats", [])
         counterpoints = qualifiers.get("counterpoints", [])
         if caveats:
@@ -303,8 +319,8 @@ class SemanticProjectionBuilder:
 
     @staticmethod
     def build_authority_record_document(record: JsonDict) -> str:
-        scope = record.get("scope_json") or record.get("scope") or {}
-        advisory = record.get("advisory_layer_json") or record.get("advisory_layer") or {}
+        scope = SemanticProjectionBuilder._parse_json_field(record.get("scope_json") or record.get("scope"))
+        advisory = SemanticProjectionBuilder._parse_json_field(record.get("advisory_layer_json") or record.get("advisory_layer"))
         included = scope.get("included", [])
         framing = scope.get("framing_statement", "")
         decision_rules = advisory.get("decision_rules", [])
@@ -382,6 +398,7 @@ class PostgresStore(Protocol):
 class RedisQueueStore(Protocol):
     async def enqueue_job(self, queue_name: str, payload: JsonDict) -> bool: ...
     async def dequeue_job(self, queue_name: str, timeout_s: int = 0) -> JsonDict | None: ...
+    async def get_queue_depth(self, queue_name: str) -> int: ...
     async def schedule_retry(self, queue_name: str, payload: JsonDict, when_epoch_s: int) -> None: ...
     async def move_due_retries(self, queue_name: str, now_epoch_s: int) -> int: ...
 
@@ -455,7 +472,8 @@ class SheppardStorageAdapter(StorageAdapter):
 
     async def get_mission(self, mission_id: str) -> JsonDict | None:
         active = await self.redis_runtime.get_active_state(f"mission:active:{mission_id}")
-        if active is not None: return active
+        if active is not None and isinstance(active, dict):
+            return active
         return await self.pg.fetch_one("mission.research_missions", {"mission_id": mission_id})
 
     async def update_mission_status(self, mission_id: str, status: str, stop_reason: str | None = None) -> None:
@@ -482,7 +500,8 @@ class SheppardStorageAdapter(StorageAdapter):
 
     async def get_mission_node(self, node_id: str) -> JsonDict | None:
         active = await self.redis_runtime.get_active_state(f"mission:node:{node_id}")
-        if active is not None: return active
+        if active is not None and isinstance(active, dict):
+            return active
         return await self.pg.fetch_one("mission.mission_nodes", {"node_id": node_id})
 
     async def list_mission_nodes(self, mission_id: str, status: str | None = None) -> list[JsonDict]:
@@ -900,6 +919,9 @@ class SheppardStorageAdapter(StorageAdapter):
     async def dequeue_job(self, queue_name: str, timeout_s: int = 0) -> JsonDict | None:
         return await self.redis_queue.dequeue_job(queue_name, timeout_s=timeout_s)
 
+    async def get_queue_depth(self, queue_name: str) -> int:
+        return await self.redis_queue.get_queue_depth(queue_name)
+
     async def schedule_retry(self, queue_name: str, payload: JsonDict, when_epoch_s: int) -> None:
         await self.redis_queue.schedule_retry(queue_name, payload, when_epoch_s)
 
@@ -977,6 +999,25 @@ class SheppardStorageAdapter(StorageAdapter):
 
     async def delete_index_object(self, collection: Literal["corpus_chunks", "knowledge_atoms", "authority_records", "synthesis_artifacts"], object_id: str) -> None:
         await self.chroma.delete_document(collection, object_id)
+
+    # ── Discovery Entity Methods ──
+    async def get_mission_atoms(self, mission_id: str, limit: int = 100) -> list[dict]:
+        """Fetch recent atoms for a mission — used for entity extraction."""
+        rows = await self.pg.fetch_many(
+            "knowledge.knowledge_atoms",
+            where={"topic_id": mission_id},
+            limit=limit
+        )
+        return [{"content": r.get("statement", ""), "type": r.get("atom_type", "claim")} for r in (rows or [])]
+
+    async def store_discovery_entities(self, mission_id: str, entities: list[str]) -> None:
+        """Store extracted entities for Frontier to consume."""
+        await self.redis_queue.store_discovery_entities(mission_id, entities)
+
+    async def get_discovery_entities(self, mission_id: str) -> list[str]:
+        """Retrieve stored entities for Frontier query expansion."""
+        return await self.redis_queue.get_discovery_entities(mission_id)
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)

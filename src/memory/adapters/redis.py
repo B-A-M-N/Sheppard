@@ -93,6 +93,9 @@ class RedisStoresImpl:
         await self.client.rpush(queue_name, self._serialize(payload))
         return True
 
+    async def get_queue_depth(self, queue_name: str) -> int:
+        return await self.client.llen(queue_name)
+
     async def dequeue_job(self, queue_name: str, timeout_s: int = 0) -> JsonDict | None:
         result = await self.client.blpop(queue_name, timeout=timeout_s)
         if result:
@@ -112,3 +115,19 @@ class RedisStoresImpl:
             await self.client.zrem(retry_key, item)
             count += 1
         return count
+
+    # Discovery Entity Storage — feeds entities back into Frontier for expansion
+    async def store_discovery_entities(self, mission_id: str, entities: list[str]) -> None:
+        """Store extracted entities as a Redis set for Frontier to consume."""
+        entity_key = f"discovery:entities:{mission_id}"
+        # Add all entities to a Redis set (auto-deduplicates)
+        if entities:
+            await self.client.sadd(entity_key, *entities)
+            # Set TTL to 7 days to prevent stale entity buildup
+            await self.client.expire(entity_key, 7 * 24 * 3600)
+
+    async def get_discovery_entities(self, mission_id: str) -> list[str]:
+        """Retrieve stored entities for a mission — used by Frontier for query expansion."""
+        entity_key = f"discovery:entities:{mission_id}"
+        raw = await self.client.smembers(entity_key)
+        return [e.decode('utf-8') if isinstance(e, bytes) else e for e in raw]

@@ -12,7 +12,7 @@ import asyncio
 import logging
 from typing import Optional, Any, Dict, List
 from datetime import datetime
-from ...trustcall import call
+from ...trust_call import call
 
 from .connection import ConnectionManager
 from ...exceptions import StorageError, ValidationError

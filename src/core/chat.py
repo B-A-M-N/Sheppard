@@ -47,7 +47,7 @@ class ChatConfig:
     max_message_length: int = MAX_MESSAGE_LENGTH
     max_context_messages: int = MAX_CONTEXT_MESSAGES
     default_response_type: ResponseType = DEFAULT_RESPONSE_TYPE
-    enable_memory: bool = True
+    enable_memory: bool = False  # V3: memory manager disabled
     enable_research: bool = True
     enable_personas: bool = True
     default_persona_id: str = SYSTEM_PERSONA_ID
@@ -187,11 +187,14 @@ class ChatApp:
         }
 
     async def _store_interaction(self, user_input: str, response_content: str) -> None:
+        if not self.system_manager.memory:
+            return
         interaction = f"User: {user_input}\nAssistant: {response_content}"
         await self.system_manager.memory.store(Memory(content=interaction, metadata={"type": "conversation", "topic": "General"}))
 
     async def _extract_and_store_preferences(self, content: str) -> None:
-        # Simple extraction logic restored
+        if not self.system_manager.memory:
+            return
         patterns = {"color": r"favorite\s+color\s+(?:is|:)\s+(\w+)", "food": r"favorite\s+food\s+(?:is|:)\s+(\w+)"}
         for k, p in patterns.items():
             match = re.search(p, content, re.IGNORECASE)

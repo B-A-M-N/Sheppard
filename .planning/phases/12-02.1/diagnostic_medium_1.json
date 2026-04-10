@@ -1,0 +1,24 @@
+{
+  "timestamp": "2026-03-30T23:14:04.560579",
+  "corpus_tier": "medium",
+  "corpus_atom_count": 500,
+  "db_total_atoms": 680,
+  "num_sections": 1,
+  "concurrent_total_ms": 184.6353459986858,
+  "per_section_profiles": [
+    {
+      "order": 1,
+      "title": "Introduction to Python",
+      "query_ms": 184.42907300777733,
+      "post_ms": 0.05767098627984524,
+      "total_ms": 184.4873339869082
+    }
+  ],
+  "aggregate": {
+    "mean_total_ms_per_section": 184.4873339869082,
+    "mean_query_ms": 184.42907300777733,
+    "mean_post_ms": 0.05767098627984524,
+    "sum_of_per_section_totals_ms": 184.4873339869082,
+    "parallelism_efficiency": 1.0
+  }
+}

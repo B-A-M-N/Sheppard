@@ -1,10 +1,17 @@
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
+*.egg-info/
+*.egg-info/
+
+# Virtual environments
 .env
 .venv
 venv/
 ENV/
+
+# Runtime data / caches
 logs/
 data/
 chroma_storage/
@@ -12,4 +19,25 @@ temp/
 screenshots/
 chat_history/
 *.log
+*.coverage
+dump.rdb
+.rdb
+
+# Claude worktrees
+.claude/worktrees/
+.claude/settings.local.json
+
+# IDE / Editors
+.idea/
+.vscode/
+*.swp
+
+# Local config (if contains secrets)
+.env.local
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Excluded source file
 src/core/system_v2.py

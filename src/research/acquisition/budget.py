@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from typing import Callable, Awaitable, Dict, Optional
 from enum import Enum
 
+from src.utils.console import console
+
 logger = logging.getLogger(__name__)
 
 
@@ -38,6 +40,7 @@ class TopicBudget:
     condensed_bytes: int = 0
     condensation_running: bool = False
     last_trigger: Optional[CondensationPriority] = None
+    pending_source_count: int = 0  # Track fetched sources waiting for condensation
 
     @property
     def usage_ratio(self) -> float:
@@ -124,8 +127,23 @@ class BudgetMonitor:
 
             budget = self._budgets[mission_id]
             budget.raw_bytes += raw_bytes
+            budget.pending_source_count += 1
+            
+            # Log every 10th source to avoid spam
+            if budget.pending_source_count % 10 == 0:
+                logger.info(
+                    f"[Budget] '{budget.topic_name}': {budget.pending_source_count} pending sources, "
+                    f"{budget.raw_bytes / 1024**2:.1f}MB raw"
+                )
 
         await self._check_thresholds(mission_id)
+
+    async def record_source_condensed(self, mission_id: str) -> None:
+        """Decrement pending source count when a source is condensed."""
+        async with self._lock:
+            if mission_id in self._budgets:
+                budget = self._budgets[mission_id]
+                budget.pending_source_count = max(0, budget.pending_source_count - 1)
 
     async def record_condensation_result(
         self,
@@ -145,10 +163,12 @@ class BudgetMonitor:
             budget.condensed_bytes += condensed_bytes_added
             budget.condensation_running = False
             budget.last_trigger = None # Reset to allow recurring triggers
+            budget.pending_source_count = max(0, budget.pending_source_count - 5)  # Approximate: pipeline processes 5 per batch
             logger.info(
                 f"[Budget] '{budget.topic_name}' condensation done. "
                 f"Freed {raw_bytes_freed / 1024**2:.1f}MB raw → "
                 f"{condensed_bytes_added / 1024**2:.1f}MB condensed. "
+                f"Pending sources: {budget.pending_source_count}. "
                 f"Effective usage: {budget.usage_ratio:.1%}"
             )
 
@@ -173,6 +193,7 @@ class BudgetMonitor:
     async def _check_thresholds(self, mission_id: str) -> None:
         """
         Evaluate current usage ratio against thresholds.
+        Also triggers condensation when pending source count is high (for small-page missions).
         Only fires each threshold once per condensation cycle.
         """
         async with self._lock:
@@ -184,6 +205,7 @@ class BudgetMonitor:
             ratio = budget.usage_ratio
             priority = None
 
+            # Byte-based threshold
             if ratio >= self.config.threshold_critical:
                 if budget.last_trigger != CondensationPriority.CRITICAL:
                     priority = CondensationPriority.CRITICAL
@@ -193,6 +215,15 @@ class BudgetMonitor:
             elif ratio >= self.config.threshold_low:
                 if budget.last_trigger is None:
                     priority = CondensationPriority.LOW
+
+            # Source-count based trigger: condense when 50+ sources are waiting
+            # This handles the case where pages are small but numerous
+            if priority is None and budget.pending_source_count >= 50:
+                priority = CondensationPriority.LOW
+                logger.info(
+                    f"[Budget] '{budget.topic_name}' has {budget.pending_source_count} pending sources — "
+                    f"triggering condensation (byte threshold not yet met)"
+                )
 
             if priority is None:
                 return
@@ -206,8 +237,13 @@ class BudgetMonitor:
 
         if self.condensation_callback:
             # Fire and forget — condensation runs alongside crawling
-            asyncio.create_task(
+            console.print(f"[bold cyan][Budget][/bold cyan] Dispatching {priority.value} condensation for '{budget.topic_name}'")
+            task = asyncio.create_task(
                 self.condensation_callback(mission_id, priority)
+            )
+            task.add_done_callback(
+                lambda t: logger.error(f"[Budget] Condensation task errored: {t.exception()}")
+                if t.exception() else None
             )
 
     async def run_monitor_loop(self) -> None:

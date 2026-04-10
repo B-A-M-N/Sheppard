@@ -23,10 +23,33 @@ logger = logging.getLogger(__name__)
 
 # Archivist's "Ivory Tower" whitelist
 ACADEMIC_WHITELIST_DOMAINS: Set[str] = {
-    ".edu", ".gov", "arxiv.org", "pubmed.ncbi.nlm.nih.gov",
-    "scholar.google.com", "semanticscholar.org", "acm.org",
-    "ieee.org", "nature.com", "science.org", "springer.com",
-    "researchgate.net", "ssrn.com",
+    # Traditional academic TLDs
+    ".edu", ".gov",
+    # Major academic publishers & repositories
+    "arxiv.org", "pubmed.ncbi.nlm.nih.gov",
+    "scholar.google.com", "semanticscholar.org",
+    "acm.org", "ieee.org", "nature.com", "science.org",
+    "springer.com", "researchgate.net", "ssrn.com",
+    # General reference
+    "wikipedia.org",
+    # University presses
+    "cambridge.org", "oxfordjournals.org", "academic.oup.com",
+    # Museums & societies (paleo/geo relevant)
+    "amnh.org", "fieldmuseum.org", "paleontology.org", "dinosauria.org",
+    "berkeley.edu", "mit.edu", "harvard.edu", "stanford.edu",
+    # UK academic institutions
+    "ac.uk",
+    # Government science agencies & research institutes
+    "usgs.gov", "nps.gov", "si.edu", "nasa.gov",
+    # Data/code archives
+    "github.com", "gitlab.com", "osf.io", "zenodo.org",
+    "figshare.com", "dryad.org",
+    # Additional educational / reference sites
+    "archive.org", "britannica.com", "nationalgeographic.com",
+    "opengeology.org", "paleoportal.org", "academia.edu",
+    # Journal aggregators
+    "journals.elsevier.com", "pubs.acs.org", "pnas.org",
+    "bioone.org", "frontiersin.org", "peerj.com",
 }
 
 @dataclass
@@ -241,17 +264,26 @@ class FirecrawlLocalClient:
             logger.debug(f"[Crawler] Slow-lane offload failed: {e}")
 
     async def _search(self, query: str, pageno: int = 1) -> List[str]:
-        """Discovery Race: Hits all SearXNG nodes in parallel. First success wins."""
+        """Discovery Race: Hits all SearXNG nodes in parallel. First success wins.
+        
+        Searches across both academic engines (Google Scholar, arXiv, PubMed, 
+        Semantic Scholar, CrossRef, CORE, BASE) and general engines (Bing, Qwant, 
+        Brave, DuckDuckGo) simultaneously. Academic URLs are classified on ingestion 
+        via ACADEMIC_WHITELIST_DOMAINS — general results never taint academic sources.
+        """
         import aiohttp
         import random
-        
+        from src.config.settings_v2 import settings
+
+        engines_str = settings.searxng_all_engines
+
         async def fetch_one(url):
             try:
                 payload = {
-                    "q": query, 
+                    "q": query,
                     "format": "json",
                     "pageno": pageno,
-                    "engines": "google,bing,brave,duckduckgo,qwant"
+                    "engines": engines_str
                 }
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as session:
                     async with session.get(f"{url}/search", params=payload) as resp:
@@ -276,19 +308,34 @@ class FirecrawlLocalClient:
         return []
 
     async def discover_and_enqueue(
-        self, 
-        topic_id: str, 
-        topic_name: str, 
-        query: str, 
+        self,
+        topic_id: str,
+        topic_name: str,
+        query: str,
         mission_id: str = None,
         visited_urls: Optional[Set[str]] = None
     ) -> int:
-        """Producer: Finds URLs and dumps them into the global Redis queue. 
+        """Producer: Finds URLs and dumps them into the global Redis queue.
         Deep Mines up to Page 5 if no new URLs are found.
         """
         from src.core.system import system_manager
         total_enqueued = 0
-        
+
+        # Pre-filter patterns — reject before enqueuing
+        _blocked_patterns = [
+            "taylorfrancis.com/books",  # paywalled
+            "login",
+            "signup",
+            "register",
+            "captcha",
+        ]
+
+        def _is_valid_url(url: str) -> bool:
+            for pattern in _blocked_patterns:
+                if pattern in url.lower():
+                    return False
+            return True
+
         for page in range(1, 6): # Deep Mine: Page 1 to 5
             urls = await self._search(query, pageno=page)
             if not urls:
@@ -298,6 +345,10 @@ class FirecrawlLocalClient:
             backpressure_triggered = False
             for url in urls:
                 if visited_urls is not None and url in visited_urls:
+                    continue
+
+                # Apply pre-filter: reject known-bad URL patterns
+                if not _is_valid_url(url):
                     continue
 
                 # Apply academic_only filter if enabled

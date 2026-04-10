@@ -10,12 +10,14 @@ Architectural Shift:
 import asyncio
 import json
 import logging
+import math
 import re
 from typing import Dict, List, Set, Any, Optional, Tuple, Union
 from dataclasses import dataclass, field
 
 from src.utils.console import console
 from src.llm.model_router import TaskType
+from src.utils.json_validator import JSONValidator
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +69,7 @@ class AdaptiveFrontier:
     # Governance limits (tunable)
     MAX_RESPAWN_CYCLES = 3  # Maximum times we can regenerate frontier before failing
     MAX_CONSECUTIVE_ZERO_YIELD = 5  # Maximum consecutive nodes with zero discovery
+    QUEUE_BACKPRESSURE_THRESHOLD = 8000  # Pause discovery when queue hits this depth
 
     def __init__(self, system_manager, mission_id: str, topic_name: str):
         self.sm = system_manager
@@ -80,6 +83,11 @@ class AdaptiveFrontier:
         self.consecutive_zero_yield = 0
         self.failed = False
         self.failure_reason: Optional[str] = None
+
+        # Convergence tracking
+        self._yield_history: List[int] = []  # per-cycle yield
+        self._novelty_window: List[int] = []  # last N cycle yields
+        self._novelty_window_size = 5
 
     async def run(self):
         """Metabolic Control Loop."""
@@ -99,6 +107,22 @@ class AdaptiveFrontier:
             if status and status.usage_ratio >= 1.0:
                 await self._fail_mission("BUDGET_EXCEEDED")
                 break
+
+            # Queue backpressure: pause discovery if scrape queue is saturated
+            queue_depth = await self.sm.adapter.get_queue_depth("queue:scraping")
+            if queue_depth >= self.QUEUE_BACKPRESSURE_THRESHOLD:
+                console.print(f"[bold orange][Frontier][/bold orange] Queue backpressure: depth={queue_depth}, waiting for vampires to consume...")
+                await asyncio.sleep(30)
+                continue  # Skip this cycle, let vampires drain the queue
+
+            # Budget status diagnostics
+            budget_status = self.sm.budget.get_status(self.mission_id)
+            if budget_status:
+                raw_mb = budget_status.raw_bytes / (1024**2)
+                ceiling_gb = budget_status.ceiling_bytes / (1024**3)
+                ratio = budget_status.usage_ratio
+                pending = budget_status.pending_source_count
+                console.print(f"[dim][Budget] Raw: {raw_mb:.1f}MB / {ceiling_gb:.1f}GB ({ratio:.2%}) | Pending: {pending} | Condensed: {budget_status.condensed_bytes/(1024**2):.1f}MB | Running: {budget_status.condensation_running}[/dim]")
 
             # 3. Select Next Action
             node, mode = self._select_next_action()
@@ -139,9 +163,25 @@ class AdaptiveFrontier:
             console.print(f"[bold blue][Frontier][/bold blue] Enqueued {round_yield} new targets for vampires.")
 
             # 6. Thermal Management & Zero-Yield Detection
+            # Only trigger thermal recovery if BOTH URL discovery AND entity discovery are empty
             if round_yield == 0:
+                # Check if we have entities to mine as a secondary discovery channel
+                entities = await self.sm.adapter.get_discovery_entities(self.mission_id)
+                has_entity_backup = len(entities) > 0
+
                 self.consecutive_zero_yield += 1
-                console.print(f"[bold red][Frontier][/bold red] Zero discovery for node '{node.concept}'. Triggering Thermal Recovery.")
+                console.print(f"[bold red][Frontier][/bold red] Zero discovery for node '{node.concept}'. Consecutive zeros: {self.consecutive_zero_yield}.")
+
+                if has_entity_backup:
+                    console.print(f"[bold yellow][Frontier][/bold yellow] Entity backup available ({len(entities)} entities) — delaying thermal recovery.")
+                    # Don't increment further if entities exist; give vampires time to consume
+                    if self.consecutive_zero_yield >= 2:
+                        # Already waited once; now trigger entity-based queries
+                        console.print(f"[bold cyan][Frontier][/bold cyan] Trying entity-based discovery with {min(len(entities), 5)} entities...")
+                        await self._entity_based_discovery(entities[:5])
+                        self.consecutive_zero_yield = 0  # Reset since we tried a new channel
+                        continue
+
                 if self.consecutive_zero_yield >= self.MAX_CONSECUTIVE_ZERO_YIELD:
                     await self._fail_mission("NO_DISCOVERY")
                     break
@@ -154,7 +194,18 @@ class AdaptiveFrontier:
             node.yield_history.append(round_yield)
             node.exhausted_modes.add(mode)
             await self._save_node(node)
-            
+
+            # Update convergence tracking
+            self._yield_history.append(round_yield)
+            self._novelty_window.append(round_yield)
+            if len(self._novelty_window) > self._novelty_window_size:
+                self._novelty_window = self._novelty_window[-self._novelty_window_size:]
+
+            # Convergence check: stop if frontier has stabilized
+            if self._should_converge():
+                console.print(f"[bold green][Frontier][/bold green] Frontier converged — novelty rate below threshold, exploration saturated.")
+                break
+
             if round_yield >= 5:
                 await self._respawn_nodes(node)
             
@@ -280,14 +331,37 @@ Output valid JSON:
             import re
             from src.utils.text_processing import repair_json
             data = {}
+            
+            if not resp or len(resp.strip()) < 10:
+                raise ValueError(f"Empty or too short LLM response ({len(resp) if resp else 0} chars)")
+            
+            logger.debug(f"[Frontier] LLM response length: {len(resp)} chars")
             try:
-                data = repair_json(resp)
-            except:
-                # If repair fails, try to grep the nodes specifically
-                node_match = re.search(r'"nodes":\s*\[(.*?)\]', resp, re.DOTALL)
+                # Use JSONValidator's extraction first (better bracket matching)
+                validator = JSONValidator()
+                raw_json_str = validator._extract_json(resp)
+                if raw_json_str:
+                    # Try parsing directly first
+                    try:
+                        data = json.loads(raw_json_str)
+                    except json.JSONDecodeError:
+                        # If direct parse fails, try repair
+                        data = repair_json(raw_json_str)
+                else:
+                    # No JSON found by bracket matching, try repair_json on full response
+                    data = repair_json(resp)
+            except Exception as e:
+                logger.warning(f"[Frontier] JSON extraction failed: {e}, trying regex fallback")
+                # Log first 500 chars for debugging
+                logger.debug(f"[Frontier] Raw LLM response (first 500): {resp[:500]}")
+                # Regex fallback: find "nodes": [...]
+                node_match = re.search(r'"nodes"\s*:\s*\[(.*?)\]', resp, re.DOTALL)
                 if node_match:
-                    nodes_raw = re.findall(r'"(.*?)"', node_match.group(1))
-                    data = {"nodes": nodes_raw, "policy": {"class": "investigative"}}
+                    nodes_raw = re.findall(r'"([^"]*?)"', node_match.group(1))
+                    data = {"nodes": nodes_raw, "policy": {"class": "technical"}}
+
+            if not data or not data.get('nodes'):
+                raise ValueError(f"No valid nodes extracted from LLM response (resp_len={len(resp) if resp else 0})")
             
             p = data.get('policy', {})
             # Create/Update V3 Profile
@@ -325,17 +399,38 @@ Output valid JSON:
 
         except Exception as e:
             logger.error(f"[Frontier] Policy generation failed: {e}. Activating Fallback Depth.")
+            console.print(f"[yellow][Frontier][/yellow] Fallback: generating heuristic nodes for '{self.topic_name}'")
             fallbacks = [
-                self.topic_name, 
-                f"{self.topic_name} technical architecture", 
+                self.topic_name,
+                f"{self.topic_name} technical architecture",
                 f"{self.topic_name} implementation details",
                 f"{self.topic_name} failure modes",
-                f"{self.topic_name} best practices"
+                f"{self.topic_name} best practices",
+                f"{self.topic_name} performance optimization",
+                f"{self.topic_name} security considerations",
+                f"{self.topic_name} scalability patterns",
+                f"{self.topic_name} testing and validation",
+                f"{self.topic_name} deployment strategies",
+                f"{self.topic_name} monitoring and observability",
+                f"{self.topic_name} data management",
+                f"{self.topic_name} integration patterns",
+                f"{self.topic_name} error handling",
+                f"{self.topic_name} versioning and compatibility"
             ]
+            node_count = 0
             for fn in fallbacks:
-                node = FrontierNode(concept=fn)
-                self.nodes[fn] = node
-                await self._save_node(node)
+                try:
+                    node = FrontierNode(concept=fn)
+                    self.nodes[fn] = node
+                    await self._save_node(node)
+                    node_count += 1
+                except Exception as node_err:
+                    logger.warning(f"[Frontier] Failed to save fallback node '{fn}': {node_err}")
+            
+            if node_count > 0:
+                console.print(f"[bold green][Frontier][/bold green] Fallback initialized {node_count} research nodes.")
+            else:
+                console.print(f"[bold red][Frontier][/bold red] CRITICAL: Fallback node creation also failed!")
 
     def _select_next_action(self) -> Tuple[Optional[FrontierNode], Optional[str]]:
         active = [n for n in self.nodes.values() if n.status == "underexplored"]
@@ -351,6 +446,45 @@ Output valid JSON:
         node.status = "saturated"
         asyncio.create_task(self._save_node(node))
         return self._select_next_action()
+
+    async def _entity_based_discovery(self, entities: List[str]) -> int:
+        """
+        Secondary discovery channel: use extracted entities as search queries.
+        This prevents thermal recovery from triggering when we have rich atom content
+        but poor URL discovery (e.g., all found URLs are paywalled).
+
+        Includes expansion limiter to prevent combinatorial explosion.
+        """
+        if not entities:
+            return 0
+
+        # Frontier expansion limiter: cap to prevent noise multiplication
+        MAX_ENTITY_EXPANSION = 10
+        capped = entities[:MAX_ENTITY_EXPANSION]
+
+        if len(entities) > MAX_ENTITY_EXPANSION:
+            console.print(f"[dim][Frontier] Capped entity expansion from {len(entities)} to {MAX_ENTITY_EXPANSION}[/dim]")
+
+        round_yield = 0
+        for entity in capped:
+            # Build entity-focused queries
+            entity_queries = [
+                f"{entity} architecture implementation",
+                f"{entity} performance benchmarks comparison",
+                f"{entity} tutorial guide best practices",
+            ]
+            for q in entity_queries:
+                enqueued = await self.sm.crawler.discover_and_enqueue(
+                    topic_id=self.mission_id,
+                    topic_name=self.topic_name,
+                    query=q,
+                    mission_id=self.mission_id,
+                    visited_urls=self.visited_urls
+                )
+                round_yield += enqueued
+
+        console.print(f"[bold cyan][Frontier][/bold cyan] Entity-based discovery: enqueued {round_yield} targets from {len(capped)} entities.")
+        return round_yield
 
     async def _engineer_queries(self, node: FrontierNode, mode: str) -> List[str]:
         logger.debug(f"[Frontier] _engineer_queries START: node={node.concept}, mode={mode}")
@@ -422,6 +556,68 @@ Identify 3-5 new, specific sub-topics MISSING from this context. No quotes. One 
 
     def _is_saturated(self) -> bool:
         return all(n.status == "saturated" for n in self.nodes.values())
+
+    def _should_converge(self) -> bool:
+        """
+        Check if the frontier has converged.
+        Stop conditions:
+        1. Novelty rate < 5% over last N cycles
+        2. Yield entropy is stable (no new information)
+        3. All nodes are saturated
+        """
+        # Need enough data points
+        if len(self._novelty_window) < self._novelty_window_size:
+            return False
+
+        # Check 1: All nodes saturated
+        if self._is_saturated():
+            return True
+
+        # Check 2: Novelty rate (fraction of cycles with new discoveries)
+        novelty = self._novelty_rate()
+        if novelty < 0.05:
+            return True
+
+        # Check 3: Yield entropy stability
+        if self._yield_entropy() < 0.3:
+            return True
+
+        return False
+
+    def _novelty_rate(self) -> float:
+        """
+        Fraction of recent cycles that produced new discoveries.
+        Low novelty rate = exploration is exhausted.
+        """
+        if not self._novelty_window:
+            return 1.0
+        productive_cycles = sum(1 for y in self._novelty_window if y > 0)
+        return productive_cycles / len(self._novelty_window)
+
+    def _yield_entropy(self) -> float:
+        """
+        Shannon entropy of yield distribution.
+        Low entropy = yields are uniform (no new information patterns).
+        Normalized to 0-1 range.
+        """
+        yields = self._novelty_window
+        if len(yields) < 3:
+            return 1.0  # Not enough data
+
+        # Normalize yields to probabilities
+        total = sum(yields)
+        if total == 0:
+            return 0.0  # All zeros = no information
+
+        probs = [y / total for y in yields]
+        entropy = -sum(p * math.log2(p + 1e-10) for p in probs if p > 1e-10)
+
+        # Normalize by max possible entropy (uniform distribution)
+        max_entropy = math.log2(len(yields))
+        if max_entropy == 0:
+            return 0.0
+
+        return entropy / max_entropy
 
     async def apply_nudge(self, instruction: str):
         """Human-in-the-loop steering. Updates policy and active nodes."""

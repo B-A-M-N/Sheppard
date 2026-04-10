@@ -1,0 +1,31 @@
+{
+  "mission_id": "345e9e3e-5657-40fb-9421-727a846a3a41",
+  "checks": {
+    "E2E-01_integrity": {
+      "passed": true,
+      "details": "Sections: 7\nAvg atoms/section: 15.0\nSections with atoms: 7/7"
+    },
+    "E2E-02_citations": {
+      "passed": true,
+      "details": "Sections: 7\nCitations: 0"
+    },
+    "E2E-02_validator": {
+      "passed": true,
+      "details": "Validated sections: 39\nInsufficient evidence: 399\nAll sentences have citations: True"
+    },
+    "E2E-02_span_log": {
+      "passed": true,
+      "details": "Events found: 4\nStages: ['frontier_acquisition_condensation', 'retrieval']\nSpan starts: ['frontier_acquisition_condensation', 'retrieval']\nSpan ends: ['frontier_acquisition_condensation', 'retrieval']\nHas duration_ms: True"
+    },
+    "E2E-01_contradiction_v3": {
+      "passed": true,
+      "details": "V3-native contradiction path confirmed (no legacy memory calls)"
+    },
+    "E2E-03_app_code_unchanged": {
+      "passed": true,
+      "details": "No app or benchmark code changes detected"
+    }
+  },
+  "overall_pass": true,
+  "throughput_note": "\n- Sections/mission (mean): 7.0\n- Total synthesis ms (mean): 57374.09746949561\n- Note: 12-03's single-endpoint Ollama bottleneck limits concurrent LLM throughput.\n  Parallel synthesis design is correct but speedup requires multi-endpoint deployment.\n"
+}

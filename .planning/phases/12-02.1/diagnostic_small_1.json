@@ -1,0 +1,24 @@
+{
+  "timestamp": "2026-03-30T23:10:51.555333",
+  "corpus_tier": "small",
+  "corpus_atom_count": 20,
+  "db_total_atoms": 160,
+  "num_sections": 1,
+  "concurrent_total_ms": 144.35498404782265,
+  "per_section_profiles": [
+    {
+      "order": 1,
+      "title": "Historical Context",
+      "query_ms": 144.19630100019276,
+      "post_ms": 0.040141050703823566,
+      "total_ms": 144.23694205470383
+    }
+  ],
+  "aggregate": {
+    "mean_total_ms_per_section": 144.23694205470383,
+    "mean_query_ms": 144.19630100019276,
+    "mean_post_ms": 0.040141050703823566,
+    "sum_of_per_section_totals_ms": 144.23694205470383,
+    "parallelism_efficiency": 1.0
+  }
+}

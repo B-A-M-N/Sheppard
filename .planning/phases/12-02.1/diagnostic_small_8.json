@@ -1,0 +1,73 @@
+{
+  "timestamp": "2026-03-30T23:11:30.863406",
+  "corpus_tier": "small",
+  "corpus_atom_count": 20,
+  "db_total_atoms": 180,
+  "num_sections": 8,
+  "concurrent_total_ms": 1224.950113974046,
+  "per_section_profiles": [
+    {
+      "order": 1,
+      "title": "Context",
+      "query_ms": 1223.465941962786,
+      "post_ms": 0.04305102629587054,
+      "total_ms": 1223.5094230272807
+    },
+    {
+      "order": 2,
+      "title": "Founding Story",
+      "query_ms": 851.9982590223663,
+      "post_ms": 0.022299995180219412,
+      "total_ms": 852.0209090202115
+    },
+    {
+      "order": 3,
+      "title": "Key Features and Principles",
+      "query_ms": 716.5339509956539,
+      "post_ms": 0.06815098458901048,
+      "total_ms": 716.6023419704288
+    },
+    {
+      "order": 4,
+      "title": "Philosophy and Community",
+      "query_ms": 851.8638969981112,
+      "post_ms": 0.03768998431041837,
+      "total_ms": 851.9018069491722
+    },
+    {
+      "order": 5,
+      "title": "Impact on Computing",
+      "query_ms": 1200.4664849955589,
+      "post_ms": 0.022310996428132057,
+      "total_ms": 1200.489185983315
+    },
+    {
+      "order": 6,
+      "title": "Challenges and Controversies",
+      "query_ms": 1200.3254040027969,
+      "post_ms": 0.04056998295709491,
+      "total_ms": 1200.3662439528853
+    },
+    {
+      "order": 7,
+      "title": "Future Directions",
+      "query_ms": 1140.7068550470285,
+      "post_ms": 0.06836099782958627,
+      "total_ms": 1140.7759160501882
+    },
+    {
+      "order": 8,
+      "title": "Conclusion",
+      "query_ms": 1056.2343339552172,
+      "post_ms": 0.02396001946181059,
+      "total_ms": 1056.2587240128778
+    }
+  ],
+  "aggregate": {
+    "mean_total_ms_per_section": 1030.240568870795,
+    "mean_query_ms": 1030.1993908724398,
+    "mean_post_ms": 0.04079924838151783,
+    "sum_of_per_section_totals_ms": 8241.92455096636,
+    "parallelism_efficiency": 6.73
+  }
+}

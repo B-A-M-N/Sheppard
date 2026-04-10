@@ -1,5 +1,9 @@
 """Phase 11.1: Unit tests for V3 truth contract invariants."""
 
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'src')))
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from src.research.reasoning.assembler import EvidenceAssembler, EvidencePacket, SectionPlan
@@ -78,6 +82,7 @@ async def test_evidence_packet_captures_atom_ids():
 async def test_synthesis_service_propagates_mission_id():
     """generate_master_brief must pass mission_id to storage calls."""
     mock_ollama = MagicMock()
+    mock_ollama.complete = AsyncMock(return_value="This section provides evidence [A1].")
     mock_assembler = MagicMock()
     mock_adapter = MagicMock()
 
@@ -92,8 +97,9 @@ async def test_synthesis_service_propagates_mission_id():
     mock_adapter.get_authority_record = AsyncMock(return_value=None)  # Not exists, will create
     mock_adapter.upsert_authority_record = AsyncMock(return_value=None)
 
-    # Storage methods must be async
+    # Storage methods must be async - support both singular and plural
     mock_adapter.store_synthesis_artifact = AsyncMock(return_value=None)
+    mock_adapter.store_synthesis_section = AsyncMock(return_value=None)
     mock_adapter.store_synthesis_sections = AsyncMock(return_value=None)
     mock_adapter.store_synthesis_citations = AsyncMock(return_value=None)
 
