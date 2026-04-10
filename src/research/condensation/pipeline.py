@@ -13,6 +13,7 @@ from datetime import datetime
 from src.utils.distillation_pipeline import ExtractionError
 from src.utils.normalize_atom_schema import normalize_atom_schema
 from src.research.state_machine import transition_source_status
+from src.utils.pipeline_metrics import MetricsCollector
 import json
 import logging
 import math
@@ -29,6 +30,25 @@ from src.utils.console import console
 from src.utils.json_validator import JSONValidator, extract_technical_atoms, _extract_entities_semantic
 
 logger = logging.getLogger(__name__)
+
+
+async def _write_dead_letter(adapter, source_id: str, stage: str,
+                            error_class: str, error_detail: str,
+                            retry_count: int = 0, worker_id: str = "",
+                            payload: dict = None) -> None:
+    """Write a structured dead-letter entry for replay."""
+    await adapter.pg.insert_row("audit.dead_letter_queue", {
+        "source_id": source_id,
+        "stage": stage,
+        "error_class": error_class,
+        "error_detail": error_detail,
+        "retry_count": retry_count,
+        "max_retries": 3,
+        "last_seen_worker": worker_id,
+        "payload": json.dumps(payload or {}),
+        "status": "pending",
+    })
+
 
 @dataclass
 class ExtractionCluster:
@@ -319,11 +339,16 @@ class DistillationPipeline:
                             },
                         }
                     )
-            except ExtractionError:
-                # LLM call failed — mark source as error, audit row written by caller
+            except ExtractionError as e:
+                # LLM call failed — mark source as error, write DLQ
                 console.print(f"[bold red][Distillery] Extraction failed for {source_id}[/bold red]")
                 await transition_source_status(
                     self.adapter, source_id, "error", current_status="fetched"
+                )
+                await _write_dead_letter(
+                    self.adapter, source_id, "extraction", "ExtractionError", str(e),
+                    worker_id="pipeline:condensation",
+                    payload={"mission_id": mission_id, "url": s.get("url", ""), "content_hash": s.get("content_hash")},
                 )
             except Exception as e:
                 tb = traceback.format_exc()
@@ -332,6 +357,11 @@ class DistillationPipeline:
                 logger.error(f"[Distillery] Smelting failed for {source_id}: {e}\n{tb}")
                 await transition_source_status(
                     self.adapter, source_id, "error", current_status="fetched"
+                )
+                await _write_dead_letter(
+                    self.adapter, source_id, "condensation", type(e).__name__, str(e),
+                    worker_id="pipeline:condensation",
+                    payload={"mission_id": mission_id, "url": s.get("url", ""), "content_hash": s.get("content_hash")},
                 )
 
         console.print(f"[bold green][Refinery][/bold green] Batch complete. Smelted technical atoms: [white]{self._total_atoms}[/white]")
