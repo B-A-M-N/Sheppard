@@ -112,10 +112,10 @@ DOCUMENT (condensed):
     except TypeError as e:
         # "unhashable type: 'dict'" — likely Ollama internal error with schema dict
         logger.warning(f"[Distillery] {error_prefix}: Type error (likely dict hashing in Ollama): {e}")
-        return []
+        return None
     except Exception as e:
         logger.error(f"[Distillery] {error_prefix} LLM call failed: {e}")
-        return []
+        return None
 
 
 # ──────────────────────────────────────────────────────────────────────

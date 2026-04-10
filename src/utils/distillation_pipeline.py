@@ -28,6 +28,12 @@ from src.utils.embedding_gates import (
     _check_semantic_drift,
 )
 from src.utils.atom_quality import _classify_atom_quality, _structural_validation
+
+
+class ExtractionError(Exception):
+    """Raised when atom extraction fails due to LLM failure, not empty content."""
+    pass
+
 from src.utils.llm_schema_guard import (
     _call_llm_with_schema_guard,
     _normalize_single_atom,
@@ -71,6 +77,9 @@ async def llm_compress_to_claims(
         error_prefix="Compress",
         format=COMPRESSION_SCHEMA
     )
+
+    if result is None:
+        raise ExtractionError("Compression: LLM call failed during claim extraction")
 
     if not result:
         # Empty is better than garbage — let the upstream fallback handle it
@@ -200,6 +209,8 @@ FRAGMENTS:
         error_prefix="Pass 2",
         format=ATOM_EXTRACTION_SCHEMA
     )
+    if rewritten is None:
+        raise ExtractionError("Pass 2: LLM call failed during atomization")
 
     result = list(valid_atoms)
     for rw in rewritten:
@@ -249,6 +260,9 @@ ATOMS TO REVIEW:
         error_prefix="Pass 3",
         format=CRITIQUE_SCHEMA
     )
+
+    if critique_result is None:
+        raise ExtractionError("Pass 3: LLM call failed during critique")
 
     if not critique_result:
         logger.warning("[Distillery] Pass 3: Critique produced no results, keeping original atoms")
@@ -347,6 +361,8 @@ async def extract_technical_atoms(
     try:
         # --- PASS 1: Extraction ---
         raw_atoms = await _extract_raw_atoms(llm_client, text, topic, source_type)
+        if raw_atoms is None:
+            raise ExtractionError("Pass 1: LLM call failed during extraction")
         if not raw_atoms:
             logger.info(f"[Distillery] Pass 1: Zero atoms extracted for '{topic}'")
             return []
@@ -455,6 +471,8 @@ async def extract_technical_atoms(
                             normalized["compressed"] = True
                             final_atoms.append(normalized)
                     logger.info(f"[Distillery] Compression-first: {len(final_atoms)} claims derived from raw text")
+            except ExtractionError:
+                logger.warning(f"[Distillery] Compression-first LLM call failed — skipping fallback")
             except Exception as e:
                 logger.warning(f"[Distillery] Compression-first failed: {e}")
                 sentences = re.split(r'(?<=[.!?])\s+', text[:500])
@@ -483,5 +501,6 @@ async def extract_technical_atoms(
 
     except Exception as e:
         import traceback
-        logger.error(f"[Distillery] extract_technical_atoms FAILED: {e}\n{traceback.format_exc()}")
-        return []
+        tb = traceback.format_exc()
+        logger.error(f"[Distillery] extract_technical_atoms FAILED: {e}\n{tb}")
+        raise ExtractionError(f"Extraction pipeline failed: {e}") from e

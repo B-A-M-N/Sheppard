@@ -8,6 +8,9 @@ Architectural Shift:
 """
 
 import asyncio
+import traceback
+from datetime import datetime
+from src.utils.distillation_pipeline import ExtractionError
 import json
 import logging
 import math
@@ -60,180 +63,228 @@ class DistillationPipeline:
             # 2. Fetch mission metadata for domain profile and topic
             mission_row = await self.adapter.get_mission(mission_id)
 
-            import uuid
-            from src.research.domain_schema import KnowledgeAtom, AtomLineage
+            # Generate audit run_id and write start row
+            run_id = f"run-{mission_id[:8]}-{datetime.utcnow().isoformat()}"
+            topic_id = mission_row.get("topic_id", mission_id) if isinstance(mission_row, dict) else mission_id[:8]
 
-            total_atoms = 0
-            for s in sources:
-                # Guard: ensure source row is actually a dict
-                if not isinstance(s, dict):
-                    logger.error(f"[Distillery] Skipping malformed source row: type={type(s).__name__}, value={repr(s)[:200]}")
-                    continue
+            try:
+                await self.adapter.pg.insert_row("audit.pipeline_runs", {
+                    "run_id": run_id,
+                    "mission_id": mission_id,
+                    "topic_id": topic_id,
+                    "pipeline_type": "condensation",
+                    "pipeline_version": "v1.3.0-phase13",
+                    "status": "running",
+                })
+            except Exception:
+                logger.warning("[Distillery] Failed to write audit start row — pipeline_runs table may not exist yet. Run migrations/phase_13_pipeline_audit.sql")
+                run_id = None  # Disable audit tracking for this run
 
-                source_id = s.get("source_id", "unknown")
+            try:
+                await self._process_sources(sources, mission_id, mission_row, run_id)
 
-                # Get the content
-                text_ref = s.get("canonical_text_ref")
-                if not text_ref:
-                    # Mark as failed/skipped if no text ref
-                    await self.adapter.pg.update_row("corpus.sources", "source_id", {"source_id": source_id, "status": "error"})
-                    continue
+                # Write success row
+                if run_id:
+                    try:
+                        await self.adapter.pg.update_row("audit.pipeline_runs", "run_id", {
+                            "run_id": run_id,
+                            "status": "completed",
+                            "completed_at": datetime.utcnow(),
+                            "source_count": len(sources),
+                            "atom_count": self._total_atoms,
+                        })
+                    except Exception:
+                        pass
 
-                ref = await self.adapter.get_text_ref(text_ref)
-                if not ref or not ref.get("inline_text"):
-                    await self.adapter.pg.update_row("corpus.sources", "source_id", {"source_id": source_id, "status": "error"})
-                    continue
+            except Exception as e:
+                tb = traceback.format_exc()
+                logger.error(f"[Distillery] Distillation pipeline failed: {e}\n{tb}")
+                if run_id:
+                    try:
+                        await self.adapter.pg.update_row("audit.pipeline_runs", "run_id", {
+                            "run_id": run_id,
+                            "status": "failed",
+                            "completed_at": datetime.utcnow(),
+                            "error_stage": "condensation",
+                            "error_class": type(e).__name__,
+                            "error_detail": str(e),
+                            "error_traceback": tb,
+                        })
+                    except Exception:
+                        pass
+                raise
 
-                content = ref["inline_text"]
+    async def _process_sources(self, sources, mission_id, mission_row, run_id):
+        """Process a batch of sources through the distillation pipeline."""
+        import uuid
+        from src.research.domain_schema import KnowledgeAtom, AtomLineage
 
-                # Fetch chunks for this source (needed for evidence binding)
-                chunks = await self.adapter.list_chunks_for_source(source_id)
-                if not chunks:
-                    logger.error(f"[Distillery] No chunks found for source {source_id}, cannot bind evidence")
-                    await self.adapter.pg.update_row("corpus.sources", "source_id", {"source_id": source_id, "status": "error"})
-                    continue
+        self._total_atoms = 0
 
-                # Build quick access to chunk texts
-                chunk_infos = [(chunk['chunk_id'], chunk.get('inline_text', '')) for chunk in chunks]
+        for s in sources:
+            # Guard: ensure source row is actually a dict
+            if not isinstance(s, dict):
+                logger.error(f"[Distillery] Skipping malformed source row: type={type(s).__name__}, value={repr(s)[:200]}")
+                continue
 
-                console.print(f"[dim][Distillery] Smelting: {s.get('url', source_id)[:60]}...[/dim]")
+            source_id = s.get("source_id", "unknown")
 
-                try:
-                    # Diagnostic: log types at entry point for debugging smelting failures
-                    if not isinstance(mission_row, (dict, type(None))):
-                        logger.error(f"[Distillery] mission_row has unexpected type: {type(mission_row).__name__} = {repr(mission_row)[:200]}")
-                    atoms_data = await extract_technical_atoms(
-                        self.ollama, content, mission_id,
-                        source_url=s.get('url', '')  # Pass source URL for quality gating
+            # Get the content
+            text_ref = s.get("canonical_text_ref")
+            if not text_ref:
+                # Mark as failed/skipped if no text ref
+                await self.adapter.pg.update_row("corpus.sources", "source_id", {"source_id": source_id, "status": "error"})
+                continue
+
+            ref = await self.adapter.get_text_ref(text_ref)
+            if not ref or not ref.get("inline_text"):
+                await self.adapter.pg.update_row("corpus.sources", "source_id", {"source_id": source_id, "status": "error"})
+                continue
+
+            content = ref["inline_text"]
+
+            # Fetch chunks for this source (needed for evidence binding)
+            chunks = await self.adapter.list_chunks_for_source(source_id)
+            if not chunks:
+                logger.error(f"[Distillery] No chunks found for source {source_id}, cannot bind evidence")
+                await self.adapter.pg.update_row("corpus.sources", "source_id", {"source_id": source_id, "status": "error"})
+                continue
+
+            # Build quick access to chunk texts
+            chunk_infos = [(chunk['chunk_id'], chunk.get('inline_text', '')) for chunk in chunks]
+
+            console.print(f"[dim][Distillery] Smelting: {s.get('url', source_id)[:60]}...[/dim]")
+
+            try:
+                # Diagnostic: log types at entry point for debugging smelting failures
+                if not isinstance(mission_row, (dict, type(None))):
+                    logger.error(f"[Distillery] mission_row has unexpected type: {type(mission_row).__name__} = {repr(mission_row)[:200]}")
+                atoms_data = await extract_technical_atoms(
+                    self.ollama, content, mission_id,
+                    source_url=s.get('url', '')  # Pass source URL for quality gating
+                )
+
+                # 3. Storage & Indexing
+                atoms_this_source = 0
+                for atom_dict in atoms_data:
+                    # Guard: ensure atom_dict is actually a dict before calling .get()
+                    if not isinstance(atom_dict, dict):
+                        logger.warning(f"[Distillery] Skipping non-dict atom: {type(atom_dict).__name__} = {repr(atom_dict)[:100]}")
+                        continue
+
+                    # Additional guard: ensure content field exists and is a string
+                    # KnowledgeUnit uses 'text', legacy atoms use 'content'
+                    content_value = atom_dict.get('text', atom_dict.get('content', ''))
+                    if not content_value or not isinstance(content_value, str):
+                        logger.warning(f"[Distillery] Skipping atom with invalid content field: {type(content_value).__name__}")
+                        continue
+
+                    atom_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{mission_id}:{source_id}:{content_value[:200]}"))
+                    profile_id = mission_row.get("domain_profile_id") if isinstance(mission_row, dict) else f"profile_{mission_id[:8]}"
+
+                    atom = KnowledgeAtom(
+                        atom_id=atom_id,
+                        topic_id=mission_row.get("topic_id") if isinstance(mission_row, dict) else mission_id,
+                        domain_profile_id=profile_id,
+                        atom_type=atom_dict.get('atom_type', atom_dict.get('type', 'claim')),
+                        title=content_value[:50] + "...",
+                        statement=content_value,
+                        summary=content_value,
+                        confidence=atom_dict.get('confidence', 0.7),
+                        importance=0.8 if atom_dict.get('atom_type', atom_dict.get('type')) == 'contradiction' else 0.5,
+                        lineage=AtomLineage(
+                            mission_id=mission_id,
+                            extraction_mode="atomic_distillation"
+                        ),
+                        metadata={"type": atom_dict.get('atom_type', atom_dict.get('type')), "source_id": source_id}
                     )
 
-                    # 3. Storage & Indexing
-                    atoms_this_source = 0
-                    for atom_dict in atoms_data:
-                        # Guard: ensure atom_dict is actually a dict before calling .get()
-                        if not isinstance(atom_dict, dict):
-                            logger.warning(f"[Distillery] Skipping non-dict atom: {type(atom_dict).__name__} = {repr(atom_dict)[:100]}")
-                            continue
+                    # Determine appropriate chunk(s) for this atom
+                    atom_content = atom_dict.get('text', atom_dict.get('content', '')).strip()
+                    matched_chunk_ids = []
+                    if atom_content:
+                        for chunk_id, chunk_text in chunk_infos:
+                            if atom_content in chunk_text or chunk_text in atom_content:
+                                matched_chunk_ids.append(chunk_id)
 
-                        # Additional guard: ensure content field exists and is a string
-                        # KnowledgeUnit uses 'text', legacy atoms use 'content'
-                        content_value = atom_dict.get('text', atom_dict.get('content', ''))
-                        if not content_value or not isinstance(content_value, str):
-                            logger.warning(f"[Distillery] Skipping atom with invalid content field: {type(content_value).__name__}")
-                            continue
-
-                        atom_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{mission_id}:{source_id}:{content_value[:200]}"))
-                        profile_id = mission_row.get("domain_profile_id") if isinstance(mission_row, dict) else f"profile_{mission_id[:8]}"
-
-                        atom = KnowledgeAtom(
-                            atom_id=atom_id,
-                            topic_id=mission_row.get("topic_id") if isinstance(mission_row, dict) else mission_id,
-                            domain_profile_id=profile_id,
-                            atom_type=atom_dict.get('atom_type', atom_dict.get('type', 'claim')),
-                            title=content_value[:50] + "...",
-                            statement=content_value,
-                            summary=content_value,
-                            confidence=atom_dict.get('confidence', 0.7),
-                            importance=0.8 if atom_dict.get('atom_type', atom_dict.get('type')) == 'contradiction' else 0.5,
-                            lineage=AtomLineage(
-                                mission_id=mission_id,
-                                extraction_mode="atomic_distillation"
-                            ),
-                            metadata={"type": atom_dict.get('atom_type', atom_dict.get('type')), "source_id": source_id}
-                        )
-
-                        # Determine appropriate chunk(s) for this atom
-                        atom_content = atom_dict.get('text', atom_dict.get('content', '')).strip()
-                        matched_chunk_ids = []
-                        if atom_content:
-                            for chunk_id, chunk_text in chunk_infos:
-                                if atom_content in chunk_text or chunk_text in atom_content:
-                                    matched_chunk_ids.append(chunk_id)
-
-                            # If no direct match, fallback to first chunk
-                            if not matched_chunk_ids:
-                                matched_chunk_ids = [chunks[0]['chunk_id']]
-                        else:
+                        # If no direct match, fallback to first chunk
+                        if not matched_chunk_ids:
                             matched_chunk_ids = [chunks[0]['chunk_id']]
-
-                        # Create evidence rows for all matched chunks
-                        evidence_rows = [
-                            {
-                                "source_id": source_id,
-                                "chunk_id": cid,
-                                "evidence_strength": 0.9,
-                                "supports_statement": True
-                            }
-                            for cid in matched_chunk_ids
-                        ]
-
-                        # Store atom and evidence atomically via V3 Adapter
-                        atom_row = atom.to_pg_row()
-                        await self.adapter.store_atom_with_evidence(atom_row, evidence_rows)
-
-                        total_atoms += 1
-                        atoms_this_source += 1
-
-                    # 5. Mark individual source as condensed only if atoms were stored
-                    if atoms_this_source > 0:
-                        await self.adapter.pg.update_row(
-                            "corpus.sources",
-                            "source_id",
-                            {"source_id": source_id, "status": "condensed"}
-                        )
-                        # Notify budget that a source has been condensed
-                        await self.budget.record_source_condensed(mission_id)
                     else:
-                        # No valid atoms extracted — reject source explicitly
-                        await self.adapter.pg.update_row(
-                            "corpus.sources",
-                            "source_id",
-                            {"source_id": source_id, "status": "rejected"}
-                        )
-                except Exception as e:
-                    import traceback
-                    tb = traceback.format_exc()
-                    console.print(f"[bold red][Distillery] Smelting failed for {source_id}: {e}[/bold red]")
-                    console.print(f"[dim]{tb}[/dim]")
-                    logger.error(f"[Distillery] Smelting failed for {source_id}: {e}\n{tb}")
-                    await self.adapter.pg.update_row("corpus.sources", "source_id", {"source_id": source_id, "status": "error"})
+                        matched_chunk_ids = [chunks[0]['chunk_id']]
 
-            console.print(f"[bold green][Refinery][/bold green] Batch complete. Smelted technical atoms: [white]{total_atoms}[/white]")
+                    # Create evidence rows for all matched chunks
+                    evidence_rows = [
+                        {
+                            "source_id": source_id,
+                            "chunk_id": cid,
+                            "evidence_strength": 0.9,
+                            "supports_statement": True
+                        }
+                        for cid in matched_chunk_ids
+                    ]
 
-            # 6. Entity Discovery — extract named entities from all atoms for Frontier expansion
-            # These entities become new query targets for the Frontier's discovery loop
-            all_atoms_for_entities = []
-            for s in sources:
-                source_id = s.get("source_id", "unknown")
-                status = s.get("status", "")
-                if status == "condensed":
-                    # Fetch atoms for this source to extract entities
-                    pass  # We'll extract from the atoms_data we already have
+                    # Store atom and evidence atomically via V3 Adapter
+                    atom_row = atom.to_pg_row()
+                    await self.adapter.store_atom_with_evidence(atom_row, evidence_rows)
 
-            # Collect entities from the atoms we just processed (stored in adapter)
-            if self.adapter and total_atoms > 0:
-                # Fetch recently condensed atoms for entity extraction
-                condensed_atoms = await self.adapter.get_mission_atoms(mission_id, limit=100)
-                if condensed_atoms:
-                    # Use semantic extraction with embedding-assisted clustering
-                    entities = await _extract_entities_semantic(condensed_atoms, self.ollama)
-                    if entities:
-                        console.print(f"[bold cyan][Discovery][/bold cyan] Extracted {len(entities)} entities for Frontier expansion: {entities[:15]}")
-                        # Store entities as discovery targets
-                        if hasattr(self.adapter, 'store_discovery_entities'):
-                            await self.adapter.store_discovery_entities(mission_id, entities)
+                    self._total_atoms += 1
+                    atoms_this_source += 1
 
-            # 7. Higher-Order Refinement
-            if total_atoms > 0:
-                if priority in [CondensationPriority.HIGH, CondensationPriority.CRITICAL]:
-                    await self.resolve_contradictions(mission_id)
-            
-            # 7. Budget Feedback
-            await self.budget.record_condensation_result(
-                mission_id=mission_id,
-                raw_bytes_freed=sum(len(str(s).encode()) for s in sources), # Approximated
-                condensed_bytes_added=total_atoms * 500 # Estimate
-            )
+                # 5. Mark individual source as condensed only if atoms were stored
+                if atoms_this_source > 0:
+                    await self.adapter.pg.update_row(
+                        "corpus.sources",
+                        "source_id",
+                        {"source_id": source_id, "status": "condensed"}
+                    )
+                    # Notify budget that a source has been condensed
+                    await self.budget.record_source_condensed(mission_id)
+                else:
+                    # No valid atoms extracted — reject source explicitly
+                    await self.adapter.pg.update_row(
+                        "corpus.sources",
+                        "source_id",
+                        {"source_id": source_id, "status": "rejected"}
+                    )
+            except ExtractionError:
+                # LLM call failed — mark source as error, audit row written by caller
+                console.print(f"[bold red][Distillery] Extraction failed for {source_id}[/bold red]")
+                await self.adapter.pg.update_row("corpus.sources", "source_id", {"source_id": source_id, "status": "error"})
+            except Exception as e:
+                tb = traceback.format_exc()
+                console.print(f"[bold red][Distillery] Smelting failed for {source_id}: {e}[/bold red]")
+                console.print(f"[dim]{tb}[/dim]")
+                logger.error(f"[Distillery] Smelting failed for {source_id}: {e}\n{tb}")
+                await self.adapter.pg.update_row("corpus.sources", "source_id", {"source_id": source_id, "status": "error"})
+
+        console.print(f"[bold green][Refinery][/bold green] Batch complete. Smelted technical atoms: [white]{self._total_atoms}[/white]")
+
+        # 6. Entity Discovery — extract named entities from all atoms for Frontier expansion
+        # These entities become new query targets for the Frontier's discovery loop
+        if self.adapter and self._total_atoms > 0:
+            # Fetch recently condensed atoms for entity extraction
+            condensed_atoms = await self.adapter.get_mission_atoms(mission_id, limit=100)
+            if condensed_atoms:
+                # Use semantic extraction with embedding-assisted clustering
+                entities = await _extract_entities_semantic(condensed_atoms, self.ollama)
+                if entities:
+                    console.print(f"[bold cyan][Discovery][/bold cyan] Extracted {len(entities)} entities for Frontier expansion: {entities[:15]}")
+                    # Store entities as discovery targets
+                    if hasattr(self.adapter, 'store_discovery_entities'):
+                        await self.adapter.store_discovery_entities(mission_id, entities)
+
+        # 7. Higher-Order Refinement
+        if self._total_atoms > 0:
+            if priority in [CondensationPriority.HIGH, CondensationPriority.CRITICAL]:
+                await self.resolve_contradictions(mission_id)
+
+        # 7. Budget Feedback
+        await self.budget.record_condensation_result(
+            mission_id=mission_id,
+            raw_bytes_freed=sum(len(str(s).encode()) for s in sources), # Approximated
+            condensed_bytes_added=self._total_atoms * 500 # Estimate
+        )
 
     async def _cluster_sources(self, sources: List[Dict]) -> List[ExtractionCluster]:
         """Group sources by concept proximity."""
