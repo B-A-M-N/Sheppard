@@ -20,6 +20,7 @@ from src.research.acquisition.budget import BudgetMonitor, BudgetConfig, Condens
 from src.research.acquisition.crawler import FirecrawlLocalClient, CrawlerConfig
 from src.research.acquisition.frontier import AdaptiveFrontier
 from src.utils.console import console
+from src.utils.status_pubsub import publish_status
 # V2 Condensation
 from src.research.condensation.pipeline import DistillationPipeline
 # V2 Reasoning (deprecated — not used in V3)
