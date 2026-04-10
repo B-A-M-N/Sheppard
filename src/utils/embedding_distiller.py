@@ -21,10 +21,11 @@ logger = logging.getLogger(__name__)
 # CONFIG
 # ─────────────────────────────────────────────
 
-MAX_TOKENS = 1500  # Conservative limit for 2048-token models
+MAX_TOKENS = 800   # Conservative: actual tokenizer can be 2x rough estimate
 WINDOW_SIZE = 10   # Sentences per window
 STRIDE = 7         # Overlap between windows
 MIN_SENTENCE_LEN = 20  # Minimum chars to be worth embedding
+EMBED_MAX_CHARS = 3000  # Hard char limit per embedding chunk (~750 tokens, well under 2048)
 
 # ─────────────────────────────────────────────
 # BOILERPLATE STRIPPER
@@ -279,7 +280,9 @@ def distill_for_embedding(raw_text: str) -> Tuple[List[str], Dict[str, int]]:
     token_count = rough_token_count(combined)
     
     if token_count <= MAX_TOKENS:
-        # Small enough — single embedding
+        # Small enough — single embedding, but still truncate if oversized
+        if len(combined) > EMBED_MAX_CHARS:
+            combined = combined[:EMBED_MAX_CHARS].rsplit('. ', 1)[0] + '.'
         stats["chunks"] = 1
         return [combined], stats
     
@@ -288,6 +291,9 @@ def distill_for_embedding(raw_text: str) -> Tuple[List[str], Dict[str, int]]:
     chunks = []
     for window in sliding_windows(atoms, WINDOW_SIZE, STRIDE):
         chunk = " ".join(window)
+        # Hard truncate each chunk to prevent context overflow
+        if len(chunk) > EMBED_MAX_CHARS:
+            chunk = chunk[:EMBED_MAX_CHARS].rsplit('. ', 1)[0] + '.'
         chunks.append(chunk)
     
     stats["chunks"] = len(chunks)
@@ -341,7 +347,7 @@ async def safe_embed(
     vectors = []
     for i, chunk in enumerate(chunks):
         # Safety: split oversized chunks before embedding
-        sub_chunks = chunk_text(chunk, max_chars=4000) if len(chunk) > 4000 else [chunk]
+        sub_chunks = chunk_text(chunk) if len(chunk) > EMBED_MAX_CHARS else [chunk]
         for sub in sub_chunks:
             stats["embeddings_attempted"] += 1
             try:
@@ -394,7 +400,7 @@ def gate_source(raw_text: str) -> Tuple[str, int]:
     return ("OK", tokens)
 
 
-def chunk_text(text: str, max_chars: int = 2000) -> List[str]:
+def chunk_text(text: str, max_chars: int = EMBED_MAX_CHARS) -> List[str]:
     """
     Split text into safe-size chunks for embedding.
     Falls back when distillation produces oversized chunks.

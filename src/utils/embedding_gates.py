@@ -151,11 +151,14 @@ async def _check_semantic_drift(atom, source_text, llm_client, threshold=0.55):
         return 0.5, False
 
     try:
+        # Truncate source to avoid context overflow — first 2000 chars is representative
+        truncated_source = source_text[:2000]
+
         async def embed_fn(chunk):
             return await llm_client.generate_embedding(chunk)
 
         atom_emb, _ = await safe_embed(content, embed_fn)
-        source_emb, _ = await safe_embed(source_text, embed_fn)
+        source_emb, _ = await safe_embed(truncated_source, embed_fn)
         if not atom_emb or not source_emb:
             return 0.5, False
 
