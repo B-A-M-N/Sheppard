@@ -25,12 +25,16 @@ ATOM_EXTRACTION_SCHEMA = {
                         "type": "string",
                         "enum": ["claim", "evidence", "event", "procedure", "contradiction"]
                     },
-                    "content": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+                    "content": {
+                        "type": "string",
+                        "minLength": 20,
+                        "maxLength": 300
+                    }
                 },
-                "required": ["type", "content", "confidence"]
+                "required": ["type", "content"]
             },
-            "minItems": 1
+            "minItems": 1,
+            "maxItems": 15
         }
     },
     "required": ["atoms"]
