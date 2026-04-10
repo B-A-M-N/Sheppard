@@ -391,6 +391,7 @@ class FirecrawlLocalClient:
                 async with self._session.post(
                     f"{self.config.firecrawl_url}/v1/scrape",
                     json={"url": url, "formats": ["markdown", "html"], "onlyMainContent": True},
+                    # FIRE-01: Uses scrape (not /v2/extract) — avoids Firecrawl's internal schema wrapping
                 ) as resp:
                     if resp.status != 200: return None
                     data = await resp.json()

@@ -185,6 +185,7 @@ class OllamaClient:
         }
 
         # Grammar-constrained decoding: force valid JSON or schema-compliant JSON
+        # FIRE-02: Ollama format parameter passed for grammar-constrained decoding
         # Ollama >= 0.1.30 supports both 'format': 'json' and 'format': {schema}
         if format is not None:
             payload['format'] = format
