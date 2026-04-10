@@ -17,6 +17,7 @@ _main_os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
 del _main_os
 
 import asyncio
+import json
 import logging
 import sys
 import os
@@ -29,6 +30,9 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, DownloadColumn
 from rich.table import Table
+from prompt_toolkit import PromptSession
+from prompt_toolkit.styles import Style
+from prompt_toolkit.formatted_text import HTML
 
 # Ensure src/ is on the Python path for absolute imports
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
@@ -41,6 +45,64 @@ from src.config.settings import settings
 from src.utils.console import console
 
 logger = logging.getLogger(__name__)
+
+
+class StatusBar:
+    """Aggregates Redis pub/sub events into a renderable bottom toolbar."""
+
+    def __init__(self):
+        self._state: dict[str, dict] = {}
+        self._lock = asyncio.Lock()
+
+    async def update(self, component: str, event: dict):
+        async with self._lock:
+            self._state[component] = event
+
+    def render(self) -> HTML:
+        try:
+            if not self._state:
+                return HTML("")
+            parts = []
+            for comp, ev in sorted(self._state.items()):
+                event_type = ev.get("event", "?")
+                data = ev.get("data", {})
+                if event_type == "stats":
+                    parts.append(f"<ansicyan>{comp}</ansicyan>: dq={data.get('dequeued',0)} sc={data.get('scraped',0)} fl={data.get('failed',0)}")
+                elif event_type == "dispatch":
+                    parts.append(f"<ansiyellow>{comp}</ansiyellow>: {data.get('node', '')}")
+                elif event_type == "batch_complete":
+                    parts.append(f"<ansigreen>{comp}</ansigreen>: {data.get('atoms', 0)} atoms")
+                elif event_type == "mission_start":
+                    parts.append(f"<ansimagenta>{comp}</ansimagenta>: {data.get('topic', '')[:20]}")
+                else:
+                    parts.append(f"<grey>{comp}: {event_type}</grey>")
+            return HTML("  |  ".join(parts[:4]))
+        except Exception:
+            return HTML("")
+
+
+async def status_subscriber(bar: StatusBar, redis_client):
+    """Subscribe to sheppard:status and update the status bar."""
+    import redis.asyncio as redis
+    backoff = 1
+    while True:
+        try:
+            pubsub = redis_client.pubsub()
+            await pubsub.subscribe("sheppard:status")
+            backoff = 1
+            async for message in pubsub.listen():
+                if message["type"] == "message":
+                    data = json.loads(message["data"])
+                    await bar.update(data["component"], data)
+        except (ConnectionError, TimeoutError, redis.ConnectionError):
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30)
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            logger.error(f"[StatusBar] Error: {e}")
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30)
 
 def create_directory_structure(base_dir: Path):
     dirs = ['data/raw_docs', 'logs', 'screenshots', 'temp', 'chroma_storage', 'chat_history']
@@ -70,30 +132,25 @@ async def initialize_components(base_dir: Path):
 
 async def run_chat(chat_app: ChatApp):
     """
-    Standard UI loop with a non-invasive background status ticker.
+    Chat loop with prompt_toolkit and background status bar.
     """
     command_handler = CommandHandler(console=console, chat_app=chat_app)
     command_handler.show_welcome()
 
-    async def status_ticker():
-        """Silently update mission stats in terminal title or status line."""
-        while True:
-            status = system_manager.status()
-            active = [info for info in status.get('missions', {}).values() if info['crawling']]
-            if active:
-                # Update terminal title with progress instead of drawing on screen
-                mission_sum = " | ".join([f"{m['name'][:15]}: {m['usage']}" for m in active])
-                sys.stdout.write(f"\x1b]2;Sheppard Missions: {mission_sum}\x07")
-                sys.stdout.flush()
-            await asyncio.sleep(5)
+    # Create status bar and start subscriber
+    bar = StatusBar()
+    redis_client = system_manager.redis_client
+    sub_task = asyncio.create_task(status_subscriber(bar, redis_client))
 
-    # Start the ticker
-    ticker_task = asyncio.create_task(status_ticker())
+    session = PromptSession(
+        style=Style.from_dict({"prompt": "#4caf50 bold"}),
+        bottom_toolbar=bar.render,
+        refresh_interval=1.0,
+    )
 
     while True:
         try:
-            # Use a standard input prompt. This is 100% stable.
-            user_input = await asyncio.to_thread(input, "\n[Sheppard] > ")
+            user_input = await session.prompt_async()
             user_input = user_input.strip()
 
             if not user_input: continue
@@ -112,11 +169,17 @@ async def run_chat(chat_app: ChatApp):
 
         except KeyboardInterrupt:
             break
+        except EOFError:
+            break
         except Exception as e:
             logger.error(f"Chat error: {e}")
             console.print(f"\n[bold red]Error:[/bold red] {e}")
-    
-    ticker_task.cancel()
+
+    sub_task.cancel()
+    try:
+        await sub_task
+    except asyncio.CancelledError:
+        pass
 
 async def async_main():
     nest_asyncio.apply()

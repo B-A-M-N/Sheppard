@@ -40,3 +40,4 @@ json_repair>=0.58.0     # Proper LLM JSON repair parser (not regex)
 undetected-chromedriver>=3.5.4
 fake-useragent>=1.2.1
 firecrawl-py>=0.2.0
+prompt_toolkit>=3.0
