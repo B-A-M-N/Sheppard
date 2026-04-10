@@ -41,3 +41,4 @@ undetected-chromedriver>=3.5.4
 fake-useragent>=1.2.1
 firecrawl-py>=0.2.0
 prompt_toolkit>=3.0
+tiktoken

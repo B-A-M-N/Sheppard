@@ -382,10 +382,39 @@ async def extract_technical_atoms(
         )
 
     try:
-        # --- PASS 1: Extraction ---
-        raw_atoms = await _extract_raw_atoms(llm_client, text, topic, source_type)
-        if raw_atoms is None:
-            raise ExtractionError("Pass 1: LLM call failed during extraction")
+        # --- CHUNKING: Token-based chunked extraction (replaces 4000-char truncation) ---
+        from src.utils.extract_chunker import chunk_for_extraction, _count_tokens
+
+        token_count = _count_tokens(text)
+
+        if token_count > 3500:
+            # Chunked extraction path
+            chunks = chunk_for_extraction(text)
+            logger.info(
+                f"[Distillery] Source is {token_count} tokens — "
+                f"chunking into {len(chunks)} extraction chunks"
+            )
+
+            all_raw_atoms = []
+            for i, chunk in enumerate(chunks):
+                chunk_atoms = await _extract_raw_atoms(llm_client, chunk, topic, source_type)
+                if chunk_atoms:
+                    all_raw_atoms.extend(chunk_atoms)
+                logger.info(f"[Distillery] Chunk {i+1}/{len(chunks)}: {len(chunk_atoms or [])} atoms")
+
+            if not all_raw_atoms:
+                logger.info(f"[Distillery] Zero atoms from all {len(chunks)} chunks")
+                return []
+
+            # Cross-chunk dedup with lower threshold
+            raw_atoms = await _embed_atom_dedup(all_raw_atoms, llm_client, threshold=0.88)
+            dedup_count = len(all_raw_atoms) - len(raw_atoms)
+            if dedup_count > 0:
+                logger.info(f"[Distillery] Cross-chunk dedup: removed {dedup_count} duplicates")
+        else:
+            # Single-pass extraction (existing behavior)
+            raw_atoms = await _extract_raw_atoms(llm_client, text, topic, source_type)
+
         if not raw_atoms:
             logger.info(f"[Distillery] Pass 1: Zero atoms extracted for '{topic}'")
             return []
