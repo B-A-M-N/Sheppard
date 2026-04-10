@@ -15,9 +15,10 @@ CONTRADICTION_CANDIDATE_THRESHOLD = 0.75  # lower threshold for contradiction ca
 
 
 class ConsolidationEngine:
-    def __init__(self, pg_adapter, ollama_client):
+    def __init__(self, pg_adapter, ollama_client, embedding_registry=None):
         self.pg = pg_adapter
         self.ollama = ollama_client
+        self.embedding_registry = embedding_registry
 
     # ────────────────────────────────────────────────────────────
     # EXTRACT-03: Golden Atom Consolidation
@@ -87,6 +88,18 @@ class ConsolidationEngine:
                 }
             )
             golden_count += 1
+
+            # Write to embedding registry for golden atom
+            if self.embedding_registry:
+                try:
+                    await self.embedding_registry.write_entry(
+                        source_id=list(all_source_ids)[0] if all_source_ids else "",
+                        content_hash="",  # Will be populated from atom metadata
+                        chroma_doc_id=rep_id,
+                        collection="knowledge_atoms",
+                    )
+                except Exception as e:
+                    logger.warning(f"[Consolidation] Failed to write embedding registry for golden atom {rep_id}: {e}")
 
             # Mark other atoms as obsolete
             for atom in cluster_atoms:

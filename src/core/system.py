@@ -158,6 +158,11 @@ class SystemManager:
 
             # 8. Start background tasks
             self._monitor_task = asyncio.create_task(self.budget.run_monitor_loop())
+
+            # FIRE-04: Start DLQ consumer
+            from src.core.dlq_consumer import DLQConsumer
+            self.dlq_consumer = DLQConsumer(self.adapter.pg, self.adapter.redis_runtime)
+            self._dlq_task = asyncio.create_task(self.dlq_consumer.run())
             
             # 8. Unleash Local Vampires
             # INFRA-01: Configurable vampire count with clamped range
@@ -311,6 +316,15 @@ class SystemManager:
             await self.pg_pool.close()
         if getattr(self, 'redis_client', None):
             await self.redis_client.aclose()
+
+        # Stop DLQ consumer
+        if getattr(self, '_dlq_task', None):
+            self.dlq_consumer.stop()
+            self._dlq_task.cancel()
+            try:
+                await self._dlq_task
+            except asyncio.CancelledError:
+                pass
             
         logger.info("[System] Sheppard shut down cleanly")
 
@@ -496,6 +510,14 @@ class SystemManager:
                                 logger.error(f"[Backpressure] Queue depth CRITICAL: {queue_depth} (>80%)")
                             elif queue_depth > 5000:
                                 logger.warning(f"[Backpressure] Queue depth HIGH: {queue_depth} (>50%)")
+                            # TUI-02: Publish status event
+                            try:
+                                await publish_status(self.redis_client, f"vampire-{vampire_id}", "stats", {
+                                    "dequeued": _dequeued, "scraped": _scraped, "failed": _failed,
+                                    "queue_depth": queue_depth,
+                                })
+                            except Exception:
+                                pass
                         except Exception:
                             pass
                 
@@ -546,6 +568,13 @@ class SystemManager:
         from src.utils.console import console
         console.set_quiet(True)
         try:
+            # TUI-02: Publish mission start
+            try:
+                await publish_status(self.redis_client, "frontier", "mission_start", {
+                    "mission_id": mission_id[:8], "topic": topic_name,
+                })
+            except Exception:
+                pass
             # Set mission status to active at start of execution
             await self.adapter.update_mission_status(mission_id, "active")
             console.print(f"\n[bold yellow][System][/bold yellow] Starting Deep Accretive Mission: [cyan]{topic_name}[/cyan]")
@@ -557,6 +586,14 @@ class SystemManager:
 
             console.print(f"[bold blue][DONE][/bold blue] Mission complete. [green]{total_ingested}[/green] total sources ingested.")
             await self.adapter.update_mission_status(mission_id, "completed")
+
+            # TUI-02: Publish mission complete
+            try:
+                await publish_status(self.redis_client, "frontier", "mission_complete", {
+                    "mission_id": mission_id[:8], "total_ingested": total_ingested,
+                })
+            except Exception:
+                pass
 
         except Exception as e:
             console.print(f"[bold red][FAIL][/bold red] Mission error: {e}")

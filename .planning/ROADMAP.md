@@ -231,3 +231,40 @@ Phase 18 (JSON Reliability & Infrastructure) — independent, can run in paralle
 - Database migration pending for `exhausted_modes_json` column.
 - v1.1 shipped with known limitation: PERF-02 throughput target not met due to deployment constraint (single-endpoint inference). Architecture ready for scaling in v1.2.
 - v1.2 shipped with complete derived insight pipeline; LongformVerifier integration ready for Pass 5 plug-in.
+
+## Gap Closure Phases (from v1.3-MILESTONE-AUDIT.md)
+
+### Phase 19: Wire Observability
+**Goal**: Instantiate and wire EmbeddingRegistry, MetricsCollector, and publish_status — connect observability components that were defined but never called.
+**Depends on**: Phase 14 (EmbeddingRegistry, MetricsCollector), Phase 15 (publish_status)
+**Requirements**: PERSIST-08, OBS-01, TUI-02
+**Gap Closure**: Closes G1 (EmbeddingRegistry never instantiated), G2 (MetricsCollector dead code), G4 (publish_status never called), G5 (consolidation→registry gap)
+**Success Criteria** (what must be TRUE):
+  1. `EmbeddingRegistry` instantiated in pipeline init; `write_entry()` called on successful Chroma writes; `audit.embedding_registry` has rows
+  2. `MetricsCollector` instantiated in pipeline init; metrics emitted at stage boundaries to `audit.pipeline_metrics` table
+  3. `publish_status()` called at mission start, vampire stats, batch complete, and consolidation results; `sheppard:status` channel has events
+  4. Consolidation engine writes embedding registry entries when atoms become golden
+**Plans**: TBD
+
+### Phase 20: Wire Confidence
+**Goal**: Wire `compute_confidence()` into the main condensation path so atoms use computed confidence instead of LLM self-assessed values.
+**Depends on**: Phase 16 (compute_confidence function), Phase 14 (idempotency ensures safe re-computation)
+**Requirements**: EXTRACT-05
+**Gap Closure**: Closes G3 (compute_confidence not wired to main condensation path)
+**Success Criteria** (what must be TRUE):
+  1. Main condensation path calls `compute_confidence()` after `normalize_atom_schema()` — replaces raw `atom_dict.get('confidence', 0.7)`
+  2. Extracted atoms have confidence in 0.25-0.55 range (not 0.7-0.95 LLM self-assessed)
+  3. Confidence computed from measurable signals: source_reliability × 0.20 + corroboration × 0.05 (max 0.20) + quality × 0.10
+**Plans**: TBD
+
+### Phase 21: DLQ Consumer
+**Goal**: Build a background worker that reads `audit.dead_letter_queue` and re-processes failed extraction/condensation stages.
+**Depends on**: Phase 14 (dead_letter_queue table), Phase 18 (retry loop with error feedback)
+**Requirements**: FIRE-04 (pipeline-level)
+**Gap Closure**: Closes W1 (DLQ is write-only for extraction/condensation stages)
+**Success Criteria** (what must be TRUE):
+  1. Background worker reads `audit.dead_letter_queue` WHERE `status='pending'` AND `stage IN ('extraction', 'condensation')`
+  2. Failed extractions re-enqueued to `queue:scraping` for re-processing
+  3. After max retries, DLQ entries marked `status='abandoned'` with final error logged
+  4. No stale DLQ entries accumulate indefinitely
+**Plans**: TBD

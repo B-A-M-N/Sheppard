@@ -10,7 +10,8 @@ Architectural Shift:
 import asyncio
 import traceback
 from datetime import datetime
-from src.utils.distillation_pipeline import ExtractionError
+from src.utils.distillation_pipeline import compute_confidence, ExtractionError
+from src.utils.source_classifier import classify_source_quality
 from src.utils.normalize_atom_schema import normalize_atom_schema
 from src.research.state_machine import transition_source_status
 from src.utils.pipeline_metrics import MetricsCollector
@@ -66,6 +67,26 @@ class DistillationPipeline:
         self.adapter = adapter
         self._semaphore = asyncio.Semaphore(2)
         self.consolidation_engine = ConsolidationEngine(adapter, ollama) if adapter and ollama else None
+
+        # PERSIST-08: Embedding registry
+        # OBS-01: Pipeline metrics
+        if adapter:
+            from src.memory.embedding_registry import EmbeddingRegistry
+            from src.utils.pipeline_metrics import MetricsCollector
+            from src.config.settings import settings
+
+            embed_model = getattr(settings, 'OLLAMA_EMBED_MODEL', 'mxbai-embed-large:latest')
+            embed_host = getattr(settings, 'OLLAMA_EMBED_HOST', 'http://localhost:11434')
+            embed_dim = getattr(settings, 'EMBEDDING_DIMENSION', 1024)
+
+            self.embedding_registry = EmbeddingRegistry(adapter.pg, embed_model, embed_host, embed_dim)
+            self.metrics = MetricsCollector(adapter.pg)
+            # Pass registry to consolidation engine
+            if self.consolidation_engine:
+                self.consolidation_engine.embedding_registry = self.embedding_registry
+        else:
+            self.embedding_registry = None
+            self.metrics = None
 
     async def _check_source_already_extracted(
         self, source_id: str, content_hash: str | None
@@ -168,15 +189,44 @@ class DistillationPipeline:
                         logger.info(f"[Consolidation] {consolidation_summary['golden_atoms_created']} golden atoms created, "
                                     f"{consolidation_summary['atoms_obsoleted']} atoms obsoleted")
 
+                        if self.metrics:
+                            self.metrics.record(run_id, "golden_atoms", float(consolidation_summary['golden_atoms_created']), {"mission_id": mission_id})
+                            self.metrics.record(run_id, "atoms_obsoleted", float(consolidation_summary['atoms_obsoleted']), {"mission_id": mission_id})
+
                         contradiction_summary = await self.consolidation_engine.resolve_contradictions(mission_id)
                         logger.info(f"[Contradictions] {contradiction_summary['verified_contradictions']} verified, "
                                     f"{contradiction_summary['resolved']} resolved")
+
+                        if self.metrics:
+                            self.metrics.record(run_id, "contradictions_verified", float(contradiction_summary['verified_contradictions']), {"mission_id": mission_id})
+                            self.metrics.record(run_id, "contradictions_resolved", float(contradiction_summary['resolved']), {"mission_id": mission_id})
                     except Exception as e:
                         logger.warning(f"[Consolidation] Consolidation failed: {e}")
+                        if self.metrics:
+                            self.metrics.record(run_id, "consolidation_error", 1.0, {"error": str(e)})
+
+                # Record extraction metrics
+                if self.metrics:
+                    self.metrics.record(run_id, "atoms_extracted", float(self._total_atoms), {"mission_id": mission_id})
+                    self.metrics.record(run_id, "sources_processed", float(len(sources)), {"mission_id": mission_id})
+                    self.metrics.flush()
+
+                # TUI-02: Publish batch complete event
+                try:
+                    from src.utils.status_pubsub import publish_status
+                    redis_client = self.adapter.redis_runtime.client if hasattr(self.adapter.redis_runtime, 'client') else self.adapter.redis_runtime
+                    await publish_status(redis_client, "distillery", "batch_complete", {
+                        "atoms": self._total_atoms, "mission_id": mission_id[:8],
+                    })
+                except Exception:
+                    pass
 
             except Exception as e:
                 tb = traceback.format_exc()
                 logger.error(f"[Distillery] Distillation pipeline failed: {e}\n{tb}")
+                if self.metrics:
+                    self.metrics.record(run_id, "pipeline_error", 1.0, {"error_class": type(e).__name__})
+                    self.metrics.flush()
                 if run_id:
                     try:
                         await self.adapter.pg.update_row("audit.pipeline_runs", "run_id", {
@@ -248,6 +298,11 @@ class DistillationPipeline:
 
                 # 3. Storage & Indexing
                 atoms_this_source = 0
+
+                # EXTRACT-05: Compute source type for confidence scoring
+                content_for_classification = ref.get("inline_text", "")[:4000]
+                source_type = classify_source_quality(s.get('url', ''), content_for_classification)
+
                 for atom_dict in atoms_data:
                     # Guard: ensure atom_dict is actually a dict before calling .get()
                     if not isinstance(atom_dict, dict):
@@ -272,7 +327,7 @@ class DistillationPipeline:
                         title=content_value[:50] + "...",
                         statement=content_value,
                         summary=content_value,
-                        confidence=atom_dict.get('confidence', 0.7),
+                        confidence=compute_confidence(normalized, source_type, atoms_data),
                         importance=0.8 if atom_dict.get('atom_type', atom_dict.get('type')) == 'contradiction' else 0.5,
                         lineage=AtomLineage(
                             mission_id=mission_id,
