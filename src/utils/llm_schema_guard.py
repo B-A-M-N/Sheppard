@@ -244,10 +244,14 @@ def _normalize_critique_item(item: Any) -> Optional[Dict[str, Any]]:
     return result
 
 
+from src.utils.normalize_atom_schema import normalize_atom_schema
+
+
 def _normalize_single_atom(item: Any) -> Optional[Dict[str, Any]]:
     """Convert a single item into a KnowledgeUnit dict. Returns {} if unusable."""
     if isinstance(item, dict):
-        content = item.get('content', item.get('fact', item.get('text', item.get('statement', ''))))
+        item = normalize_atom_schema(item)
+        content = item.get('text', '')
         if not content or not isinstance(content, str):
             return None
         content = content.strip()
@@ -283,7 +287,8 @@ def _normalize_single_atom_fallback(item: Any) -> Optional[Dict[str, Any]]:
     """Relaxed normalization for fallback mode — shorter sentences allowed."""
     if not isinstance(item, dict):
         return None
-    content = item.get('content', item.get('fact', item.get('text', item.get('statement', ''))))
+    item = normalize_atom_schema(item)
+    content = item.get('text', '')
     if not content or not isinstance(content, str):
         return None
     content = content.strip()

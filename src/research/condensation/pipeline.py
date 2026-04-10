@@ -11,6 +11,7 @@ import asyncio
 import traceback
 from datetime import datetime
 from src.utils.distillation_pipeline import ExtractionError
+from src.utils.normalize_atom_schema import normalize_atom_schema
 import json
 import logging
 import math
@@ -172,9 +173,9 @@ class DistillationPipeline:
                         logger.warning(f"[Distillery] Skipping non-dict atom: {type(atom_dict).__name__} = {repr(atom_dict)[:100]}")
                         continue
 
-                    # Additional guard: ensure content field exists and is a string
-                    # KnowledgeUnit uses 'text', legacy atoms use 'content'
-                    content_value = atom_dict.get('text', atom_dict.get('content', ''))
+                    # Additional guard: ensure text field exists and is a string
+                    normalized = normalize_atom_schema(atom_dict)
+                    content_value = normalized.get('text', '')
                     if not content_value or not isinstance(content_value, str):
                         logger.warning(f"[Distillery] Skipping atom with invalid content field: {type(content_value).__name__}")
                         continue
@@ -200,7 +201,7 @@ class DistillationPipeline:
                     )
 
                     # Determine appropriate chunk(s) for this atom
-                    atom_content = atom_dict.get('text', atom_dict.get('content', '')).strip()
+                    atom_content = normalized.get('text', '').strip()
                     matched_chunk_ids = []
                     if atom_content:
                         for chunk_id, chunk_text in chunk_infos:
@@ -240,12 +241,35 @@ class DistillationPipeline:
                     )
                     # Notify budget that a source has been condensed
                     await self.budget.record_source_condensed(mission_id)
-                else:
-                    # No valid atoms extracted — reject source explicitly
+                elif len(atoms_data) > 0:
+                    # Atoms were extracted but all failed quality gates → filtered_out
                     await self.adapter.pg.update_row(
                         "corpus.sources",
                         "source_id",
-                        {"source_id": source_id, "status": "rejected"}
+                        {
+                            "source_id": source_id,
+                            "status": "filtered_out",
+                            "filter_metadata": {
+                                "reason": "low_quality",
+                                "raw_atoms_count": len(atoms_data),
+                                "passed_atoms_count": 0,
+                                "details": "All extracted atoms failed quality gates (too short, low score, duplicate, or semantic drift)",
+                            },
+                        }
+                    )
+                else:
+                    # Zero atoms extracted — extraction failed or content was garbage
+                    await self.adapter.pg.update_row(
+                        "corpus.sources",
+                        "source_id",
+                        {
+                            "source_id": source_id,
+                            "status": "rejected",
+                            "filter_metadata": {
+                                "reason": "no_atoms",
+                                "raw_atoms_count": 0,
+                            },
+                        }
                     )
             except ExtractionError:
                 # LLM call failed — mark source as error, audit row written by caller

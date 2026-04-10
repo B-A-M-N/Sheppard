@@ -46,6 +46,7 @@ from src.utils.llm_schemas import (
     _COMPRESS_PROMPT,
 )
 from src.utils.entity_filter import _extract_entities_from_atoms
+from src.utils.normalize_atom_schema import normalize_atom_schema
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +91,8 @@ async def llm_compress_to_claims(
     for item in result:
         if not isinstance(item, dict):
             continue
-        content = item.get('content', '').strip()
+        norm = normalize_atom_schema(item)
+        content = norm.get('text', '').strip()
         if not content or len(content) < 10:
             continue
         if not content.endswith(('.', '!', '?')):
@@ -172,7 +174,8 @@ async def _atomize_fragments(llm_client, raw_atoms, topic):
     fragments = []
 
     for atom in raw_atoms:
-        content = atom.get('text', atom.get('content', ''))
+        norm = normalize_atom_schema(atom)
+        content = norm.get('text', '')
         quality = _classify_atom_quality(content)
         if quality == 'VALID' and not content.startswith('http'):
             valid_atoms.append(atom)
@@ -183,7 +186,7 @@ async def _atomize_fragments(llm_client, raw_atoms, topic):
         return valid_atoms
 
     fragment_list = "\n".join(
-        f"{i+1}. {a.get('text', a.get('content', ''))}" for i, a in enumerate(fragments[:15])
+        f"{i+1}. {normalize_atom_schema(a).get('text', '')}" for i, a in enumerate(fragments[:15])
     )
 
     prompt = f"""MODE: EXTRACT_ATOMS
@@ -214,7 +217,8 @@ FRAGMENTS:
 
     result = list(valid_atoms)
     for rw in rewritten:
-        content = rw.get('content', rw.get('text', '')).strip()
+        norm = normalize_atom_schema(rw)
+        content = norm.get('text', '').strip()
         if len(content) >= 30:
             result.append(_make_unit(text=content, confidence=0.6, atom_type='claim'))
 
@@ -227,7 +231,7 @@ async def _critique_and_repair(llm_client, atoms):
         return []
 
     atom_list = "\n".join(
-        f"{i+1}. [{a.get('atom_type', a.get('type', 'claim'))}] {a.get('text', a.get('content', ''))}"
+        f"{i+1}. [{a.get('atom_type', a.get('type', 'claim'))}] {normalize_atom_schema(a).get('text', '')}"
         for i, a in enumerate(atoms[:20])
     )
 
@@ -285,7 +289,7 @@ ATOMS TO REVIEW:
 
         if valid and 0 < index <= len(atoms):
             orig_atom = atoms[index - 1]
-            content = orig_atom.get('text', orig_atom.get('content', ''))
+            content = normalize_atom_schema(orig_atom).get('text', '')
             key = _content_key(content)
             if key not in seen_content:
                 seen_content.add(key)
@@ -356,7 +360,11 @@ async def extract_technical_atoms(
         if score_low > 0 or score_high > 0:
             logger.info(f"[Distillery] Gate 0b: Embedding scores — low={score_low:.2f}, high={score_high:.2f}")
     except Exception as e:
-        logger.debug(f"[Distillery] Gate 0b embedding check failed, falling back to string: {e}")
+        logger.warning(
+            f"[Distillery] Gate 0b embedding check failed for source "
+            f"(topic={topic}, url={source_url[:60]}): {e}. "
+            f"Falling back to string quality check."
+        )
 
     try:
         # --- PASS 1: Extraction ---
@@ -376,7 +384,7 @@ async def extract_technical_atoms(
         if quality_report['VALID'] == 0 and len(raw_atoms) > 0:
             logger.warning(
                 f"[Distillery] FILTER WARNING: Zero valid atoms from {len(raw_atoms)} extracted. "
-                f"Sample: {raw_atoms[0].get('text', raw_atoms[0].get('content', ''))[:100]!r}"
+                f"Sample: {normalize_atom_schema(raw_atoms[0]).get('text', '')[:100]!r}"
             )
 
         # --- PASS 2: Conditional Atomization ---
