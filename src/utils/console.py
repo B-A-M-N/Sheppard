@@ -3,6 +3,8 @@ Enhanced console implementation for the chat system.
 """
 
 import logging
+import re
+import threading
 from typing import Optional, Dict, Any, List
 from rich.console import Console
 from rich.theme import Theme
@@ -60,7 +62,10 @@ SHEPPARD_THEME = {
 
 class SheppardConsole(Console):
     """Enhanced console with Sheppard-specific styling and functionality."""
-    
+
+    _quiet = False
+    _quiet_lock = threading.Lock()
+
     def __init__(self, **kwargs):
         """Initialize enhanced console with theme."""
         self.theme = Theme(SHEPPARD_THEME)
@@ -72,6 +77,24 @@ class SheppardConsole(Console):
             **kwargs
         )
         self._progress = None
+
+    @classmethod
+    def set_quiet(cls, value: bool):
+        """Enable/disable quiet mode. When True, print() calls become logger.info()."""
+        with cls._quiet_lock:
+            cls._quiet = value
+
+    def print(self, *args, **kwargs):
+        """Override to demote to logger.info() when quiet mode is active."""
+        with self._quiet_lock:
+            quiet = self._quiet
+        if quiet:
+            text = " ".join(str(a) for a in args)
+            # Strip Rich markup for log readability
+            clean = re.sub(r'\[/?[a-z][\w\s"#]*\]', '', text)
+            logging.getLogger("console.bridge").info(clean)
+        else:
+            super().print(*args, **kwargs)
     
     def display_welcome(self, version: str = "0.2.0"):
         """Display a stylish welcome message."""

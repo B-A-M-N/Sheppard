@@ -350,6 +350,7 @@ class SystemManager:
     async def _vampire_loop(self, vampire_id: int):
         """Greedy consumer loop: Eats URLs from Redis and stores technical ore."""
         logger.info(f"[Vampire-{vampire_id}] Unleashed.")
+        console.set_quiet(True)
         _dequeued = 0
         _scraped = 0
         _skipped_lock = 0
@@ -484,6 +485,7 @@ class SystemManager:
                         console.print(f"[bold red][Vampire-{vampire_id}][/bold red] Stats: dequeued={_dequeued}, scraped={_scraped}, failed={_failed}, filtered={_skipped_filtered}, skipped_lock={_skipped_lock}, skipped_existing={_skipped_existing}")
                 
             except asyncio.CancelledError:
+                console.set_quiet(False)
                 break
             except Exception as e:
                 # Resolve job reference safely (may not exist if dequeue itself failed)
@@ -527,6 +529,7 @@ class SystemManager:
     async def _crawl_and_store(self, mission_id: str, topic_name: str, query: str) -> None:
         """Background task: adaptive frontier research mission."""
         from src.utils.console import console
+        console.set_quiet(True)
         try:
             # Set mission status to active at start of execution
             await self.adapter.update_mission_status(mission_id, "active")
@@ -545,6 +548,7 @@ class SystemManager:
             logger.error(f"[System] Mission error: {e}", exc_info=True)
             await self.adapter.update_mission_status(mission_id, "failed", stop_reason=str(e))
         finally:
+            console.set_quiet(False)
             self._crawl_tasks.pop(mission_id, None)
             self.active_frontiers.pop(mission_id, None)
 
@@ -582,6 +586,7 @@ class SystemManager:
         return await self.synthesis_service.generate_master_brief(mission_id)
 
     async def _condensation_callback(self, mission_id: str, priority: CondensationPriority) -> None:
+        console.set_quiet(True)
         try:
             console.print(f"[bold magenta][Distillery][/bold magenta] Budget triggered {priority.value} condensation for mission {mission_id[:8]}")
             if not self.condenser:
@@ -598,6 +603,7 @@ class SystemManager:
             logger.error(f"[Distillery] Condensation failed for mission {mission_id[:8]}: {e}\n{tb}")
             console.print(f"[bold red][Distillery][/bold red] ERROR for {mission_id[:8]}: {e}")
         finally:
+            console.set_quiet(False)
             # Always reset budget flag so it can retry
             if self.budget:
                 budget = self.budget.get_status(mission_id)

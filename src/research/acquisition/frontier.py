@@ -91,6 +91,7 @@ class AdaptiveFrontier:
 
     async def run(self):
         """Metabolic Control Loop."""
+        console.set_quiet(True)
         # 1. Load existing state if it exists
         await self._load_checkpoint()
 
@@ -143,10 +144,10 @@ class AdaptiveFrontier:
                     break
 
             console.print(f"\n[bold yellow][Frontier][/bold yellow] Dispatching search for: [white]{node.concept}[/white] ({mode})")
-            
+
             # 4. Dynamic Query Engineering
             queries = await self._engineer_queries(node, mode)
-            
+
             # 5. Execute Discovery Batch (Producer Mode)
             round_yield = 0
             for q in queries:
@@ -159,7 +160,7 @@ class AdaptiveFrontier:
                 )
                 round_yield += enqueued
                 self.total_ingested += enqueued
-                
+
             console.print(f"[bold blue][Frontier][/bold blue] Enqueued {round_yield} new targets for vampires.")
 
             # 6. Thermal Management & Zero-Yield Detection
@@ -208,7 +209,7 @@ class AdaptiveFrontier:
 
             if round_yield >= 5:
                 await self._respawn_nodes(node)
-            
+
             # Small throttle between nodes to let vampires breathe
             await asyncio.sleep(5)
 
