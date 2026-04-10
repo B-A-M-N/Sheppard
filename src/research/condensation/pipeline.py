@@ -12,6 +12,7 @@ import traceback
 from datetime import datetime
 from src.utils.distillation_pipeline import ExtractionError
 from src.utils.normalize_atom_schema import normalize_atom_schema
+from src.research.state_machine import transition_source_status
 import json
 import logging
 import math
@@ -179,13 +180,12 @@ class DistillationPipeline:
             # Get the content
             text_ref = s.get("canonical_text_ref")
             if not text_ref:
-                # Mark as failed/skipped if no text ref
-                await self.adapter.pg.update_row("corpus.sources", "source_id", {"source_id": source_id, "status": "error"})
+                await transition_source_status(self.adapter, source_id, "error", current_status="fetched")
                 continue
 
             ref = await self.adapter.get_text_ref(text_ref)
             if not ref or not ref.get("inline_text"):
-                await self.adapter.pg.update_row("corpus.sources", "source_id", {"source_id": source_id, "status": "error"})
+                await transition_source_status(self.adapter, source_id, "error", current_status="fetched")
                 continue
 
             content = ref["inline_text"]
@@ -194,7 +194,7 @@ class DistillationPipeline:
             chunks = await self.adapter.list_chunks_for_source(source_id)
             if not chunks:
                 logger.error(f"[Distillery] No chunks found for source {source_id}, cannot bind evidence")
-                await self.adapter.pg.update_row("corpus.sources", "source_id", {"source_id": source_id, "status": "error"})
+                await transition_source_status(self.adapter, source_id, "error", current_status="fetched")
                 continue
 
             # Build quick access to chunk texts
@@ -280,21 +280,21 @@ class DistillationPipeline:
 
                 # 5. Mark individual source as condensed only if atoms were stored
                 if atoms_this_source > 0:
-                    await self.adapter.pg.update_row(
-                        "corpus.sources",
-                        "source_id",
-                        {"source_id": source_id, "status": "condensed"}
+                    await transition_source_status(
+                        self.adapter, source_id, "condensed", current_status="extracted"
                     )
                     # Notify budget that a source has been condensed
                     await self.budget.record_source_condensed(mission_id)
                 elif len(atoms_data) > 0:
                     # Atoms were extracted but all failed quality gates → filtered_out
+                    await transition_source_status(
+                        self.adapter, source_id, "filtered_out", current_status="extracted"
+                    )
                     await self.adapter.pg.update_row(
                         "corpus.sources",
                         "source_id",
                         {
                             "source_id": source_id,
-                            "status": "filtered_out",
                             "filter_metadata": {
                                 "reason": "low_quality",
                                 "raw_atoms_count": len(atoms_data),
@@ -305,12 +305,14 @@ class DistillationPipeline:
                     )
                 else:
                     # Zero atoms extracted — extraction failed or content was garbage
+                    await transition_source_status(
+                        self.adapter, source_id, "rejected", current_status="extracted"
+                    )
                     await self.adapter.pg.update_row(
                         "corpus.sources",
                         "source_id",
                         {
                             "source_id": source_id,
-                            "status": "rejected",
                             "filter_metadata": {
                                 "reason": "no_atoms",
                                 "raw_atoms_count": 0,
@@ -320,13 +322,17 @@ class DistillationPipeline:
             except ExtractionError:
                 # LLM call failed — mark source as error, audit row written by caller
                 console.print(f"[bold red][Distillery] Extraction failed for {source_id}[/bold red]")
-                await self.adapter.pg.update_row("corpus.sources", "source_id", {"source_id": source_id, "status": "error"})
+                await transition_source_status(
+                    self.adapter, source_id, "error", current_status="fetched"
+                )
             except Exception as e:
                 tb = traceback.format_exc()
                 console.print(f"[bold red][Distillery] Smelting failed for {source_id}: {e}[/bold red]")
                 console.print(f"[dim]{tb}[/dim]")
                 logger.error(f"[Distillery] Smelting failed for {source_id}: {e}\n{tb}")
-                await self.adapter.pg.update_row("corpus.sources", "source_id", {"source_id": source_id, "status": "error"})
+                await transition_source_status(
+                    self.adapter, source_id, "error", current_status="fetched"
+                )
 
         console.print(f"[bold green][Refinery][/bold green] Batch complete. Smelted technical atoms: [white]{self._total_atoms}[/white]")
 
