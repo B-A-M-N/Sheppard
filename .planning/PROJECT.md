@@ -1,6 +1,6 @@
 # Sheppard V3 — Project Definition
 
-**Current Milestone:** none (accepting new milestone)
+**Current Milestone:** v1.3 (Persistence, Reliability & Extraction Quality)
 **Archived Milestones:** v1.0 (Truth Contract), v1.1 (Performance & Observability), v1.2 (Derived Insight & Report Excellence)
 
 ---
@@ -135,10 +135,31 @@ The system is **production-grade, truth-safe, and fully observable**.
 
 ---
 
+## Current Milestone: v1.3 — Persistence, Reliability & Extraction Quality
+
+**Goal:** Eliminate silent data loss, stop terminal flooding, and implement complete atom lifecycle (extraction → consolidation → contradiction resolution).
+
+**Target capabilities:**
+1. **Pipeline audit trail** — Every extraction/condensation run logged; dead-letter queue for failures
+2. **Transaction-safe writes** — All multi-table operations atomic
+3. **Clean terminal UX** — Background tasks don't flood the chat; structured status via Redis pub/sub
+4. **Granular extraction** — LLM produces well-sized atoms with explicit granularity control
+5. **Atom consolidation** — Similar facts merged into Golden Atoms
+6. **Contradiction resolution** — Conflicting claims detected and adjudicated
+7. **Firecrawl structured extraction** — Two-stage hybrid (Firecrawl parse → LLM distill)
+8. **JSON reliability** — Grammar-constrained decoding + validation + repair loop for 8B models
+
+**Design constraints:**
+- Preserve all existing truth contract invariants (multi-pass validation, drift detection, scoring)
+- New code uses V3 adapter exclusively (no V2 MemoryManager additions)
+- Derived claims remain ephemeral (architectural decision, not changing)
+- No new `console.print()` in background tasks
+
+---
+
 ## Next Milestone
 
-No active milestone. Use `/gsd:new-milestone` to define the next set of work.
-- Observable scaling gains (metrics, logs)
+No active milestone beyond v1.3. Use `/gsd:new-milestone` to define the next set of work.
 
 ---
 
@@ -169,10 +190,30 @@ These phases were planned in earlier roadmap and remain to be done:
 
 ---
 
+## Evolution
+
+This document evolves at phase transitions and milestone boundaries.
+
+**After each phase transition** (via `/gsd-transition`):
+1. Requirements invalidated? → Move to Out of Scope with reason
+2. Requirements validated? → Move to Validated with phase reference
+3. New requirements emerged? → Add to Active
+4. Decisions to log? → Add to Key Decisions
+5. "What This Is" still accurate? → Update if drifted
+
+**After each milestone** (via `/gsd-complete-milestone`):
+1. Full review of all sections
+2. Core Value check — still the right priority?
+3. Audit Out of Scope — reasons still valid?
+4. Update Context with current state
+
+---
+
 ## Modification History
 
 | Version | Date | Notes |
 |---------|------|-------|
 | v1.0 | 2026-03-30 | Truth contract enforced end-to-end; milestone archived |
 | v1.1 | 2026-03-31 | Performance + Observability shipped; known PERF-02 limitation documented |
-| v1.2 | (planned) | Deployment Scaling & Throughput Realization |
+| v1.2 | 2026-04-01 | Derived insight & report excellence shipped |
+| v1.3 | 2026-04-10 | Persistence, Reliability & Extraction Quality (current) |
