@@ -29,74 +29,35 @@ class WrongSchemaError(Exception):
 # Schema-guarded LLM calls
 # ──────────────────────────────────────────────────────────────────────
 
+import asyncio
+
+
 async def _call_llm_with_schema_guard(
     llm_client, prompt: str, expected_schema: str,
     temperature: float, max_tokens: int,
     error_prefix: str,
     retry_temp: float = 0.05,
-    format: Optional[Dict[str, Any]] = None
-) -> List[Dict[str, Any]]:
+    format: Optional[Dict[str, Any]] = None,
+    max_retries: int = 3,
+) -> Optional[List[Dict[str, Any]]]:
     """
-    Generic LLM call with schema guard and automatic retry.
-    Detects wrong schema (e.g. critique instead of atoms) and retries.
+    Generic LLM call with schema guard, Pydantic validation, and retry loop.
 
-    Args:
-        format: Ollama JSON Schema for grammar-constrained decoding.
-            When passed, Ollama guarantees structurally valid JSON output.
+    Returns:
+        List of validated atoms on success
+        None on LLM failure (triggers ExtractionError in caller)
+        [] on empty/zero-yield (valid: no atoms found)
     """
     messages = [{"role": "user", "content": prompt}]
-    response_content = ""
+    validation_error = None  # Accumulated validation error for retry feedback
 
-    try:
-        async for chunk in llm_client.chat(
-            messages=messages, stream=True,
-            temperature=temperature, max_tokens=max_tokens,
-            format=format
-        ):
-            if hasattr(chunk, 'content') and chunk.content:
-                response_content += chunk.content
-            elif isinstance(chunk, dict) and 'content' in chunk:
-                response_content += chunk['content']
-
-        if not response_content or len(response_content.strip()) < 10:
-            return []
-
-        # Schema guard: detect wrong mode BEFORE attempting parse
-        stripped = response_content.strip()
-        wrong_schemas = {'atoms': 'critique', 'critique': 'atoms', 'claims': 'critique'}
-        wrong_key = wrong_schemas.get(expected_schema)
-        if wrong_key and stripped.startswith(f'{{"{wrong_key}"'):
-            logger.warning(f"[Distillery] {error_prefix}: Model returned '{wrong_key}' instead of '{expected_schema}' — mode contamination")
-            return []
+    for attempt in range(max_retries):
+        response_content = ""
 
         try:
-            atoms = _extract_atoms_from_llm_response(response_content, expected_schema=expected_schema)
-        except WrongSchemaError:
-            logger.info(f"[Distillery] {error_prefix}: Wrong schema detected — retrying with strict schema guard")
-            atoms = []
-
-        # Retry once with stricter settings if zero yield
-        if not atoms:
-            logger.info(f"[Distillery] {error_prefix}: Zero atoms — retrying with stricter prompt")
-            strict_prompt = f"""MODE: {expected_schema.upper()}
-
-Return ONLY a JSON object with the key "{expected_schema}". NOTHING ELSE.
-
-If {expected_schema == 'atoms':
-    '{{"atoms": [{{"type": "claim", "content": "A complete factual statement with subject and verb.", "confidence": 0.8}}]}}'
-elif expected_schema == 'claims':
-    '{{"claims": [{{"content": "A factual claim.", "confidence": 0.7}}]}}'
-else:
-    '{{"critique": [{{"index": 1, "valid": true}}]}}'}
-
-DOCUMENT (condensed):
-{prompt[-2000:] if 'DOCUMENT:' in prompt else prompt[:1500]}
-"""
-            messages2 = [{"role": "user", "content": strict_prompt}]
-            response_content = ""
             async for chunk in llm_client.chat(
-                messages=messages2, stream=True,
-                temperature=retry_temp, max_tokens=max_tokens,
+                messages=messages, stream=True,
+                temperature=temperature, max_tokens=max_tokens,
                 format=format
             ):
                 if hasattr(chunk, 'content') and chunk.content:
@@ -104,18 +65,103 @@ DOCUMENT (condensed):
                 elif isinstance(chunk, dict) and 'content' in chunk:
                     response_content += chunk['content']
 
-            if response_content and len(response_content.strip()) >= 10:
-                return _extract_atoms_from_llm_response(response_content, expected_schema=expected_schema)
+            if not response_content or len(response_content.strip()) < 10:
+                return []
 
-        return atoms
+            # Schema guard: detect wrong mode BEFORE attempting parse
+            stripped = response_content.strip()
+            wrong_schemas = {'atoms': 'critique', 'critique': 'atoms', 'claims': 'critique'}
+            wrong_key = wrong_schemas.get(expected_schema)
+            if wrong_key and stripped.startswith(f'{{"{wrong_key}"'):
+                logger.warning(f"[Distillery] {error_prefix}: Model returned '{wrong_key}' instead of '{expected_schema}' — mode contamination")
+                if attempt < max_retries - 1:
+                    backoff = 2 ** attempt
+                    logger.info(f"[Distillery] {error_prefix}: Retrying in {backoff}s (attempt {attempt+1}/{max_retries})")
+                    messages.append({"role": "assistant", "content": response_content})
+                    messages.append({"role": "user", "content": f"Previous output used wrong schema '{wrong_key}'. Return ONLY JSON with key '{expected_schema}'."})
+                    await asyncio.sleep(backoff)
+                    continue
+                return []
 
-    except TypeError as e:
-        # "unhashable type: 'dict'" — likely Ollama internal error with schema dict
-        logger.warning(f"[Distillery] {error_prefix}: Type error (likely dict hashing in Ollama): {e}")
-        return None
-    except Exception as e:
-        logger.error(f"[Distillery] {error_prefix} LLM call failed: {e}")
-        return None
+            try:
+                atoms = _extract_atoms_from_llm_response(response_content, expected_schema=expected_schema)
+            except WrongSchemaError:
+                if attempt < max_retries - 1:
+                    backoff = 2 ** attempt
+                    logger.info(f"[Distillery] {error_prefix}: Wrong schema — retrying (attempt {attempt+1}/{max_retries})")
+                    messages.append({"role": "assistant", "content": response_content})
+                    messages.append({"role": "user", "content": f"Previous output used wrong schema. Return ONLY JSON with key '{expected_schema}'."})
+                    await asyncio.sleep(backoff)
+                    continue
+                return []
+
+            # Retry once with stricter settings if zero yield (existing behavior)
+            if not atoms:
+                strict_prompt = f"""MODE: {expected_schema.upper()}
+
+Return ONLY a JSON object with the key "{expected_schema}". NOTHING ELSE.
+
+{prompt[-2000:] if 'DOCUMENT:' in prompt else prompt[:1500]}
+"""
+                messages2 = [{"role": "user", "content": strict_prompt}]
+                response_content = ""
+                async for chunk in llm_client.chat(
+                    messages=messages2, stream=True,
+                    temperature=retry_temp, max_tokens=max_tokens,
+                    format=format
+                ):
+                    if hasattr(chunk, 'content') and chunk.content:
+                        response_content += chunk.content
+                    elif isinstance(chunk, dict) and 'content' in chunk:
+                        response_content += chunk['content']
+
+                if response_content and len(response_content.strip()) >= 10:
+                    return _extract_atoms_from_llm_response(response_content, expected_schema=expected_schema)
+
+            return atoms
+
+        except TypeError as e:
+            # "unhashable type: 'dict'" — likely Ollama internal error with schema dict
+            logger.warning(f"[Distillery] {error_prefix}: Type error (attempt {attempt+1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2 ** attempt)
+                continue
+            return None
+        except Exception as e:
+            logger.error(f"[Distillery] {error_prefix} LLM call failed (attempt {attempt+1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2 ** attempt)
+                continue
+            return None
+
+    return None  # All retries exhausted
+
+
+# ──────────────────────────────────────────────────────────────────────
+# FIRE-03: Pydantic validation layer
+# ──────────────────────────────────────────────────────────────────────
+
+def _validate_extracted_atoms(atoms: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Validate extracted atoms against Pydantic schema.
+    Filters out atoms that violate content constraints (too short, too long, wrong type).
+    Returns only validated atoms.
+    """
+    try:
+        from src.utils.atom_validator import AtomValidator
+    except ImportError:
+        return atoms  # Graceful degradation if validator not available
+
+    valid = []
+    for atom in atoms:
+        content = atom.get('content', atom.get('text', ''))
+        atom_type = atom.get('type', 'claim')
+        try:
+            AtomValidator(type=atom_type, content=content)
+            valid.append(atom)
+        except Exception:
+            logger.debug(f"[Distillery] Atom filtered by Pydantic validation: {content[:50]}...")
+    return valid
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -149,7 +195,11 @@ def _extract_atoms_from_llm_response(raw_text: str, expected_schema: str = 'atom
             raise WrongSchemaError(f"Wrong schema: expected {required_keys}, got {actual_keys}")
         atoms = _normalize_atom_list(parsed, expected_schema=expected_schema)
         if atoms:
-            return atoms
+            # FIRE-03: Pydantic validation after parse
+            validated = _validate_extracted_atoms(atoms)
+            if validated:
+                return validated
+            # If validation filters all atoms, fall through to repair
     except WrongSchemaError:
         raise
     except json.JSONDecodeError:
