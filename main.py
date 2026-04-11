@@ -337,7 +337,7 @@ async def run_tui(tui: TUI):
     # Focus the chat input
     tui.layout.focus(tui.chat_input.buffer)
 
-    result = await app.run_async_asyncio()
+    result = await app.run_async()
     if result == "exit":
         await system_manager.cleanup()
 

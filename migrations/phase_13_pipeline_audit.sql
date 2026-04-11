@@ -97,7 +97,7 @@ COMMENT ON COLUMN corpus.sources.status IS
 -- 1. Verify no V2 code reads distillation_log
 -- 2. Migrate any needed historical data to audit.pipeline_runs
 -- 3. DROP TABLE distillation_log
-COMMENT ON TABLE distillation_log IS
-    'DEPRECATED (v1.3.0-phase13): Superseded by audit.pipeline_runs. Do not use for new writes.';
+COMMENT ON TABLE audit.pipeline_runs IS
+    'Pipeline execution audit log. Replaces V2 distillation_log.';
 
 -- Migration complete.

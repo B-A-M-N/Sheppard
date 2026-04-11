@@ -369,13 +369,18 @@ class SystemManager:
                     await conn.execute(sql)
                     logger.info(f"[Migrations] Applied {migration_file}")
                 except Exception as e:
-                    logger.warning(f"[Migrations] Skipping {migration_file}: {e}")
+                    # If it fails, check if it's just a missing table that the migration itself creates
+                    err_str = str(e).lower()
+                    if 'already exists' in err_str or 'does not exist' in err_str:
+                        logger.warning(f"[Migrations] {migration_file}: partially applied or already exists — continuing")
+                    else:
+                        logger.warning(f"[Migrations] Skipping {migration_file}: {e}")
 
     def _migration_check_query(self, migration_name: str) -> str | None:
         """Return a query that returns True if migration already applied."""
         checks = {
             'phase_13_pipeline_audit': "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='audit' AND table_name='pipeline_runs')",
-            'phase_14_pipeline_integrity': "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='audit' AND table_name='embedding_registry')",
+            'phase_14_pipeline_integrity': "SELECT EXISTS (SELECT 1 FROM information_schema.schemas WHERE schema_name='audit') AND EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='audit' AND table_name='embedding_registry')",
             'phase_17_consolidation': "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='knowledge' AND table_name='knowledge_atoms' AND column_name='is_golden')",
         }
         return checks.get(migration_name)
