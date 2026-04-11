@@ -123,6 +123,9 @@ class SystemManager:
                 adapter=self.adapter
             )
 
+            # 4.5 Auto-apply pending migrations (never ask user to run SQL manually)
+            await self._apply_pending_migrations()
+
             # 5. Crawler
             self.crawler = FirecrawlLocalClient(
                 config=CrawlerConfig(),
@@ -331,6 +334,51 @@ class SystemManager:
     # ──────────────────────────────────────────────────
     # Internal Helpers
     # ──────────────────────────────────────────────────
+
+    async def _apply_pending_migrations(self):
+        """Auto-apply database migrations at startup. Never ask user to run SQL manually."""
+        import os
+        migrations_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), '..', 'migrations')
+        if not os.path.isdir(migrations_dir):
+            return
+
+        migration_files = sorted([
+            f for f in os.listdir(migrations_dir)
+            if f.endswith('.sql') and f.startswith('phase_')
+        ])
+
+        async with self.pg_pool.acquire() as conn:
+            for migration_file in migration_files:
+                # Check if this migration has already been applied
+                # by looking for a key table/column it creates
+                migration_name = migration_file.replace('.sql', '')
+                check_query = self._migration_check_query(migration_name)
+                if check_query:
+                    try:
+                        exists = await conn.fetchval(check_query)
+                        if exists:
+                            continue  # Already applied
+                    except Exception:
+                        pass  # Table doesn't exist yet — apply migration
+
+                # Apply migration
+                migration_path = os.path.join(migrations_dir, migration_file)
+                try:
+                    with open(migration_path, 'r') as f:
+                        sql = f.read()
+                    await conn.execute(sql)
+                    logger.info(f"[Migrations] Applied {migration_file}")
+                except Exception as e:
+                    logger.warning(f"[Migrations] Skipping {migration_file}: {e}")
+
+    def _migration_check_query(self, migration_name: str) -> str | None:
+        """Return a query that returns True if migration already applied."""
+        checks = {
+            'phase_13_pipeline_audit': "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='audit' AND table_name='pipeline_runs')",
+            'phase_14_pipeline_integrity': "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='audit' AND table_name='embedding_registry')",
+            'phase_17_consolidation': "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='knowledge' AND table_name='knowledge_atoms' AND column_name='is_golden')",
+        }
+        return checks.get(migration_name)
 
     # ──────────────────────────────────────────────────────────────────────
     # RETRY POLICY INVENTORY — Pipeline-Wide Summary
