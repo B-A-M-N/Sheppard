@@ -38,18 +38,21 @@ async def _write_dead_letter(adapter, source_id: str, stage: str,
                             error_class: str, error_detail: str,
                             retry_count: int = 0, worker_id: str = "",
                             payload: dict = None) -> None:
-    """Write a structured dead-letter entry for replay."""
-    await adapter.pg.insert_row("audit.dead_letter_queue", {
-        "source_id": source_id,
-        "stage": stage,
-        "error_class": error_class,
-        "error_detail": error_detail,
-        "retry_count": retry_count,
-        "max_retries": 3,
-        "last_seen_worker": worker_id,
-        "payload": json.dumps(payload or {}),
-        "status": "pending",
-    })
+    """Write a structured dead-letter entry for replay. Fails gracefully if table doesn't exist."""
+    try:
+        await adapter.pg.insert_row("audit.dead_letter_queue", {
+            "source_id": source_id,
+            "stage": stage,
+            "error_class": error_class,
+            "error_detail": error_detail,
+            "retry_count": retry_count,
+            "max_retries": 3,
+            "last_seen_worker": worker_id,
+            "payload": json.dumps(payload or {}),
+            "status": "pending",
+        })
+    except Exception as e:
+        logger.debug(f"[Distillery] Dead-letter write failed (table may not exist): {e}")
 
 
 @dataclass

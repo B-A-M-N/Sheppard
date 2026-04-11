@@ -41,11 +41,15 @@ class DLQConsumer:
 
     async def _process_batch(self) -> int:
         """Process one batch of pending DLQ entries. Returns count processed."""
-        entries = await self.pg.fetch_many(
-            "audit.dead_letter_queue",
-            where={"status": "pending"},
-            limit=MAX_BATCH_SIZE,
-        )
+        try:
+            entries = await self.pg.fetch_many(
+                "audit.dead_letter_queue",
+                where={"status": "pending"},
+                limit=MAX_BATCH_SIZE,
+            )
+        except Exception as e:
+            logger.debug(f"[DLQ] Table not ready: {e}")
+            return 0
         if not entries:
             return 0
 

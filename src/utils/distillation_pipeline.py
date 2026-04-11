@@ -84,7 +84,8 @@ def compute_confidence(
     # Quality score from atom_scorer
     content = atom.get("text", "")
     if content:
-        quality_score = score_atom(content)
+        scoring = score_atom(content)
+        quality_score = scoring.get("score", 0.5) if isinstance(scoring, dict) else scoring
     else:
         quality_score = 0.3
 
