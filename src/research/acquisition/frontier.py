@@ -91,7 +91,6 @@ class AdaptiveFrontier:
 
     async def run(self):
         """Metabolic Control Loop."""
-        console.set_quiet(True)
         # 1. Load existing state if it exists
         await self._load_checkpoint()
 
