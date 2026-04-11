@@ -36,16 +36,12 @@ import nest_asyncio
 from prompt_toolkit import Application
 from prompt_toolkit.application.current import get_app
 from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.layout import (
     HSplit, VSplit, Window, Layout,
-    WindowAlign, ConditionalMargin, NumberedMargin,
-    ScrollablePane,
 )
-from prompt_toolkit.layout.controls import (
-    BufferControl, FormattedTextControl,
-)
+from prompt_toolkit.layout.controls import BufferControl
 from prompt_toolkit.layout.dimension import LayoutDimension as D
-from prompt_toolkit.layout.processors import PasswordProcessor
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import TextArea
 from prompt_toolkit.key_binding import KeyBindings
@@ -83,7 +79,6 @@ class TUI:
             multiline=False,
             prompt="[Sheppard] > ",
             style="class:chat-input",
-            focus_on_input=True,
         )
 
         # Log buffer (scrolling, read-only, auto-scroll)
@@ -171,12 +166,14 @@ class TUI:
         def _(event):
             event.app.exit(result="exit")
 
-        @kb.add("enter", filter=lambda: get_app().layout.has_focus(self.chat_input.buffer))
+        @kb.add("enter")
         def _(event):
-            text = self.chat_input.buffer.text.strip()
-            if text:
-                self.chat_input.buffer.text = ""
-                self._on_input(text)
+            # Only handle Enter when chat input is focused
+            if event.app.layout.has_focus(self.chat_input.buffer):
+                text = self.chat_input.buffer.text.strip()
+                if text:
+                    self.chat_input.buffer.text = ""
+                    self._on_input(text)
             return None
 
         return kb
