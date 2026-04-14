@@ -60,18 +60,35 @@ class Sheppard:
                 self.embedding_model,
                 MemoryConfig.MEMORY_CONFIG  # Changed from DatabaseConfig to MemoryConfig
             )
-            
+
+            # Try to initialize CMK runtime (optional — falls back gracefully)
+            self.cmk_runtime = None
+            try:
+                from src.core.memory.cmk.runtime import CMKRuntime
+                from src.core.memory.cmk.config import CMKConfig
+
+                cmk_config = CMKConfig.from_env()
+                cmk_config.embedding.host = ModelConfig.OLLAMA_HOST
+                cmk_config.embedding.model = "nomic-embed-text"
+
+                self.cmk_runtime = CMKRuntime(config=cmk_config)
+                self.logger.info("CMK Runtime initialized (optional)")
+            except Exception as cmk_err:
+                self.logger.debug(f"CMK Runtime not available: {cmk_err}")
+                self.cmk_runtime = None
+
             self.response_gen = ResponseGenerator(
                 self.main_chat_client,
                 self.short_context_client,
                 self.long_context_client,
                 self.main_chat_model,
                 self.short_context_model,
-                self.long_context_model
+                self.long_context_model,
+                cmk_runtime=self.cmk_runtime,  # Inject CMK for evidence-tier responses
             )
-            
+
             self.tool_manager = ToolManager(self.main_chat_client)
-            
+
             self.interaction = InteractionHandler(
                 self.memory_ops,
                 self.response_gen,

@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 class ResponseGenerator:
     """Handles response generation and processing"""
-    
+
     def __init__(
         self,
         main_client,
@@ -19,7 +19,8 @@ class ResponseGenerator:
         long_context_client,
         main_model,
         short_model,
-        long_model
+        long_model,
+        cmk_runtime=None,  # Optional: inject CMKRuntime for evidence-tier responses
     ):
         self.main_client = main_client
         self.short_context_client = short_context_client
@@ -30,7 +31,11 @@ class ResponseGenerator:
         self.max_context_length = 4000
         self.response_cache = {}
         self.cache_ttl = 3600  # 1 hour
-        
+
+        # CMK integration (optional)
+        self.cmk_runtime = cmk_runtime
+        self.cmk_enabled = cmk_runtime is not None
+
         self.system_prompt = (
             "You are Sheppard, an AI assistant powered by Ollama models, specializing in "
             "general problem-solving. Your responses should be informative, helpful, and context-aware. "
@@ -65,9 +70,22 @@ class ResponseGenerator:
                 self.response_stats["cached_responses"] += 1
                 return cached_response
 
-            # Build context summary
+            # Try CMK path if enabled and available
+            if self.cmk_enabled:
+                try:
+                    cmk_response = await self._generate_with_cmk(
+                        user_input, conversation_history
+                    )
+                    if cmk_response:
+                        self._update_response_stats(cmk_response)
+                        self._cache_response(cache_key, cmk_response)
+                        return cmk_response
+                except Exception as e:
+                    logger.warning(f"[ResponseGen] CMK path failed: {e}, falling back to standard")
+
+            # Standard fallback
             context_summary = await self._summarize_context(memories)
-            
+
             # Build messages
             messages = self._build_messages(
                 user_input,
@@ -75,7 +93,7 @@ class ResponseGenerator:
                 conversation_history,
                 tool_analysis
             )
-            
+
             # Get response from appropriate model
             response = await self._get_model_response(messages)
             
@@ -103,6 +121,58 @@ class ResponseGenerator:
         except Exception as e:
             logger.error(f"Error generating response: {str(e)}")
             return "I encountered an error while processing your request. Please try again."
+
+    async def _generate_with_cmk(
+        self,
+        user_input: str,
+        conversation_history: List[Dict[str, str]],
+    ) -> Optional[str]:
+        """
+        Generate response using CMK evidence pipeline.
+
+        Returns None if CMK is unavailable or has no relevant knowledge,
+        triggering fallback to standard generation.
+        """
+        if not self.cmk_runtime:
+            return None
+
+        # CMK query: intent → plan → retrieval → evidence pack
+        intent = self.cmk_runtime.intent_profiler.profile(user_input)
+        plan = self.cmk_runtime.evidence_planner.plan(intent)
+
+        # Retrieve with CMK
+        if self.cmk_runtime.concept_retriever:
+            pack = await self.cmk_runtime.query_with_concepts(user_input)
+        else:
+            pack = await self.cmk_runtime.query(user_input)
+
+        # If no evidence found, let standard path handle it
+        if pack.is_empty:
+            return None
+
+        # Build CMK-constrained messages with evidence tiers
+        from src.core.memory.cmk.prompt_contract import build_cmk_prompt
+        messages = build_cmk_prompt(
+            evidence_pack=pack,
+            user_query=user_input,
+            intent=intent,
+            conversation_history=conversation_history[-5:] if conversation_history else None,
+            abstraction_gate=pack.abstraction_gate,
+            definition_supported=pack.definition_supported,
+        )
+
+        response = await self._get_model_response(messages)
+        return response
+
+    def _update_response_stats(self, response: str):
+        """Update response statistics."""
+        self.response_stats["total_responses"] += 1
+        if self.response_stats["total_responses"] > 0:
+            current_total = self.response_stats["average_length"] * (self.response_stats["total_responses"] - 1)
+            new_total = current_total + len(response)
+            self.response_stats["average_length"] = new_total / self.response_stats["total_responses"]
+        else:
+            self.response_stats["average_length"] = len(response)
 
     async def _summarize_context(self, memories: Dict[str, Any]) -> str:
         """Summarize memory context"""
