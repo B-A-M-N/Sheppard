@@ -68,6 +68,7 @@ from .authority import CanonicalKnowledgeStore, CanonicalClaim
 from .consolidation import ConsolidationPipeline
 from .belief_graph import BeliefGraph, BeliefNode, BeliefEdge, RelationType
 from .concept_anchors import ConceptAnchorStore, ConceptAnchor, CANONICAL_CONCEPTS
+from .hypothesis import HypothesisEngine, Hypothesis, HypothesisType, HypothesisStatus
 
 from .config import CMKConfig
 from .store import CMKStore
@@ -145,4 +146,10 @@ __all__ = [
     "ConceptAnchorStore",
     "ConceptAnchor",
     "CANONICAL_CONCEPTS",
+
+    # Hypothesis Engine
+    "HypothesisEngine",
+    "Hypothesis",
+    "HypothesisType",
+    "HypothesisStatus",
 ]

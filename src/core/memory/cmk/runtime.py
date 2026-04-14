@@ -32,6 +32,7 @@ from .activation import ActivationMemory
 from .authority import CanonicalKnowledgeStore
 from .belief_graph import BeliefGraph, BeliefNode, BeliefEdge, RelationType
 from .concept_anchors import ConceptAnchorStore, ConceptAnchor, CANONICAL_CONCEPTS
+from .hypothesis import HypothesisEngine, Hypothesis
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,9 @@ class CMKRuntime:
         # Concept Anchors (cross-domain abstraction hubs)
         self.concept_anchors = ConceptAnchorStore(pg_pool=pg_pool)
         self.concept_anchors.initialize_canonical_concepts()
+
+        # Hypothesis Engine (missing edge discovery)
+        self.hypothesis_engine = HypothesisEngine(self.belief_graph)
 
         # Atom store (in-memory)
         self.atoms: Dict[str, CMKAtom] = {}
@@ -589,6 +593,25 @@ class CMKRuntime:
                     RelationType.INSTANTIATES.value,
                     strength=0.7,
                 )
+
+    # ── Hypothesis Engine ──
+
+    def detect_hypotheses(
+        self,
+        similarity_threshold: float = 0.75,
+        max_candidates: int = 50,
+    ) -> List[Hypothesis]:
+        """Detect missing edges in the belief graph."""
+        return self.hypothesis_engine.detect_missing_edges(similarity_threshold, max_candidates)
+
+    async def run_hypothesis_cycle(
+        self,
+        llm_client=None,
+        llm_model: str = "mistral",
+        top_k: int = 10,
+    ) -> Dict[str, Any]:
+        """Run full hypothesis cycle: detect → test → apply."""
+        return await self.hypothesis_engine.run_hypothesis_cycle(llm_client, llm_model, top_k)
 
     # ── Cleanup ──
 
