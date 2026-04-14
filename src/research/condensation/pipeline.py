@@ -170,7 +170,7 @@ class DistillationPipeline:
                 run_id = None  # Disable audit tracking for this run
 
             try:
-                await self._process_sources(sources, mission_id, mission_row, run_id)
+                await self._process_sources(sources, mission_id, mission_row, run_id, priority)
 
                 # Write success row
                 if run_id:
@@ -245,7 +245,7 @@ class DistillationPipeline:
                         pass
                 raise
 
-    async def _process_sources(self, sources, mission_id, mission_row, run_id):
+    async def _process_sources(self, sources, mission_id, mission_row, run_id, priority):
         """Process a batch of sources through the distillation pipeline."""
         import uuid
         from src.research.domain_schema import KnowledgeAtom, AtomLineage
@@ -277,6 +277,27 @@ class DistillationPipeline:
                 continue
 
             content = ref["inline_text"]
+
+            # ── GATE 0a: Heuristic pre-filter (CPU-only, fast) ──
+            from src.utils.embedding_distiller import gate_0a_heuristic
+            verdict, reason = gate_0a_heuristic(content, ref.get("raw_html", ""))
+            if verdict == "SKIP":
+                logger.debug(f"[Distillery] Gate 0a rejected {source_id}: {reason}")
+                await transition_source_status(
+                    self.adapter, source_id, "filtered_out", current_status="fetched"
+                )
+                await self.adapter.pg.update_row(
+                    "corpus.sources",
+                    "source_id",
+                    {
+                        "source_id": source_id,
+                        "filter_metadata": {
+                            "gate": "0a_heuristic",
+                            "reason": reason,
+                        },
+                    },
+                )
+                continue
 
             # Fetch chunks for this source (needed for evidence binding)
             chunks = await self.adapter.list_chunks_for_source(source_id)
@@ -322,6 +343,12 @@ class DistillationPipeline:
                     atom_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{mission_id}:{source_id}:{content_value[:200]}"))
                     profile_id = mission_row.get("domain_profile_id") if isinstance(mission_row, dict) else f"profile_{mission_id[:8]}"
 
+                    # Use normalize_atom_schema for importance/novelty (handles categorical → numeric)
+                    from src.utils.normalize_atom_schema import normalize_atom_schema
+                    scored = normalize_atom_schema(atom_dict)
+                    atom_importance = scored.get("importance", 0.5)
+                    atom_novelty = scored.get("novelty", 0.5)
+
                     atom = KnowledgeAtom(
                         atom_id=atom_id,
                         topic_id=mission_row.get("topic_id") if isinstance(mission_row, dict) else mission_id,
@@ -331,7 +358,8 @@ class DistillationPipeline:
                         statement=content_value,
                         summary=content_value,
                         confidence=compute_confidence(normalized, source_type, atoms_data),
-                        importance=0.8 if atom_dict.get('atom_type', atom_dict.get('type')) == 'contradiction' else 0.5,
+                        importance=atom_importance,
+                        novelty=atom_novelty,
                         lineage=AtomLineage(
                             mission_id=mission_id,
                             extraction_mode="atomic_distillation"

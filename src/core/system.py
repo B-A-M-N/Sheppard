@@ -10,6 +10,7 @@ Wires together all legacy and V2 subsystems:
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -261,23 +262,140 @@ class SystemManager:
         messages: List[dict],
         project_context: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
-        """Conversational turn with hybrid RAG context."""
+        """Conversational turn with self-extending response loop."""
         self._check_initialized()
 
         user_msg = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
-        
+
+        # ── PASS 1: Initial response ──
         context_block = ""
         if user_msg:
-            context_block = await self.query(text=user_msg, project_filter=project_context)
+            context_block = await self.query(text=user_msg, project_filter=project_context, max_results=30)
 
         system_prompt = self._build_system_prompt(context_block, project_context)
 
+        # Buffer the initial response for reflection
+        initial_response = ""
         async for token in self.ollama.chat_stream(
             model=self.model_router.get_model_name(TaskType.CHAT),
             messages=messages,
             system_prompt=system_prompt,
         ):
+            initial_response += token
             yield token
+
+        # ── PASS 2: Reflection — should we expand? ──
+        expansion_budget = 2  # max additional passes
+        for pass_num in range(expansion_budget):
+            reflection = await self._reflect_on_response(
+                initial_response, user_msg, context_block
+            )
+            
+            if not reflection.get("expand"):
+                break  # Response is complete enough
+
+            # Retrieve new atoms for the missing angles
+            missing_topics = reflection.get("topics", [])
+            if not missing_topics:
+                break
+
+            # Get fresh context for the missing angles
+            expansion_context = await self.query(
+                text=" ".join(missing_topics[:3]),  # Top 3 missing topics
+                project_filter=project_context,
+                max_results=15  # More retrieval for expansion
+            )
+
+            if not expansion_context.strip():
+                break  # No new knowledge found
+
+            # Generate continuation
+            continuation_prompt = (
+                "Continue the previous response naturally. "
+                "Do NOT repeat any concepts already explained. "
+                "Do NOT use phrases like 'additionally', 'expanding on this', 'more information'. "
+                "Just continue as if you're naturally elaborating. "
+                "Only add genuinely useful new insights.\n\n"
+                f"--- NEW CONTEXT ---\n{expansion_context}\n--- END CONTEXT ---\n"
+            )
+
+            continuation_messages = [
+                {"role": "system", "content": continuation_prompt},
+                {"role": "assistant", "content": initial_response},
+                {"role": "user", "content": f"What else is important about {user_msg}?"},
+            ]
+
+            continuation = ""
+            async for token in self.ollama.chat_stream(
+                model=self.model_router.get_model_name(TaskType.CHAT),
+                messages=continuation_messages,
+                system_prompt="Continue the explanation with new insights not already covered.",
+            ):
+                continuation += token
+                yield token
+
+            initial_response += "\n\n" + continuation
+
+    async def _reflect_on_response(
+        self,
+        response: str,
+        user_input: str,
+        context_used: str,
+    ) -> dict:
+        """Reflection pass: decide if the response is complete or needs expansion."""
+        try:
+            reflection_prompt = (
+                f"Given this user question: \"{user_input}\"\n\n"
+                f"And this answer that was just provided:\n\"\"\"{response}\"\"\"\n\n"
+                f"Determine:\n"
+                f"1. Is this answer shallow or incomplete? (Consider: does it skip important "
+                f"subtopics, mechanisms, tradeoffs, or real-world implications?)\n"
+                f"2. What important subtopics or angles were NOT covered?\n"
+                f"3. What would an expert naturally explain next?\n\n"
+                f"Return ONLY JSON, no other text:\n"
+                f'{{"expand": true/false, "topics": ["angle1", "angle2", "angle3"]}}\n\n'
+                f"Only expand if there are genuinely important missing angles. "
+                f"Do not expand for minor details, examples, or edge cases. "
+                f"If the answer already covers the core question well, expand=false."
+            )
+
+            # Use chat_stream and collect the full response for JSON parsing
+            reflection_text = ""
+            async for token in self.ollama.chat_stream(
+                model=self.model_router.get_model_name(TaskType.CHAT),
+                messages=[{"role": "user", "content": reflection_prompt}],
+                system_prompt="You are a strict completeness judge. Return only JSON.",
+                temperature=0.1,  # Low temp for deterministic JSON
+            ):
+                reflection_text += token
+
+            # Parse JSON from the response
+            # Handle potential markdown code blocks
+            reflection_text = reflection_text.strip()
+            if reflection_text.startswith("```"):
+                # Strip markdown code blocks
+                lines = reflection_text.split("\n")
+                json_lines = []
+                in_json = False
+                for line in lines:
+                    if line.strip().startswith("```"):
+                        in_json = not in_json
+                        continue
+                    if in_json or not line.strip().startswith("```"):
+                        json_lines.append(line)
+                reflection_text = "\n".join(json_lines).strip()
+
+            # Find JSON in the text
+            start = reflection_text.find("{")
+            end = reflection_text.rfind("}")
+            if start >= 0 and end > start:
+                json_str = reflection_text[start:end+1]
+                return json.loads(json_str)
+
+        except Exception as e:
+            logger.warning(f"Reflection pass failed: {e}")
+
+        return {"expand": False, "topics": []}
 
     def status(self) -> dict:
         """System health and mission status."""

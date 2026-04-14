@@ -38,6 +38,7 @@ class CommandHandler:
             handlers = {
                 '/help': self._handle_help, '/h': self._handle_help,
                 '/learn': self._handle_learn,
+                '/knowledge': self._handle_knowledge, '/kb': self._handle_knowledge,
                 '/stop': self._handle_stop,
                 '/missions': self._handle_missions,
                 '/nudge': self._handle_nudge,
@@ -68,6 +69,57 @@ class CommandHandler:
             logger.error(f"Command error: {e}")
             self.console.print(f"[bold red]Error:[/bold red] {e}")
             return True
+
+    async def _handle_knowledge(self, *args, _tui=None) -> None:
+        """/knowledge — Display aggregated knowledge per unique topic"""
+        try:
+            async with system_manager.adapter.pg.pool.acquire() as conn:
+                rows = await conn.fetch("""
+                    SELECT LOWER(TRIM(m.title)) as norm_title,
+                           MAX(m.title) as display_title,
+                           COUNT(DISTINCT s.source_id) as sources,
+                           COUNT(DISTINCT a.atom_id) as atoms,
+                           MAX(m.status) as latest_status
+                    FROM mission.research_missions m
+                    LEFT JOIN corpus.sources s ON m.mission_id = s.mission_id
+                    LEFT JOIN knowledge.knowledge_atoms a ON m.mission_id = a.mission_id
+                    GROUP BY LOWER(TRIM(m.title))
+                    ORDER BY sources DESC, atoms DESC
+                """)
+
+            lines = ["═══ Knowledge Base ═══"]
+            if not rows:
+                lines.append("No knowledge stored yet. Use /learn <topic> to start.")
+            else:
+                has_data = False
+                for row in rows:
+                    sources = row['sources']
+                    atoms = row['atoms']
+                    if sources == 0 and atoms == 0:
+                        continue
+                    has_data = True
+                    name = row['display_title'] or row['norm_title']
+                    status = "Active" if row['latest_status'] == 'active' else "Complete"
+                    icon = "🟢" if status == "Active" else "✅"
+                    lines.append(f"{icon} {name}")
+                    lines.append(f"   {sources:,} sources | {atoms:,} atoms")
+                if not has_data:
+                    lines.append("No topics with stored data found.")
+
+            # Write DIRECTLY to TUI chat buffer if available, otherwise fallback to console
+            if _tui:
+                for line in lines:
+                    _tui.append_chat(line, prefix="", flush=True)
+            else:
+                self.console.print("\n".join(lines))
+
+        except Exception as e:
+            logger.error(f"Knowledge command failed: {e}")
+            msg = f"Error loading knowledge base: {e}"
+            if _tui:
+                _tui.append_chat(msg, prefix="", flush=True)
+            else:
+                self.console.print(msg)
 
     async def _handle_learn(self, *args) -> None:
         if not args:
@@ -326,6 +378,7 @@ class CommandHandler:
         table = Table(title="V2 Commands")
         table.add_column("Command"); table.add_column("Usage")
         table.add_row("/learn", "Start background mission")
+        table.add_row("/knowledge", "View all stored topics and material")
         table.add_row("/query", "Query the knowledge stack")
         table.add_row("/distill", "Manual knowledge distillation")
         table.add_row("/status", "Full system dashboard")

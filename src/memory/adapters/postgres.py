@@ -75,7 +75,7 @@ class PostgresStoreImpl:
 
     async def update_row(self, table: str, key_field: str, row: JsonDict, conn: asyncpg.Connection | None = None) -> None:
         columns = [c for c in row.keys() if c != key_field]
-        values = [v for k, v in row.items() if k != key_field]
+        values = self._prepare_values({k: v for k, v in row.items() if k != key_field})
 
         # Add the key field value at the end for the WHERE clause
         values.append(row[key_field])

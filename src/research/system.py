@@ -104,7 +104,14 @@ class ResearchSystem(BaseResearchSystem):
             from src.research.content_processor import ContentProcessor
             
             # Initialize components
-            self.browser = BrowserManager(config=self.config.browser if self.config else None)
+            # Browser is optional - many operations work via Firecrawl API directly
+            try:
+                self.browser = BrowserManager(config=self.config.browser if self.config else None)
+                await self.browser.initialize()
+            except Exception as e:
+                logger.warning(f"Browser manager unavailable, continuing without it: {e}")
+                self.browser = None
+
             self.task_manager = ResearchTaskManager(
                 memory_manager=self.memory_manager,
                 ollama_client=self.ollama_client,
@@ -120,7 +127,8 @@ class ResearchSystem(BaseResearchSystem):
             )
             
             # Initialize all components in order
-            await self.browser.initialize()
+            if self.browser:
+                pass  # Already initialized above
             await self.task_manager.initialize()
             await self.content_processor.initialize()
             await super().initialize()
@@ -297,9 +305,11 @@ class ResearchSystem(BaseResearchSystem):
             
             for engine in search_engines:
                 try:
+                    if not self.browser:
+                        raise ResearchError("Browser manager is not available")
                     logger.info(f"Searching on {engine.capitalize()}...")
                     search_results = await self.browser.gather_content(
-                        topic, 
+                        topic,
                         search_engine=engine
                     )
                     if search_results and search_results.get('results'):
@@ -333,6 +343,8 @@ class ResearchSystem(BaseResearchSystem):
                     
                     if not self.firecrawl:
                         # Use browser manager as fallback if firecrawl not available
+                        if not self.browser:
+                            raise ResearchError("Neither Firecrawl nor browser manager is available")
                         console.print("[yellow]Using browser fallback (Firecrawl not available)[/yellow]")
                         content = await self.browser.browse_url(url)
                         if content:
@@ -610,8 +622,11 @@ class ResearchSystem(BaseResearchSystem):
             return None
         
         try:
+            if not self.browser:
+                logger.warning(f"Browser manager not available, cannot scrape {url}")
+                return None
             logger.info(f"Attempting to scrape {url} with browser fallback")
-            
+
             # Try to extract content with browser
             content = await self.browser.browse_url(url)
             

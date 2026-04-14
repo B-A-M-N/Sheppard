@@ -11,8 +11,8 @@ from rich.logging import RichHandler
 from rich.traceback import install as install_rich_traceback
 from rich.console import Console
 
-# Initialize console for rich output
-console = Console()
+# Initialize console for rich output — force no_color to avoid ANSI leakage in TUI mode
+console = Console(force_terminal=False, no_color=True)
 
 def setup_logging(
     level: Optional[str] = None,

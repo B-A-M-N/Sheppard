@@ -51,3 +51,21 @@ MILESTONE_AUDIT_REPORT.md
 MILESTONE_V1.0_AUDIT.md
 PHASE-02-BLOCKERS.md
 PHASE-11-STATUS-RECONCILIATION.md
+
+# Benchmark / test artifacts (generated, not source)
+benchmark*.json
+phase*-*.json
+phase*-*.md
+test_*.json
+test_*.py
+test_iter*.json
+verification_benchmark.json
+run_full_guardrail.py
+run_guardrail_tests.py
+
+# Scripts (ad-hoc, not part of main codebase)
+scripts/clean_corrupted_redis_keys.py
+scripts/diagnose_retrieval_latency.py
+scripts/e2e_verifier.py
+scripts/inspect_atoms.py
+scripts/setup.sh

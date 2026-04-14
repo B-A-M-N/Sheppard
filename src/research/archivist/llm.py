@@ -2,7 +2,10 @@ import re
 import json
 import requests
 import os
+import logging
 from .config import LLM_MODEL, EMBEDDING_MODEL
+
+logger = logging.getLogger(__name__)
 
 # We'll use direct requests for the local Ollama API to avoid event loop conflicts 
 # in Archivist's synchronous thread.
@@ -39,7 +42,7 @@ def generate(prompt: str, system_prompt: str = None, model: str = LLM_MODEL, for
         response.raise_for_status()
         return response.json()['message']['content']
     except Exception as e:
-        print(f"[LLM ERROR] Generation failed: {e}")
+        logger.error(f"[LLM ERROR] Generation failed: {e}")
         return ""
 
 def extract_json(text: str):
@@ -84,8 +87,7 @@ def embed(text: str, model: str = EMBEDDING_MODEL):
         response.raise_for_status()
         return response.json()['embedding']
     except Exception as e:
-        # Don't print the whole error to avoid log spam, just the type
-        print(f"[LLM ERROR] Embedding failed for text of length {len(safe_text)}: {type(e).__name__}")
+        logger.error(f"[LLM ERROR] Embedding failed for text of length {len(safe_text)}: {type(e).__name__}")
         return None
 
 def set_sheppard_client(client):

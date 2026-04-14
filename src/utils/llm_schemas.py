@@ -29,6 +29,16 @@ ATOM_EXTRACTION_SCHEMA = {
                         "type": "string",
                         "minLength": 20,
                         "maxLength": 300
+                    },
+                    "importance": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high"],
+                        "description": "low=marginal detail, medium=useful context, high=critical finding"
+                    },
+                    "novelty": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high"],
+                        "description": "low=common knowledge, medium=somewhat known, high=new or surprising"
                     }
                 },
                 "required": ["type", "content"]

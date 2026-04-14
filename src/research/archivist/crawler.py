@@ -5,6 +5,9 @@ import io
 import pypdf
 import os
 import time
+import logging
+
+logger = logging.getLogger(__name__)
 
 def fetch_url(url: str, browser_manager=None) -> str:
     """
@@ -34,7 +37,7 @@ def fetch_url(url: str, browser_manager=None) -> str:
                 elif 'markdown' in data: # Direct response
                     return data['markdown']
         except Exception as e:
-            print(f"Firecrawl failed for {url}, falling back: {e}")
+            logger.debug(f"Firecrawl failed for {url}, falling back: {e}")
 
     # Approach 2: Try Sheppard's BrowserManager (Playwright) if available
     if browser_manager:
@@ -76,7 +79,7 @@ def fetch_url(url: str, browser_manager=None) -> str:
                         text += page.extract_text() + "\n"
                     return text
                 except Exception as pdf_err:
-                    print(f"Error parsing PDF {url}: {pdf_err}")
+                    logger.warning(f"Error parsing PDF {url}: {pdf_err}")
                     return None
 
             return extract_text(response.text)

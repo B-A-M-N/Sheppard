@@ -5,8 +5,8 @@ Transforms noisy documents into embedding-ready atomic claims.
 Prevents context overflow by design, not by truncation.
 
 3-layer pipeline:
-  1. Boilerplate stripping (mandatory)
-  2. Semantic filtering (keep claims, drop noise)
+  1. Gate 0a: Heuristic pre-filter (cheap, CPU-only)
+  2. Gate 0b: Embedding-assisted quality check
   3. Sliding window + pooling (if still too large)
 """
 
@@ -26,6 +26,81 @@ WINDOW_SIZE = 10   # Sentences per window
 STRIDE = 7         # Overlap between windows
 MIN_SENTENCE_LEN = 20  # Minimum chars to be worth embedding
 EMBED_MAX_CHARS = 3000  # Hard char limit per embedding chunk (~750 tokens, well under 2048)
+
+# ─────────────────────────────────────────────
+# GATE 0a: Heuristic pre-filter (CPU-only, fast)
+# Rejects junk BEFORE any LLM or embedding call
+# ─────────────────────────────────────────────
+
+# Patterns that indicate low-value pages
+_JUNK_PATTERNS = [
+    "cookie policy", "accept cookies", "we use cookies", "cookie consent",
+    "privacy policy", "terms of service", "terms of use",
+    "sign in", "log in", "sign up", "register now", "create account",
+    "enable javascript", "javascript is disabled", "browser not supported",
+    "captcha", "verify you are human", "prove you're human",
+    "404", "page not found", "does not exist",
+    "this handle does not exist", "handle not found",
+    "subscribe to our newsletter", "newsletter signup",
+    "all rights reserved", "copyright",
+    "click here to", "read more", "continue reading",
+    "share this article", "related articles", "recommended for you",
+    "most read", "editors' picks",
+    "follow us on", "twitter", "facebook", "linkedin",
+    "loading...", "please wait",
+]
+
+def gate_0a_heuristic(text: str, html: str = "") -> Tuple[str, str]:
+    """
+    Fast heuristic quality gate. CPU-only, no LLM/embedding.
+    
+    Returns: (verdict, reason)
+        verdict = "PASS" | "SKIP"
+        reason = human-readable explanation
+    """
+    if not text or not text.strip():
+        return "SKIP", "empty text"
+    
+    # 1. Word count check (but not the only check — junk pages have lots of words)
+    words = text.split()
+    word_count = len(words)
+    if word_count < 50:
+        return "SKIP", f"too short ({word_count} words)"
+    
+    # 2. Junk pattern matching
+    text_lower = text.lower()
+    matched_junk = []
+    for pattern in _JUNK_PATTERNS:
+        if pattern in text_lower:
+            matched_junk.append(pattern)
+    
+    if len(matched_junk) >= 3:
+        return "SKIP", f"junk patterns ({', '.join(matched_junk[:3])})"
+    
+    # 3. Content density: ratio of text to HTML
+    if html:
+        html_len = len(html)
+        text_len = len(text)
+        if html_len > 0 and text_len / html_len < 0.05:
+            return "SKIP", f"low content density ({text_len}/{html_len} = {text_len/html_len:.1%})"
+    
+    # 4. Repetition check (spam pages repeat the same phrases)
+    if word_count > 200:
+        # Check if first 100 words are repeated later
+        first_100 = ' '.join(words[:100]).lower()
+        rest = ' '.join(words[100:]).lower()
+        if first_100 in rest:
+            return "SKIP", "high repetition (likely spam)"
+    
+    # 5. Language detection heuristic: too many non-ASCII chars in first 500 chars
+    # (non-English content might be OK for some missions, but flag it)
+    sample = text[:500]
+    non_ascii_ratio = sum(1 for c in sample if ord(c) > 127) / max(len(sample), 1)
+    if non_ascii_ratio > 0.3:
+        # Not a hard reject — just a lower priority
+        pass  # Allow through for now, scoring will handle it
+    
+    return "PASS", ""
 
 # ─────────────────────────────────────────────
 # BOILERPLATE STRIPPER
@@ -358,10 +433,10 @@ async def safe_embed(
                 else:
                     logger.warning(f"[Distillery] safe_embed: chunk {i} returned None")
             except Exception as e:
-                logger.warning(f"[Distillery] safe_embed: chunk {i} failed: {e}")
-    
+                logger.debug(f"[Distillery] safe_embed: chunk {i} failed: {e}")
+
     if not vectors:
-        logger.error("[Distillery] safe_embed: all embeddings failed")
+        logger.debug("[Distillery] safe_embed: all embeddings failed")
         return None, stats
     
     # Pool if multiple chunks

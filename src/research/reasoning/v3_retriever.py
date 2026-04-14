@@ -100,7 +100,7 @@ class V3Retriever:
                 if PROFILE_RETRIEVAL:
                     t_post_end = time.perf_counter()
             else:
-                logger.info("[V3Retriever] No semantic matches found.")
+                logger.info("[V3Retriever] No semantic matches found in Chroma.")
                 if PROFILE_RETRIEVAL:
                     t_post_end = time.perf_counter()
         except Exception as e:
@@ -108,6 +108,16 @@ class V3Retriever:
             if PROFILE_RETRIEVAL:
                 t_query_end = time.perf_counter()
                 t_post_end = time.perf_counter()
+
+        # ── FALLBACK: Postgres keyword search when Chroma has too few results ──
+        if len(items) < query.max_results // 2:
+            remaining = query.max_results - len(items)
+            try:
+                pg_items = await self._postgres_fallback(query.text, where, remaining)
+                items.extend(pg_items)
+                logger.info(f"[V3Retriever] Postgres fallback: +{len(pg_items)} keyword matches")
+            except Exception as e:
+                logger.warning(f"[V3Retriever] Postgres fallback failed: {e}")
 
         # TODO: Stage 1 Lexical prefilter (Postgres ILIKE on atoms)
         # TODO: Stage 3 Structural (graph traversal from core_atom_ids)
@@ -291,3 +301,60 @@ class V3Retriever:
                 sections.append(f"- {item.content}")
 
         return "\n".join(sections)
+
+    async def _postgres_fallback(self, query_text: str, where: dict, limit: int) -> List[RetrievedItem]:
+        """Keyword search fallback when Chroma has too few results."""
+        items: List[RetrievedItem] = []
+        query_words = [w for w in query_text.split() if len(w) > 2]
+        
+        async with self.adapter.pg.pool.acquire() as conn:
+            conditions = []
+            params = []
+            for i, word in enumerate(query_words[:5]):
+                conditions.append(f"(LOWER(k.statement) LIKE ${i+1} OR LOWER(k.title) LIKE ${i+1})")
+                params.append(f"%{word.lower()}%")
+            
+            where_clauses = []
+            if where:
+                for k, v in where.items():
+                    param_idx = len(params) + 1
+                    where_clauses.append(f"k.{k} = ${param_idx}")
+                    params.append(v)
+            
+            sql = f"""
+                SELECT k.atom_id, k.statement, k.title, k.atom_type,
+                       k.confidence, k.importance, k.novelty, k.created_at,
+                       m.title as mission_title
+                FROM knowledge.knowledge_atoms k
+                LEFT JOIN mission.research_missions m ON k.mission_id = m.mission_id
+                WHERE ({' OR '.join(conditions)})
+                {'AND ' + ' AND '.join(where_clauses) if where_clauses else ''}
+                ORDER BY k.confidence DESC, k.importance DESC
+                LIMIT ${len(params)+1}
+            """
+            params.append(limit)
+            
+            rows = await conn.fetch(sql, *params)
+            
+            for row in rows:
+                item = RetrievedItem(
+                    content=row['statement'] or row['title'] or '',
+                    source=f"pg:{row['mission_title'] or 'unknown'}",
+                    strategy="keyword",
+                    knowledge_level="B",
+                    item_type=row['atom_type'] or 'claim',
+                    relevance_score=float(row['confidence'] or 0.5),
+                    trust_score=float(row['confidence'] or 0.5),
+                    recency_days=self._days_since(str(row['created_at']) if row['created_at'] else None),
+                    tech_density=0.5,
+                    metadata={
+                        "atom_id": row['atom_id'],
+                        "atom_type": row['atom_type'],
+                        "importance": float(row['importance'] or 0.5),
+                        "novelty": float(row['novelty'] or 0.5),
+                        "mission_title": row['mission_title'],
+                    }
+                )
+                items.append(item)
+        
+        return items
