@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from src.research.acquisition.budget import BudgetMonitor, CondensationPriority
 from src.llm.client import OllamaClient
 from src.llm.model_router import TaskType
+from src.core.memory.cmk.runtime import CMKRuntime
 
 
 # Canonical filter reasons matching DB CHECK constraint:
@@ -96,11 +97,12 @@ class ExtractionCluster:
     atoms: List[Dict] = field(default_factory=list)
 
 class DistillationPipeline:
-    def __init__(self, ollama: OllamaClient, memory, budget: BudgetMonitor, adapter=None):
+    def __init__(self, ollama: OllamaClient, memory, budget: BudgetMonitor, adapter=None, cmk_runtime: Optional[CMKRuntime] = None):
         self.ollama = ollama
         self.memory = memory  # V2 removed; expected None in V3
         self.budget = budget
         self.adapter = adapter
+        self.cmk_runtime = cmk_runtime
         self._semaphore = asyncio.Semaphore(2)
         self.consolidation_engine = ConsolidationEngine(adapter, ollama) if adapter and ollama else None
 
@@ -430,6 +432,13 @@ class DistillationPipeline:
                     atom_row = atom.to_pg_row()
                     await self.adapter.store_atom_with_evidence(atom_row, evidence_rows)
 
+                    # CMK Integration: activate in cognitive memory
+                    if self.cmk_runtime:
+                        try:
+                            await self._cmk_ingest_atom(atom, mission_id)
+                        except Exception as cmk_err:
+                            logger.debug(f"[Distillery] CMK ingest failed for {atom_id}: {cmk_err}")
+
                     self._total_atoms += 1
                     atoms_this_source += 1
 
@@ -538,6 +547,89 @@ class DistillationPipeline:
         if self.consolidation_engine:
             return await self.consolidation_engine.resolve_contradictions(mission_id)
         return {"mission_id": mission_id, "candidates": 0, "verified_contradictions": 0, "resolved": 0}
+
+    # ── CMK Integration ──
+
+    async def _cmk_ingest_atom(self, atom, mission_id: str):
+        """
+        Ingest an atom into the Cognitive Memory Kernel.
+
+        1. Activate in working memory (activation boost)
+        2. Create belief node if high-confidence
+        3. Link to concept anchors based on atom type
+        """
+        from src.core.memory.cmk.types import CMKAtom
+
+        # Create CMK atom
+        cmk_atom = CMKAtom(
+            id=atom.atom_id,
+            content=atom.statement or atom.title or "",
+            atom_type=atom.atom_type or "claim",
+            reliability=atom.confidence or 0.5,
+            specificity=min(1.0, len(atom.statement or "") / 200.0),
+            centrality=atom.importance or 0.5,
+            source_id=atom.metadata.get("source_id", "") if atom.metadata else "",
+            mission_id=mission_id,
+            topic_id=atom.topic_id or mission_id,
+            confidence=atom.confidence or 0.5,
+        )
+
+        # 1. Activate in working memory
+        await self.cmk_runtime.ingest([cmk_atom])
+        await self.cmk_runtime.activate_atom(atom.atom_id, amount=0.5)
+
+        # 2. Create belief node if high-confidence
+        if atom.confidence and atom.confidence >= 0.7:
+            belief_id = self.cmk_runtime.create_belief_node(
+                claim=atom.statement or atom.title or "",
+                domain=atom.atom_type or "general",
+                authority_score=atom.confidence,
+                canonical_id=atom.atom_id,
+            )
+
+            # 3. Link to concept anchors based on atom type
+            concept_map = {
+                "mechanism": ["feedback_loop", "optimization"],
+                "definition": ["hierarchical_organization"],
+                "principle": ["energy_minimization", "tradeoff"],
+                "constraint": ["tradeoff", "signal_vs_noise"],
+                "process": ["adaptation", "emergence"],
+                "claim": ["signal_vs_noise"],
+            }
+            concepts = concept_map.get(atom.atom_type, ["signal_vs_noise"])
+            self.cmk_runtime.link_belief_to_concepts(
+                belief_id, concepts, atom.atom_type or "general"
+            )
+
+    @staticmethod
+    def activate_retrieved_atoms_cmk(atoms: list, cmk_runtime) -> list:
+        """
+        Activate retrieved atoms in CMK working memory.
+
+        Call this after retrieval to boost working memory activation.
+        Returns the same atoms list (with activation side-effect).
+        """
+        if not cmk_runtime:
+            return atoms
+
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            return atoms
+
+        async def _activate():
+            for atom_data in atoms:
+                atom_id = atom_data.get("atom_id") if isinstance(atom_data, dict) else getattr(atom_data, "atom_id", None)
+                if atom_id:
+                    await cmk_runtime.activate_atom(atom_id, amount=0.1)
+
+        try:
+            loop.run_until_complete(_activate())
+        except Exception:
+            pass
+
+        return atoms
 
     async def consolidate_atoms(self, mission_id: str):
         """The Forgetting Curve: Merges redundant atoms into Golden Atoms."""

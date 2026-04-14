@@ -18,6 +18,7 @@ from .retriever import (
     RoleBasedContext,
     RetrievedItem,
 )
+from src.core.memory.cmk.runtime import CMKRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +36,9 @@ class V3Retriever:
     project artifact linking) will be added in later phases.
     """
 
-    def __init__(self, adapter):
+    def __init__(self, adapter, cmk_runtime: Optional[CMKRuntime] = None):
         self.adapter = adapter
+        self.cmk_runtime = cmk_runtime
 
     async def retrieve(self, query: RetrievalQuery) -> RoleBasedContext:
         """
@@ -140,6 +142,10 @@ class V3Retriever:
 
         # For now, definitions, contradictions, project_artifacts, unresolved remain empty
         # They can be populated in later refinements
+
+        # CMK Integration: activate retrieved atoms in working memory
+        if hasattr(self, 'cmk_runtime') and self.cmk_runtime:
+            V3Retriever.activate_cmk(items, self.cmk_runtime)
 
         return ctx
 
@@ -356,5 +362,31 @@ class V3Retriever:
                     }
                 )
                 items.append(item)
-        
+
         return items
+
+    @staticmethod
+    def activate_cmk(atoms: List[RetrievedItem], cmk_runtime: Optional[CMKRuntime]):
+        """
+        Activate retrieved atoms in CMK working memory.
+        Call this after retrieval to boost working memory activation.
+        """
+        if not cmk_runtime or not atoms:
+            return
+
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            return
+
+        async def _activate():
+            for item in atoms:
+                atom_id = item.metadata.get("atom_id") if hasattr(item, 'metadata') and isinstance(item.metadata, dict) else None
+                if atom_id:
+                    await cmk_runtime.activate_atom(atom_id, amount=0.1)
+
+        try:
+            loop.run_until_complete(_activate())
+        except Exception:
+            pass

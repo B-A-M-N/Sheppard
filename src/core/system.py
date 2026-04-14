@@ -121,7 +121,8 @@ class SystemManager:
                 ollama=self.ollama,
                 memory=None,  # MemoryManager removed
                 budget=self.budget,
-                adapter=self.adapter
+                adapter=self.adapter,
+                cmk_runtime=self.cmk_runtime,  # CMK integration
             )
 
             # 4.5 Auto-apply pending migrations (never ask user to run SQL manually)
@@ -136,7 +137,10 @@ class SystemManager:
             await self.crawler.initialize()
 
             # 6. Retriever (V3 only)
-            self.retriever = V3Retriever(adapter=self.adapter)
+            self.retriever = V3Retriever(
+                adapter=self.adapter,
+                cmk_runtime=self.cmk_runtime,  # CMK integration
+            )
 
             # 7. Synthesis pipeline (V3 truth contract)
             assembler = EvidenceAssembler(

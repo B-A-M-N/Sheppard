@@ -15,8 +15,11 @@ from datetime import datetime
 from ...trust_call import call
 
 from .connection import ConnectionManager
-from ...exceptions import StorageError, ValidationError
 from ....config.database import DatabaseConfig
+
+# These were supposed to be in exceptions.py but aren't there — define locally
+class StorageError(Exception): pass
+class ValidationError(Exception): pass
 
 logger = logging.getLogger(__name__)
 
