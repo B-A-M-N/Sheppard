@@ -9,6 +9,7 @@ Architectural Shift:
 
 import asyncio
 import traceback
+import re
 from datetime import datetime
 from src.utils.distillation_pipeline import compute_confidence, ExtractionError
 from src.utils.source_classifier import classify_source_quality
@@ -27,6 +28,38 @@ from dataclasses import dataclass, field
 from src.research.acquisition.budget import BudgetMonitor, CondensationPriority
 from src.llm.client import OllamaClient
 from src.llm.model_router import TaskType
+
+
+# Canonical filter reasons matching DB CHECK constraint:
+# 'too_short', 'low_quality', 'duplicate', 'semantic_drift', 'no_atoms'
+_CANONICAL_REASONS = {"too_short", "low_quality", "duplicate", "semantic_drift", "no_atoms"}
+
+
+def _normalize_filter_reason(human_reason: str) -> str:
+    """
+    Map human-readable Gate 0a rejection reason to canonical DB constraint value.
+
+    DB constraint: chk_source_filter_reason
+    Allowed: 'too_short', 'low_quality', 'duplicate', 'semantic_drift', 'no_atoms'
+    """
+    reason_lower = human_reason.lower()
+
+    if "short" in reason_lower or "word" in reason_lower:
+        return "too_short"
+    if "empty" in reason_lower:
+        return "too_short"
+    if "junk" in reason_lower or "content density" in reason_lower:
+        return "low_quality"
+    if "repetition" in reason_lower or "repeat" in reason_lower or "spam" in reason_lower:
+        return "duplicate"
+    if "drift" in reason_lower:
+        return "semantic_drift"
+
+    # Fallback: use original if it's already canonical
+    if human_reason in _CANONICAL_REASONS:
+        return human_reason
+
+    return "low_quality"  # Safe default
 
 from src.utils.console import console
 from src.utils.json_validator import JSONValidator, extract_technical_atoms, _extract_entities_semantic
@@ -286,6 +319,8 @@ class DistillationPipeline:
                 await transition_source_status(
                     self.adapter, source_id, "filtered_out", current_status="fetched"
                 )
+                # Normalize human-readable reason to canonical DB constraint value
+                canonical_reason = _normalize_filter_reason(reason)
                 await self.adapter.pg.update_row(
                     "corpus.sources",
                     "source_id",
@@ -293,7 +328,7 @@ class DistillationPipeline:
                         "source_id": source_id,
                         "filter_metadata": {
                             "gate": "0a_heuristic",
-                            "reason": reason,
+                            "reason": canonical_reason,
                         },
                     },
                 )
