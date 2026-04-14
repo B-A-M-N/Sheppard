@@ -66,6 +66,8 @@ class SystemManager:
         self.retriever: Optional[V3Retriever] = None
         self.synthesis_service: Optional[SynthesisService] = None
         self.research_system: Optional[ResearchSystem] = None
+        # CMK (Cognitive Memory Kernel)
+        self.cmk_runtime = None
         # V2 MemoryManager removed — canonical truth is V3 adapter only
         self.memory = None
 
@@ -116,13 +118,28 @@ class SystemManager:
                 condensation_callback=self._condensation_callback,
             )
 
+            # 3. CMK — Cognitive Memory Kernel (optional, falls back gracefully)
+            try:
+                from src.core.memory.cmk.runtime import CMKRuntime
+                from src.core.memory.cmk.config import CMKConfig
+
+                cmk_config = CMKConfig.from_env()
+                cmk_config.embedding.host = settings.OLLAMA_API_HOST
+                cmk_config.embedding.model = "nomic-embed-text"
+
+                self.cmk_runtime = CMKRuntime(config=cmk_config)
+                logger.info("[System] CMK Runtime initialized")
+            except Exception as cmk_err:
+                logger.debug(f"[System] CMK Runtime not available: {cmk_err}")
+                self.cmk_runtime = None
+
             # 4. Condensation pipeline (V3-only, memory=None)
             self.condenser = DistillationPipeline(
                 ollama=self.ollama,
                 memory=None,  # MemoryManager removed
                 budget=self.budget,
                 adapter=self.adapter,
-                cmk_runtime=self.cmk_runtime,  # CMK integration
+                cmk_runtime=self.cmk_runtime,
             )
 
             # 4.5 Auto-apply pending migrations (never ask user to run SQL manually)
@@ -139,7 +156,7 @@ class SystemManager:
             # 6. Retriever (V3 only)
             self.retriever = V3Retriever(
                 adapter=self.adapter,
-                cmk_runtime=self.cmk_runtime,  # CMK integration
+                cmk_runtime=self.cmk_runtime,
             )
 
             # 7. Synthesis pipeline (V3 truth contract)
