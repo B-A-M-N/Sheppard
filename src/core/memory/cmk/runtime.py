@@ -33,6 +33,8 @@ from .authority import CanonicalKnowledgeStore
 from .belief_graph import BeliefGraph, BeliefNode, BeliefEdge, RelationType
 from .concept_anchors import ConceptAnchorStore, ConceptAnchor, CANONICAL_CONCEPTS
 from .hypothesis import HypothesisEngine, Hypothesis
+from .inference import CrossDomainInferenceEngine, InferenceResult, compute_global_coherence
+from .meta_cognition import MetaCognitionLayer
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +102,12 @@ class CMKRuntime:
 
         # Hypothesis Engine (missing edge discovery)
         self.hypothesis_engine = HypothesisEngine(self.belief_graph)
+
+        # Cross-Domain Inference Engine
+        self.inference_engine = CrossDomainInferenceEngine(self.belief_graph, self.concept_anchors)
+
+        # Meta-Cognition Layer
+        self.meta_cognition = MetaCognitionLayer()
 
         # Atom store (in-memory)
         self.atoms: Dict[str, CMKAtom] = {}
@@ -612,6 +620,112 @@ class CMKRuntime:
     ) -> Dict[str, Any]:
         """Run full hypothesis cycle: detect → test → apply."""
         return await self.hypothesis_engine.run_hypothesis_cycle(llm_client, llm_model, top_k)
+
+    # ── Cross-Domain Inference ──
+
+    def cross_domain_infer(
+        self,
+        query: str,
+        seed_belief_ids: List[str],
+        max_hops: int = 3,
+    ) -> InferenceResult:
+        """Run cross-domain inference from seed beliefs."""
+        return self.inference_engine.infer(query, seed_belief_ids, max_hops)
+
+    def get_global_coherence(self) -> Dict[str, float]:
+        """Compute global coherence metrics for the entire belief graph."""
+        return compute_global_coherence(self.belief_graph, self.concept_anchors)
+
+    # ── Meta-Cognition ──
+
+    def record_reasoning_step(
+        self,
+        step_type: str,
+        input_data: Dict[str, Any],
+        output_data: Dict[str, Any],
+        confidence: float,
+    ):
+        """Record a reasoning step for meta-cognitive tracking."""
+        self.meta_cognition.record_step(step_type, input_data, output_data, confidence)
+
+    def get_meta_cognitive_stats(self) -> Dict[str, Any]:
+        """Get meta-cognitive statistics."""
+        return self.meta_cognition.get_stats()
+
+    def get_blind_spots(self) -> List[Dict[str, Any]]:
+        """Identify reasoning blind spots."""
+        return self.meta_cognition.identify_blind_spots()
+
+    def record_domain_outcome(self, domain: str, success: bool, authority: float = 0.5):
+        """Record a domain outcome for meta-cognitive tracking."""
+        self.meta_cognition.record_domain_outcome(domain, success, authority)
+
+    # ── Autonomous Research Agenda ──
+
+    def generate_research_agenda(
+        self,
+        top_k: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """
+        Generate an autonomous research agenda based on graph tension.
+
+        Returns prioritized research questions from:
+          - High-scoring untested hypotheses
+          - Unresolved contradictions
+          - Low-coherence areas
+          - Missing cross-domain bridges
+        """
+        agenda = []
+
+        # 1. Top untested hypotheses
+        hypotheses = self.hypothesis_engine.detect_missing_edges()
+        untested = [h for h in hypotheses if h.status == "pending"]
+        for h in untested[:top_k // 3]:
+            agenda.append({
+                "type": "hypothesis",
+                "priority": h.score,
+                "description": f"Test {h.hypothesis_type} relationship between nodes {h.node_a[:12]} and {h.node_b[:12]}",
+                "reason": h.reason,
+                "action": "run_hypothesis_test",
+            })
+
+        # 2. High contradiction areas
+        for node in self.belief_graph._nodes.values():
+            if node.contradiction_pressure > 0.4:
+                agenda.append({
+                    "type": "contradiction_resolution",
+                    "priority": node.contradiction_pressure,
+                    "description": f"Resolve contradiction in: {node.claim[:80]}",
+                    "reason": f"Contradiction pressure: {node.contradiction_pressure:.2f}",
+                    "action": "run_belief_correction",
+                })
+
+        # 3. Low coherence domains
+        coherence = compute_global_coherence(self.belief_graph, self.concept_anchors)
+        if coherence["overall"] < 0.5:
+            agenda.append({
+                "type": "coherence_improvement",
+                "priority": 1.0 - coherence["overall"],
+                "description": f"Improve global coherence (currently {coherence['overall']:.2f})",
+                "reason": f"Contradiction spread: {coherence['contradiction_spread']:.2f}, "
+                          f"Concept connectivity: {coherence['concept_connectivity']:.2f}",
+                "action": "run_consolidation",
+            })
+
+        # 4. Missing cross-domain bridges
+        for concept in self.concept_anchors._anchors.values():
+            if concept.domain_count < 2:
+                agenda.append({
+                    "type": "cross_domain_bridge",
+                    "priority": 0.5,
+                    "description": f"Connect '{concept.name}' to additional domains (currently: {sorted(concept.domains)})",
+                    "reason": "Single-domain concept — potential for cross-domain insight",
+                    "action": "find_analogies",
+                })
+
+        # Sort by priority
+        agenda.sort(key=lambda x: x["priority"], reverse=True)
+        return agenda[:top_k]
 
     # ── Cleanup ──
 

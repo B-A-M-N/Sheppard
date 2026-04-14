@@ -69,6 +69,8 @@ from .consolidation import ConsolidationPipeline
 from .belief_graph import BeliefGraph, BeliefNode, BeliefEdge, RelationType
 from .concept_anchors import ConceptAnchorStore, ConceptAnchor, CANONICAL_CONCEPTS
 from .hypothesis import HypothesisEngine, Hypothesis, HypothesisType, HypothesisStatus
+from .inference import CrossDomainInferenceEngine, InferenceResult, compute_global_coherence
+from .meta_cognition import MetaCognitionLayer, ReasoningStep, ConfidenceCalibration
 
 from .config import CMKConfig
 from .store import CMKStore
@@ -152,4 +154,14 @@ __all__ = [
     "Hypothesis",
     "HypothesisType",
     "HypothesisStatus",
+
+    # Cross-Domain Inference
+    "CrossDomainInferenceEngine",
+    "InferenceResult",
+    "compute_global_coherence",
+
+    # Meta-Cognition
+    "MetaCognitionLayer",
+    "ReasoningStep",
+    "ConfidenceCalibration",
 ]
