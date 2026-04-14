@@ -7,7 +7,7 @@ Python enforces valid transitions.
 
 VALID_TRANSITIONS: dict[str, set[str]] = {
     "discovered": {"fetched"},
-    "fetched": {"extracted", "error"},
+    "fetched": {"extracted", "error", "filtered_out"},
     "extracted": {"condensed", "filtered_out", "rejected"},
     "condensed": {"indexed"},
     "error": {"retrying", "dead_letter"},

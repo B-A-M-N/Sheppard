@@ -344,7 +344,6 @@ class DistillationPipeline:
                     profile_id = mission_row.get("domain_profile_id") if isinstance(mission_row, dict) else f"profile_{mission_id[:8]}"
 
                     # Use normalize_atom_schema for importance/novelty (handles categorical → numeric)
-                    from src.utils.normalize_atom_schema import normalize_atom_schema
                     scored = normalize_atom_schema(atom_dict)
                     atom_importance = scored.get("importance", 0.5)
                     atom_novelty = scored.get("novelty", 0.5)
