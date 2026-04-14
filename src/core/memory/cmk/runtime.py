@@ -7,6 +7,8 @@ Provides:
   - query(): Retrieve knowledge for a user query
   - rebuild(): Rebuild concept clusters
   - get_context(): Build prompt-ready evidence pack
+  - activate(): Reinforce atom activation on retrieval
+  - consolidate(): Run episodic → semantic compression
 """
 
 import logging
@@ -25,6 +27,8 @@ from .feedback_loop import FeedbackLoop
 from .builder import ConceptBuilder
 from .retrieval import CMKRetriever
 from .store import CMKStore
+from .activation import ActivationMemory
+from .authority import CanonicalKnowledgeStore
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +80,12 @@ class CMKRuntime:
 
         # Store
         self.store = CMKStore(self.config, redis_client=redis_client, pg_pool=pg_pool)
+
+        # Activation memory (Layer B — working memory, decays)
+        self.activation = ActivationMemory(redis_client=redis_client, pg_pool=pg_pool)
+
+        # Canonical Knowledge Store (Layer A — long-term semantic memory, never decays)
+        self.cks = CanonicalKnowledgeStore(pg_pool=pg_pool)
 
         # Atom store (in-memory)
         self.atoms: Dict[str, CMKAtom] = {}
@@ -172,21 +182,37 @@ class CMKRuntime:
             contradictory_ids=contradictory_ids if self.config.enable_contradiction_detection else None,
         )
 
-        # Apply query relevance filtering
+        # Apply query relevance filtering + RETRIEVAL FUSION
+        # final_score = vector_sim * 0.40 + authority * 0.35 + recency_bias * 0.15 + context * 0.10
         from .atom_scorer import score_atom as query_score
-        scored_with_relevance = []
+        scored_with_fusion = []
         for atom, base_score in scored_atoms:
+            # Query relevance (context alignment)
             qr = query_score(atom, user_query, intent, plan)
-            # Combine scoring.scoring score + atom_scorer query relevance
-            combined = 0.6 * base_score + 0.4 * qr
-            if combined >= self.config.scoring.min_score_threshold:
-                scored_with_relevance.append((atom, combined))
 
-        scored_with_relevance.sort(key=lambda x: x[1], reverse=True)
+            # Activation score (working memory / recency)
+            act_score = await self.activation.get_activation(atom.id)
+
+            # Retrieve fusion scoring
+            fused = self.activation.compute_retrieval_score(
+                vector_similarity=base_score,
+                authority_score=atom.reliability,
+                activation_score=act_score,
+                context_alignment=qr,
+            )
+
+            if fused >= self.config.scoring.min_score_threshold:
+                scored_with_fusion.append((atom, fused))
+
+            # Reinforce activation for retrieved atoms (working memory boost)
+            if fused >= 0.5:
+                await self.activation.activate(atom.id, amount=0.1)
+
+        scored_with_fusion.sort(key=lambda x: x[1], reverse=True)
 
         # Step 5: Build evidence pack with grounding enforcement
         pack = self.evidence_pack_builder.build(
-            scored_with_relevance,
+            scored_with_fusion,
             plan=plan,
             concepts=self.concepts if self.config.enable_concepts else None,
         )
@@ -370,6 +396,85 @@ class CMKRuntime:
             ) if self.concept_retriever else []
 
             return [atom for atom, _ in scored]
+
+    # ── Activation & Consolidation ──
+
+    async def activate_atom(self, atom_id: str, amount: float = 1.0) -> float:
+        """
+        Reinforce an atom's activation (called externally for manual boosting).
+
+        Returns new activation score.
+        """
+        return await self.activation.activate(atom_id, amount)
+
+    async def consolidate_topic(
+        self,
+        topic_id: str,
+        atoms: List[CMKAtom] | None = None,
+        llm_client=None,
+        llm_model: str = "mistral",
+    ) -> List[str]:
+        """
+        Run episodic → semantic compression for a topic.
+
+        Converts raw atoms into distilled canonical claims.
+
+        Args:
+            topic_id: Topic to consolidate
+            atoms: Atoms to consolidate (loads from self.atoms if None)
+            llm_client: Optional LLM client for synthesis
+            llm_model: Model to use for synthesis
+
+        Returns:
+            List of canonical claim IDs created/updated
+        """
+        if atoms is None:
+            atoms = [a for a in self.atoms.values() if a.topic_id == topic_id]
+
+        if not atoms:
+            return []
+
+        from .consolidation import ConsolidationPipeline
+
+        pipeline = ConsolidationPipeline(
+            cks=self.cks,
+            embedder=self.embedder,
+            llm_client=llm_client,
+            llm_model=llm_model,
+        )
+
+        return await pipeline.consolidate_topic(topic_id, atoms)
+
+    async def run_consolidation(
+        self,
+        llm_client=None,
+        llm_model: str = "mistral",
+    ) -> Dict[str, List[str]]:
+        """
+        Run consolidation across all topics.
+
+        Returns:
+            Dict mapping topic_id → list of canonical claim IDs
+        """
+        # Group atoms by topic
+        topics: Dict[str, List[CMKAtom]] = {}
+        for atom in self.atoms.values():
+            if atom.topic_id:
+                topics.setdefault(atom.topic_id, []).append(atom)
+
+        results = {}
+        for topic_id, atoms in topics.items():
+            claim_ids = await self.consolidate_topic(
+                topic_id, atoms, llm_client, llm_model
+            )
+            results[topic_id] = claim_ids
+
+        logger.info(f"[CMK] Consolidation complete: {len(results)} topics processed")
+        return results
+
+    async def decay_activation(self):
+        """Apply decay to activation memory (call periodically)."""
+        return await self.activation.decay_all()
 
     # ── Cleanup ──
 

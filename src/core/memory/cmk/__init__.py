@@ -63,6 +63,10 @@ from .loop_governor import (
     StopCondition,
 )
 
+from .activation import ActivationMemory
+from .authority import CanonicalKnowledgeStore, CanonicalClaim
+from .consolidation import ConsolidationPipeline
+
 from .config import CMKConfig
 from .store import CMKStore
 from .runtime import CMKRuntime
@@ -124,4 +128,10 @@ __all__ = [
     "CMKStore",
     "CMKRuntime",
     "CMKIntegration",
+
+    # Activation + Authority + Consolidation
+    "ActivationMemory",
+    "CanonicalKnowledgeStore",
+    "CanonicalClaim",
+    "ConsolidationPipeline",
 ]
