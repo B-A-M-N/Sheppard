@@ -98,12 +98,13 @@ class ExtractionCluster:
     atoms: List[Dict] = field(default_factory=list)
 
 class DistillationPipeline:
-    def __init__(self, ollama: OllamaClient, memory, budget: BudgetMonitor, adapter=None, cmk_runtime: Optional[CMKRuntime] = None):
+    def __init__(self, ollama: OllamaClient, memory, budget: BudgetMonitor, adapter=None, cmk_runtime: Optional[CMKRuntime] = None, ingest_redis=None):
         self.ollama = ollama
         self.memory = memory  # V2 removed; expected None in V3
         self.budget = budget
         self.adapter = adapter
         self.cmk_runtime = cmk_runtime
+        self.ingest_redis = ingest_redis
         self._semaphore = asyncio.Semaphore(2)
         self.consolidation_engine = ConsolidationEngine(adapter, ollama) if adapter and ollama else None
 
@@ -315,7 +316,7 @@ class DistillationPipeline:
             content = ref["inline_text"]
 
             # ── CMK Integration: Push to ingestion control Tier 0 ──
-            if self.cmk_runtime and self.cmk_runtime.ingestion_control:
+            if self.cmk_runtime and self.ingest_redis:
                 try:
                     doc_id = source_id
                     content_hash = compute_content_hash(content)
@@ -328,10 +329,7 @@ class DistillationPipeline:
                         "source": s.get("source", ""),
                     }
                     priority = compute_priority(doc_meta, novelty_score=0.5, graph_gap_score=0.0)
-                    await push_doc(
-                        self.cmk_runtime.ingestion_control.redis,
-                        doc_id, priority, tier="tier0"
-                    )
+                    await push_doc(self.ingest_redis, doc_id, priority, tier="tier0")
                     # Mark source as "queued_for_ingestion" to skip direct processing
                     await transition_source_status(
                         self.adapter, source_id, "queued_for_ingestion", current_status="fetched"

@@ -138,6 +138,7 @@ class SystemManager:
                 self.cmk_runtime = None
 
             # 3.5 Ingestion Control — multi-tier digestion pipeline
+            async_redis = None
             try:
                 from src.core.memory.cmk.runtime import CMKRuntime
                 from src.core.memory.cmk.config import CMKConfig
@@ -174,6 +175,7 @@ class SystemManager:
                 budget=self.budget,
                 adapter=self.adapter,
                 cmk_runtime=self.cmk_runtime,
+                ingest_redis=async_redis,
             )
 
             # 4.5 Auto-apply pending migrations (never ask user to run SQL manually)
