@@ -66,6 +66,8 @@ from .loop_governor import (
 from .activation import ActivationMemory
 from .authority import CanonicalKnowledgeStore, CanonicalClaim
 from .consolidation import ConsolidationPipeline
+from .belief_graph import BeliefGraph, BeliefNode, BeliefEdge, RelationType
+from .concept_anchors import ConceptAnchorStore, ConceptAnchor, CANONICAL_CONCEPTS
 
 from .config import CMKConfig
 from .store import CMKStore
@@ -134,4 +136,13 @@ __all__ = [
     "CanonicalKnowledgeStore",
     "CanonicalClaim",
     "ConsolidationPipeline",
+
+    # Belief Graph + Concept Anchors
+    "BeliefGraph",
+    "BeliefNode",
+    "BeliefEdge",
+    "RelationType",
+    "ConceptAnchorStore",
+    "ConceptAnchor",
+    "CANONICAL_CONCEPTS",
 ]

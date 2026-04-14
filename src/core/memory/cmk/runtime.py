@@ -13,7 +13,8 @@ Provides:
 
 import logging
 import time
-from typing import List, Dict, Any, Optional
+import uuid
+from typing import List, Dict, Any, Optional, Set
 
 from .config import CMKConfig
 from .types import CMKAtom, Concept
@@ -29,6 +30,8 @@ from .retrieval import CMKRetriever
 from .store import CMKStore
 from .activation import ActivationMemory
 from .authority import CanonicalKnowledgeStore
+from .belief_graph import BeliefGraph, BeliefNode, BeliefEdge, RelationType
+from .concept_anchors import ConceptAnchorStore, ConceptAnchor, CANONICAL_CONCEPTS
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +89,13 @@ class CMKRuntime:
 
         # Canonical Knowledge Store (Layer A — long-term semantic memory, never decays)
         self.cks = CanonicalKnowledgeStore(pg_pool=pg_pool)
+
+        # Global Belief Graph (reasoning substrate — connects claims across domains)
+        self.belief_graph = BeliefGraph(pg_pool=pg_pool)
+
+        # Concept Anchors (cross-domain abstraction hubs)
+        self.concept_anchors = ConceptAnchorStore(pg_pool=pg_pool)
+        self.concept_anchors.initialize_canonical_concepts()
 
         # Atom store (in-memory)
         self.atoms: Dict[str, CMKAtom] = {}
@@ -475,6 +485,110 @@ class CMKRuntime:
     async def decay_activation(self):
         """Apply decay to activation memory (call periodically)."""
         return await self.activation.decay_all()
+
+    # ── Belief Graph Operations ──
+
+    def create_belief_node(
+        self,
+        claim: str,
+        domain: str = "",
+        authority_score: float = 0.5,
+        embedding: Optional[List[float]] = None,
+        canonical_id: Optional[str] = None,
+    ) -> str:
+        """Create a belief node in the global graph."""
+        node = BeliefNode(
+            id=f"belief_{uuid.uuid4().hex[:8]}",
+            claim=claim,
+            domain=domain,
+            authority_score=authority_score,
+            embedding=embedding,
+            canonical_id=canonical_id,
+        )
+        return self.belief_graph.add_node(node)
+
+    def link_beliefs(
+        self,
+        from_id: str,
+        to_id: str,
+        relation: str,
+        strength: float,
+        evidence: Optional[List[str]] = None,
+        reason: str = "",
+    ) -> Optional[BeliefEdge]:
+        """Create a reasoning link between two belief nodes."""
+        return self.belief_graph.add_edge(from_id, to_id, relation, strength, evidence, reason)
+
+    def find_belief_paths(
+        self,
+        from_id: str,
+        to_id: str,
+        max_hops: int = 3,
+    ) -> List:
+        """Find reasoning paths between two belief nodes."""
+        return self.belief_graph.find_paths(from_id, to_id, max_hops)
+
+    def expand_belief_neighborhood(
+        self,
+        belief_id: str,
+        max_hops: int = 2,
+        cross_domain: bool = False,
+    ) -> Set[str]:
+        """
+        Expand from a belief node, collecting reachable beliefs.
+
+        If cross_domain=True, also traverses through concept anchors
+        to reach beliefs in other domains.
+        """
+        # Graph expansion
+        neighbors = self.belief_graph.expand_from(belief_id, max_hops)
+
+        if cross_domain:
+            # Also traverse via concept anchors
+            concepts = self.concept_anchors.get_concepts_for_belief(belief_id)
+            for concept in concepts:
+                # Get beliefs from OTHER domains linked to same concept
+                cross_beliefs = self.concept_anchors.get_cross_domain_beliefs(
+                    concept.id, exclude_domain=""
+                )
+                for domain_beliefs in cross_beliefs.values():
+                    neighbors.update(domain_beliefs)
+
+        return neighbors
+
+    def propagate_graph_authority(self, iterations: int = 3):
+        """Run authority propagation across the belief graph."""
+        self.belief_graph.propagate_authority(iterations=iterations)
+
+    def propagate_contradictions(self):
+        """Run contradiction propagation across the belief graph."""
+        return self.belief_graph.propagate_contradictions()
+
+    def link_belief_to_concepts(
+        self,
+        belief_id: str,
+        concept_names: List[str],
+        domain: str = "",
+    ):
+        """Link a belief node to concept anchors by name."""
+        for name in concept_names:
+            concept = self.concept_anchors.find_by_name(name)
+            if concept:
+                self.concept_anchors.link_belief(belief_id, concept.id, domain)
+                # Also add graph edge
+                concept_node_id = f"concept_node_{concept.id}"
+                if concept_node_id not in self.belief_graph._nodes:
+                    self.belief_graph.add_node(BeliefNode(
+                        id=concept_node_id,
+                        claim=f"Concept: {concept.name}",
+                        domain="meta",
+                        authority_score=concept.authority_score,
+                    ))
+                self.belief_graph.add_edge(
+                    belief_id, concept_node_id,
+                    RelationType.INSTANTIATES.value,
+                    strength=0.7,
+                )
 
     # ── Cleanup ──
 
