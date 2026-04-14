@@ -29,6 +29,7 @@ from src.research.acquisition.budget import BudgetMonitor, CondensationPriority
 from src.llm.client import OllamaClient
 from src.llm.model_router import TaskType
 from src.core.memory.cmk.runtime import CMKRuntime
+from src.research.acquisition.ingestion_control import push_doc, compute_content_hash, compute_priority
 
 
 # Canonical filter reasons matching DB CHECK constraint:
@@ -312,6 +313,33 @@ class DistillationPipeline:
                 continue
 
             content = ref["inline_text"]
+
+            # ── CMK Integration: Push to ingestion control Tier 0 ──
+            if self.cmk_runtime and self.cmk_runtime.ingestion_control:
+                try:
+                    doc_id = source_id
+                    content_hash = compute_content_hash(content)
+                    # Push to Tier 0 for dedup + novelty gate
+                    doc_meta = {
+                        "id": doc_id,
+                        "url": s.get("url", ""),
+                        "content": content,
+                        "mission_id": mission_id,
+                        "source": s.get("source", ""),
+                    }
+                    priority = compute_priority(doc_meta, novelty_score=0.5, graph_gap_score=0.0)
+                    await push_doc(
+                        self.cmk_runtime.ingestion_control.redis,
+                        doc_id, priority, tier="tier0"
+                    )
+                    # Mark source as "queued_for_ingestion" to skip direct processing
+                    await transition_source_status(
+                        self.adapter, source_id, "queued_for_ingestion", current_status="fetched"
+                    )
+                    logger.debug(f"[Distillery] Pushed {doc_id[:20]} to Tier 0 (priority={priority:.2f})")
+                    continue
+                except Exception as ic_err:
+                    logger.debug(f"[Distillery] Ingestion control push failed: {ic_err}, falling through to direct processing")
 
             # ── GATE 0a: Heuristic pre-filter (CPU-only, fast) ──
             from src.utils.embedding_distiller import gate_0a_heuristic

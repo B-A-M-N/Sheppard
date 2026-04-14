@@ -20,6 +20,7 @@ from typing import AsyncGenerator, List, Optional, Dict, Any, Tuple
 from src.research.acquisition.budget import BudgetMonitor, BudgetConfig, CondensationPriority
 from src.research.acquisition.crawler import FirecrawlLocalClient, CrawlerConfig
 from src.research.acquisition.frontier import AdaptiveFrontier
+from src.research.acquisition.ingestion_control import IngestionControl
 from src.utils.console import console
 from src.utils.status_pubsub import publish_status
 # V2 Condensation
@@ -68,6 +69,9 @@ class SystemManager:
         self.research_system: Optional[ResearchSystem] = None
         # CMK (Cognitive Memory Kernel)
         self.cmk_runtime = None
+        # Ingestion Control (multi-tier digestion)
+        self.ingestion_control: Optional[IngestionControl] = None
+        self._ingestion_workers: List[asyncio.Task] = []
         # V2 MemoryManager removed — canonical truth is V3 adapter only
         self.memory = None
 
@@ -132,6 +136,36 @@ class SystemManager:
             except Exception as cmk_err:
                 logger.debug(f"[System] CMK Runtime not available: {cmk_err}")
                 self.cmk_runtime = None
+
+            # 3.5 Ingestion Control — multi-tier digestion pipeline
+            try:
+                from src.core.memory.cmk.runtime import CMKRuntime
+                from src.core.memory.cmk.config import CMKConfig
+
+                # Create async Redis client for ingestion control
+                async_redis = redis.from_url("redis://localhost:6379", decode_responses=True)
+
+                self.ingestion_control = IngestionControl(
+                    redis=async_redis,
+                    cmk_runtime=self.cmk_runtime,
+                    chroma_client=self.chroma_client,
+                )
+
+                # Create crawl source queue (crawlers push here)
+                self._crawl_source = asyncio.Queue(maxsize=5000)
+
+                # Start workers with hooks into existing pipeline
+                self._ingestion_workers = self.ingestion_control.start_workers(
+                    crawl_source=self._crawl_source,
+                    distill_fn=self._distill_doc,
+                    fetch_doc_fn=self._fetch_doc,
+                    store_atoms_fn=self._store_atoms,
+                )
+                logger.info("[System] Ingestion Control workers started")
+            except Exception as ic_err:
+                logger.debug(f"[System] Ingestion Control not available: {ic_err}")
+                self.ingestion_control = None
+                self._crawl_source = asyncio.Queue(maxsize=5000)
 
             # 4. Condensation pipeline (V3-only, memory=None)
             self.condenser = DistillationPipeline(
@@ -458,6 +492,17 @@ class SystemManager:
             await self.pg_pool.close()
         if getattr(self, 'redis_client', None):
             await self.redis_client.aclose()
+
+        # Stop ingestion control workers
+        if self.ingestion_control and self._ingestion_workers:
+            await self.ingestion_control.stop_workers(self._ingestion_workers)
+            self._ingestion_workers = []
+            # Close async Redis client
+            if hasattr(self.ingestion_control, 'redis') and self.ingestion_control.redis:
+                try:
+                    await self.ingestion_control.redis.aclose()
+                except Exception:
+                    pass
 
         # Stop DLQ consumer
         if getattr(self, '_dlq_task', None):
@@ -861,6 +906,125 @@ class SystemManager:
     def _check_initialized(self) -> None:
         if not self._initialized:
             raise RuntimeError("System not initialized")
+
+    # ── Ingestion Control Helpers ──
+
+    async def _distill_doc(self, doc: Dict[str, Any]) -> List[Any]:
+        """
+        Call the existing distillation pipeline on a single document.
+
+        This wraps the current DistillationPipeline to process one doc
+        instead of the full batch.
+        """
+        if not self.condenser or not self.condenser.ollama:
+            return []
+
+        from src.utils.distillation_pipeline import extract_technical_atoms
+        from src.utils.normalize_atom_schema import normalize_atom_schema
+        import uuid
+
+        content = doc.get("content", "")
+        if not content:
+            return []
+
+        # Extract atoms using existing pipeline
+        mission_id = doc.get("mission_id", "ingestion_control")
+        atoms_data = await extract_technical_atoms(
+            self.condenser.ollama, content, mission_id,
+            source_url=doc.get("url", "")
+        )
+
+        atoms = []
+        for atom_dict in atoms_data:
+            if not isinstance(atom_dict, dict):
+                continue
+            normalized = normalize_atom_schema(atom_dict)
+            content_value = normalized.get("text", "")
+            if not content_value or not isinstance(content_value, str):
+                continue
+
+            atoms.append({
+                "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{mission_id}:{doc.get('id', '')}:{content_value[:200]}")),
+                "content": content_value,
+                "type": atom_dict.get("atom_type", atom_dict.get("type", "claim")),
+                "confidence": normalized.get("confidence", 0.5),
+                "importance": normalized.get("importance", 0.5),
+                "novelty": normalized.get("novelty", 0.5),
+                "source_id": doc.get("id", ""),
+            })
+
+        return atoms
+
+    async def _fetch_doc(self, doc_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch document content by ID from Redis metadata + DB."""
+        if not self.adapter or not self.adapter.pg:
+            return None
+
+        try:
+            # Try fetching from sources table
+            async with self.adapter.pg.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT url, inline_text, content_hash FROM corpus.sources WHERE source_id = $1",
+                    doc_id
+                )
+                if row and row.get("inline_text"):
+                    return {
+                        "id": doc_id,
+                        "url": row.get("url", ""),
+                        "content": row["inline_text"],
+                        "mission_id": doc_id[:36] if len(doc_id) > 36 else doc_id,
+                    }
+        except Exception as e:
+            logger.debug(f"[IngestionControl] Failed to fetch doc {doc_id}: {e}")
+
+        return None
+
+    async def _store_atoms(self, atoms: List[Any], doc_id: str):
+        """Store atoms into Postgres via the existing adapter."""
+        if not self.adapter or not atoms:
+            return
+
+        try:
+            for atom in atoms:
+                atom_id = atom.get("id", "")
+                if not atom_id:
+                    continue
+
+                # Create atom row compatible with existing schema
+                atom_row = {
+                    "atom_id": atom_id,
+                    "topic_id": doc_id[:36],
+                    "mission_id": doc_id,
+                    "domain_profile_id": f"profile_{doc_id[:8]}",
+                    "atom_type": atom.get("type", "claim"),
+                    "title": atom["content"][:50],
+                    "statement": atom["content"],
+                    "summary": atom["content"],
+                    "confidence": atom.get("confidence", 0.5),
+                    "importance": atom.get("importance", 0.5),
+                    "novelty": atom.get("novelty", 0.5),
+                    "scope": {},
+                    "qualifiers": {},
+                    "lineage": {
+                        "mission_id": doc_id,
+                        "extraction_mode": "ingestion_control_tier2"
+                    },
+                    "metadata": {"source_id": doc_id},
+                }
+
+                # V3 integrity invariant: at least one evidence row required
+                evidence_row = {
+                    "atom_id": atom_id,
+                    "source_id": doc_id,
+                    "chunk_id": None,
+                    "evidence_strength": 0.7,
+                    "supports_statement": True,
+                }
+
+                await self.adapter.store_atom_with_evidence(atom_row, [evidence_row])
+
+        except Exception as e:
+            logger.error(f"[IngestionControl] Failed to store atoms for {doc_id}: {e}")
 
 # Global singleton
 system_manager = SystemManager()
