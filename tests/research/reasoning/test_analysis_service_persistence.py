@@ -11,6 +11,7 @@ class RecordingAdapter:
     def __init__(self):
         self.queries = []
         self.outputs = []
+        self.lineage = []
         self.evidence = []
 
     async def create_application_query(self, query):
@@ -18,6 +19,9 @@ class RecordingAdapter:
 
     async def store_application_output(self, output):
         self.outputs.append(output)
+
+    async def store_application_lineage(self, application_query_id, lineage_json):
+        self.lineage.append((application_query_id, lineage_json))
 
     async def bind_application_evidence(self, application_query_id, rows):
         self.evidence.append((application_query_id, rows))
@@ -88,6 +92,9 @@ async def test_persist_application_run_records_query_output_and_evidence():
     assert len(adapter.evidence) == 1
     application_query_id, rows = adapter.evidence[0]
     assert application_query_id == report.application_query_id
+    assert adapter.lineage[0][0] == report.application_query_id
+    assert adapter.lineage[0][1]["frame"]["problem_type"] == "diagnostic"
+    assert adapter.lineage[0][1]["critic"]["counter_recommendation"] == "Measure drops first."
     assert rows == [
         {"authority_record_id": "auth-1", "atom_id": "atom-1", "bundle_id": None},
         {"authority_record_id": None, "atom_id": "atom-2", "bundle_id": None},

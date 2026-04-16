@@ -334,6 +334,30 @@ class AnalysisService:
                     "counter_recommendation": report.critic.counter_recommendation,
                 },
             })
+            await adapter.store_application_lineage(
+                application_query_id,
+                {
+                    "frame": {
+                        "problem_type": report.frame.problem_type,
+                        "goal": report.frame.goal,
+                        "symptoms": report.frame.symptoms,
+                        "constraints": report.frame.constraints,
+                        "domain_hints": report.frame.domain_hints,
+                        "retrieval_queries": report.frame.retrieval_queries,
+                    },
+                    "analyst": {
+                        "diagnosis": report.analyst.diagnosis,
+                        "confidence": report.analyst.confidence,
+                        "recommendation": report.analyst.recommendation,
+                        "key_atoms": report.analyst.key_atoms,
+                    },
+                    "critic": {
+                        "strongest_objection": report.critic.strongest_objection,
+                        "counter_recommendation": report.critic.counter_recommendation,
+                        "overlooked_atoms": report.critic.overlooked_atoms,
+                    },
+                },
+            )
 
             evidence_rows = []
             seen = set()

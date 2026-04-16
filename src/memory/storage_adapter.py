@@ -160,6 +160,7 @@ class ApplicationStore(Protocol):
     async def create_application_query(self, query: JsonDict) -> None: ...
     async def get_application_query(self, application_query_id: str) -> JsonDict | None: ...
     async def store_application_output(self, output: JsonDict) -> None: ...
+    async def store_application_lineage(self, application_query_id: str, lineage_json: JsonDict) -> None: ...
     async def bind_application_evidence(
         self,
         application_query_id: str,
@@ -941,6 +942,16 @@ class SheppardStorageAdapter(StorageAdapter):
 
     async def store_application_output(self, output: JsonDict) -> None:
         await self.pg.insert_row("application.application_outputs", output)
+
+    async def store_application_lineage(self, application_query_id: str, lineage_json: JsonDict) -> None:
+        await self.pg.upsert_row(
+            "application.application_lineage",
+            "application_query_id",
+            {
+                "application_query_id": application_query_id,
+                "lineage_json": lineage_json,
+            },
+        )
 
     async def bind_application_evidence(self, application_query_id: str, rows: Sequence[JsonDict]) -> None:
         if not rows: return
