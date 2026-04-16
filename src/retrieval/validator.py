@@ -6,7 +6,7 @@ retrieved atom via lexical overlap, numeric consistency, and entity consistency.
 """
 
 import re
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from .models import RetrievedItem
 
 # Comparative language patterns for derived claim detection
@@ -188,6 +188,111 @@ def _is_delta_pattern(text_lower: str) -> bool:
     return any(re.search(p, text_lower) for p in delta_patterns)
 
 
+def _normalize_citation_key(citation: str) -> str:
+    """Normalize citation markers so `[A1]` and `A1` resolve to the same key."""
+    return citation.strip()[1:-1] if citation.strip().startswith('[') and citation.strip().endswith(']') else citation.strip()
+
+
+def _combined_cited_content(
+    citations: List[str],
+    item_map: Dict[str, RetrievedItem],
+) -> str:
+    """Combine all cited atom content into one validation surface."""
+    return " ".join(
+        item_map[c].content
+        for c in citations
+        if c in item_map and item_map[c].content
+    )
+
+
+def _validate_multi_citation_block(
+    text: str,
+    citations: List[str],
+    item_map: Dict[str, RetrievedItem],
+    claim_nums: List[str],
+    has_comparative_language: bool,
+) -> Tuple[List[str], List[Dict[str, Any]]]:
+    """
+    Validate a block grounded by multiple citations against the combined evidence.
+
+    This is more permissive than single-citation validation because a multi-atom
+    sentence may intentionally distribute its support across several cited atoms.
+    """
+    errors: List[str] = []
+    details: List[Dict[str, Any]] = []
+
+    missing = [c for c in citations if c not in item_map]
+    for cite in missing:
+        errors.append(f"Citation {cite} referenced but not found in retrieved items.")
+        details.append({'claim': text, 'cited': cite, 'error': 'citation_not_found'})
+
+    present = [c for c in citations if c in item_map]
+    if not present:
+        return errors, details
+
+    combined_content = _combined_cited_content(present, item_map)
+
+    claim_words = set(tokenize(text))
+    atom_words = set(tokenize(combined_content))
+    content_words = claim_words - STOPWORDS
+    overlap = content_words & atom_words
+    if len(overlap) < 2:
+        errors.append(
+            f"Insufficient lexical overlap for citations {', '.join(present)}: "
+            f"only {len(overlap)} content words in common."
+        )
+        details.append({
+            'claim': text,
+            'cited': present,
+            'error': 'lexical_overlap',
+            'overlap_count': len(overlap),
+        })
+
+    if has_comparative_language and claim_nums:
+        derived_validated = _verify_derived_claim(text, claim_nums, present, item_map)
+        if not derived_validated['passed']:
+            errors.extend(derived_validated['errors'])
+            for err in derived_validated['errors']:
+                details.append({
+                    'claim': text,
+                    'cited': present,
+                    'error': 'derived_mismatch',
+                    'detail': err,
+                })
+    else:
+        combined_nums = {n.replace(',', '') for n in extract_numbers(combined_content)}
+        for num in claim_nums:
+            norm_num = num.replace(',', '')
+            if norm_num not in combined_nums:
+                errors.append(
+                    f"Number '{num}' in claim not present in combined supporting atoms "
+                    f"{', '.join(present)}."
+                )
+                details.append({
+                    'claim': text,
+                    'cited': present,
+                    'error': 'number_mismatch',
+                    'number': num,
+                })
+
+    claim_entities = extract_entities(text)
+    combined_lower = combined_content.lower()
+    for ent in claim_entities:
+        if ent.lower() not in combined_lower:
+            errors.append(
+                f"Entity '{ent}' in claim not present in combined supporting atoms "
+                f"{', '.join(present)}."
+            )
+            details.append({
+                'claim': text,
+                'cited': present,
+                'error': 'entity_missing',
+                'entity': ent,
+            })
+
+    return errors, details
+
+
 def validate_response_grounding(
     response_text: str,
     retrieved_items: List[RetrievedItem]
@@ -216,7 +321,9 @@ def validate_response_grounding(
     item_map: Dict[str, RetrievedItem] = {}
     for item in retrieved_items:
         if item.citation_key:
+            normalized = _normalize_citation_key(item.citation_key)
             item_map[item.citation_key] = item
+            item_map[normalized] = item
 
     # Split the response into text segments and citation markers
     # Pattern matches [A001] etc.
@@ -259,11 +366,11 @@ def validate_response_grounding(
         text = seg['text']
         citations = seg['citations']  # List of all citations for this text block
 
-        if not text:
+        if not text or not re.search(r'\w', text):
             continue
 
         # Filter out None citations
-        valid_citations = [c for c in citations if c is not None]
+        valid_citations = [_normalize_citation_key(c) for c in citations if c is not None]
 
         # If segment has no citation, it's uncited
         if not valid_citations:
@@ -290,7 +397,20 @@ def validate_response_grounding(
             # Continue with lexical/entity checks for derived claims too
         # else: skip derived check (single citation or no comparative language) -> existing path
 
-        # --- Existing checks for ALL segments ---
+        if is_multi_citation:
+            block_errors, block_details = _validate_multi_citation_block(
+                text=text,
+                citations=valid_citations,
+                item_map=item_map,
+                claim_nums=claim_nums,
+                has_comparative_language=has_comparative_language,
+            )
+            errors.extend(block_errors)
+            details.extend(block_details)
+            details.append({'claim': text, 'cited': valid_citations, 'valid': len(block_errors) == 0})
+            continue
+
+        # --- Existing checks for single-citation segments ---
         for cite in valid_citations:
             # Look up the cited item
             if cite not in item_map:
