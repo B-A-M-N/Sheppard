@@ -108,6 +108,18 @@ async def test_retrieve_many_merges_semantic_lexical_and_structural_then_reranks
             metadata={"atom_id": "struct-1"},
         )
     ])
+    retriever._authority_search = AsyncMock(return_value=[
+        RetrievedItem(
+            content="authority summary",
+            source="authority:topic",
+            strategy="authority",
+            item_type="authority",
+            relevance_score=0.9,
+            trust_score=0.95,
+            recency_days=1,
+            metadata={"authority_record_id": "auth-1"},
+        )
+    ])
 
     contexts = await retriever.retrieve_many([
         RetrievalQuery(text="alpha", mission_filter="mission-1", max_results=2),
@@ -115,7 +127,10 @@ async def test_retrieve_many_merges_semantic_lexical_and_structural_then_reranks
     ])
 
     assert len(contexts) == 2
+    assert [item.content for item in contexts[0].definitions] == ["authority summary"]
+    assert [item.content for item in contexts[1].definitions] == ["authority summary"]
     assert [item.content for item in contexts[0].evidence] == ["lexical alpha", "structural support"]
     assert [item.content for item in contexts[1].evidence] == ["lexical beta", "structural support"]
     retriever._structural_traversal.assert_awaited_once()
+    retriever._authority_search.assert_awaited_once()
     assert retriever._postgres_fallback.await_count == 2

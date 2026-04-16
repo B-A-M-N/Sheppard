@@ -18,8 +18,9 @@ both anchor to the same atoms, serve different purposes.
 
 import asyncio
 import logging
+import uuid
 from dataclasses import dataclass, field
-from typing import List, Optional, AsyncGenerator
+from typing import List, Optional, AsyncGenerator, Tuple
 
 from src.llm.client import OllamaClient
 from src.research.reasoning.assembler import EvidencePacket, EvidenceAssembler, SectionPlan
@@ -44,6 +45,7 @@ class AnalysisReport:
     critic: CriticOutput
     atom_count: int
     mission_filter: Optional[str] = None
+    application_query_id: Optional[str] = None
 
     def formatted(self) -> str:
         """Human-readable formatted output for display in TUI."""
@@ -174,44 +176,19 @@ class AnalysisService:
         """
         Full analysis pipeline. Returns an AnalysisReport with formatted output.
         """
-        # 1. Frame the problem
-        logger.info("[AnalysisService] Framing problem: %s", problem_statement[:80])
-        frame = await self.framer.frame(problem_statement)
-        logger.info(
-            "[AnalysisService] Frame: type=%s, queries=%d, domains=%s",
-            frame.problem_type,
-            len(frame.retrieval_queries),
-            frame.domain_hints,
-        )
-
-        # 2. Multi-query retrieval — run all queries concurrently, merge results
-        logger.info("[AnalysisService] Running %d retrieval queries", len(frame.all_retrieval_queries()))
-        combined_packet = await self._multi_query_retrieve(
-            frame=frame,
+        report, packet = await self._run_analysis(
+            problem_statement=problem_statement,
             mission_filter=mission_filter,
             topic_filter=topic_filter,
         )
-        logger.info("[AnalysisService] Combined evidence: %d atoms", len(combined_packet.atoms))
-
-        # 3. Analyst — reason from evidence to a position
-        analyst_output = await self.analyst.analyze(combined_packet, frame)
-        logger.info(
-            "[AnalysisService] Analyst: confidence=%.0f%%, recommendation=%s",
-            analyst_output.confidence * 100,
-            analyst_output.recommendation[:60] if analyst_output.recommendation else "none",
-        )
-
-        # 4. Adversarial Critic — challenge the Analyst
-        critic_output = await self.critic.critique(analyst_output, combined_packet)
-        logger.info("[AnalysisService] Critic complete")
-
-        return AnalysisReport(
-            frame=frame,
-            analyst=analyst_output,
-            critic=critic_output,
-            atom_count=len(combined_packet.atoms),
+        await self._persist_application_run(
+            problem_statement=problem_statement,
             mission_filter=mission_filter,
+            topic_filter=topic_filter,
+            report=report,
+            packet=packet,
         )
+        return report
 
     async def analyze_stream(
         self,
@@ -249,9 +226,136 @@ class AnalysisService:
             atom_count=len(combined_packet.atoms),
             mission_filter=mission_filter,
         )
+        await self._persist_application_run(
+            problem_statement=problem_statement,
+            mission_filter=mission_filter,
+            topic_filter=topic_filter,
+            report=report,
+            packet=combined_packet,
+        )
 
         yield "\n"
         yield report.formatted()
+
+    async def _run_analysis(
+        self,
+        problem_statement: str,
+        mission_filter: Optional[str],
+        topic_filter: Optional[str],
+    ) -> Tuple[AnalysisReport, EvidencePacket]:
+        # 1. Frame the problem
+        logger.info("[AnalysisService] Framing problem: %s", problem_statement[:80])
+        frame = await self.framer.frame(problem_statement)
+        logger.info(
+            "[AnalysisService] Frame: type=%s, queries=%d, domains=%s",
+            frame.problem_type,
+            len(frame.retrieval_queries),
+            frame.domain_hints,
+        )
+
+        # 2. Multi-query retrieval — run all queries concurrently, merge results
+        logger.info("[AnalysisService] Running %d retrieval queries", len(frame.all_retrieval_queries()))
+        combined_packet = await self._multi_query_retrieve(
+            frame=frame,
+            mission_filter=mission_filter,
+            topic_filter=topic_filter,
+        )
+        logger.info("[AnalysisService] Combined evidence: %d atoms", len(combined_packet.atoms))
+
+        # 3. Analyst — reason from evidence to a position
+        analyst_output = await self.analyst.analyze(combined_packet, frame)
+        logger.info(
+            "[AnalysisService] Analyst: confidence=%.0f%%, recommendation=%s",
+            analyst_output.confidence * 100,
+            analyst_output.recommendation[:60] if analyst_output.recommendation else "none",
+        )
+
+        # 4. Adversarial Critic — challenge the Analyst
+        critic_output = await self.critic.critique(analyst_output, combined_packet)
+        logger.info("[AnalysisService] Critic complete")
+
+        report = AnalysisReport(
+            frame=frame,
+            analyst=analyst_output,
+            critic=critic_output,
+            atom_count=len(combined_packet.atoms),
+            mission_filter=mission_filter,
+        )
+        return report, combined_packet
+
+    async def _persist_application_run(
+        self,
+        problem_statement: str,
+        mission_filter: Optional[str],
+        topic_filter: Optional[str],
+        report: AnalysisReport,
+        packet: EvidencePacket,
+    ) -> None:
+        adapter = getattr(self.assembler, "adapter", None) or getattr(self.retriever, "adapter", None)
+        if not adapter:
+            return
+
+        application_query_id = f"aq_{uuid.uuid4().hex[:12]}"
+        report.application_query_id = application_query_id
+
+        payload = {
+            "problem_type": report.frame.problem_type,
+            "goal": report.frame.goal,
+            "symptoms": report.frame.symptoms,
+            "constraints": report.frame.constraints,
+            "domain_hints": report.frame.domain_hints,
+            "retrieval_queries": report.frame.retrieval_queries,
+            "mission_filter": mission_filter,
+            "topic_filter": topic_filter,
+            "atom_count": len(packet.atoms),
+            "contradiction_count": len(packet.contradictions),
+            "key_atoms": report.analyst.key_atoms,
+            "critic_overlooked_atoms": report.critic.overlooked_atoms,
+        }
+
+        try:
+            await adapter.create_application_query({
+                "application_query_id": application_query_id,
+                "project_id": mission_filter or topic_filter,
+                "query_type": "analysis",
+                "title": report.frame.goal or problem_statement[:120],
+                "problem_statement": problem_statement,
+                "payload_json": payload,
+            })
+            await adapter.store_application_output({
+                "application_query_id": application_query_id,
+                "output_type": "analysis_report",
+                "inline_text": report.formatted(),
+                "confidence": report.analyst.confidence,
+                "metadata_json": {
+                    "diagnosis": report.analyst.diagnosis,
+                    "recommendation": report.analyst.recommendation,
+                    "critic_objection": report.critic.strongest_objection,
+                    "counter_recommendation": report.critic.counter_recommendation,
+                },
+            })
+
+            evidence_rows = []
+            seen = set()
+            for atom in packet.atoms:
+                metadata = atom.get("metadata") or {}
+                row = {
+                    "authority_record_id": metadata.get("authority_record_id"),
+                    "atom_id": metadata.get("atom_id"),
+                    "bundle_id": None,
+                }
+                if not row["authority_record_id"] and not row["atom_id"]:
+                    continue
+                dedup_key = (row["authority_record_id"], row["atom_id"], row["bundle_id"])
+                if dedup_key in seen:
+                    continue
+                seen.add(dedup_key)
+                evidence_rows.append(row)
+
+            if evidence_rows:
+                await adapter.bind_application_evidence(application_query_id, evidence_rows)
+        except Exception as exc:
+            logger.warning("[AnalysisService] Failed to persist application run: %s", exc)
 
     async def _multi_query_retrieve(
         self,
@@ -315,9 +419,10 @@ class AnalysisService:
 
         # Pull contradictions via the assembler's existing method
         try:
-            if mission_filter and hasattr(self.assembler, '_get_unresolved_contradictions'):
+            contradiction_scope = mission_filter or topic_filter
+            if contradiction_scope and hasattr(self.assembler, '_get_unresolved_contradictions'):
                 contradictions = await self.assembler._get_unresolved_contradictions(
-                    mission_filter, limit=8
+                    contradiction_scope, limit=8
                 )
                 for c in contradictions:
                     combined.contradictions.append({

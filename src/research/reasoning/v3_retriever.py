@@ -137,6 +137,15 @@ class V3Retriever:
         except Exception as e:
             logger.warning(f"[V3Retriever] Lexical stage failed: {e}")
 
+        # Stage 2.5: Authority-record semantic search.
+        # Pulls synthesized authority summaries into the context as definitions /
+        # framing guidance rather than raw atom evidence.
+        try:
+            authority_items = await self._authority_search(query.text, where, max(2, query.max_results // 4))
+        except Exception as e:
+            logger.debug(f"[V3Retriever] Authority stage failed: {e}")
+            authority_items = []
+
         # Stage 3: Structural — pull authority core_atom_ids for the mission and
         # fetch their immediate neighbours from atom_relationships.  Adds atoms
         # that are authoritative for the topic even if they scored low on
@@ -164,9 +173,11 @@ class V3Retriever:
         # trust × recency decay.  Ensures high-trust, recent atoms surface first
         # regardless of which retrieval lane found them.
         items = self._rerank(items, query.max_results)
+        authority_items = self._rerank(authority_items, 3)
 
         # Assemble into role-based context
         ctx = RoleBasedContext()
+        ctx.definitions = authority_items
         ctx.evidence = items
 
         # Attach profiling data if enabled
@@ -254,6 +265,12 @@ class V3Retriever:
         except Exception as e:
             logger.debug(f"[V3Retriever] Structural stage failed in retrieve_many: {e}")
 
+        authority_items: List[RetrievedItem] = []
+        try:
+            authority_items = await self._authority_search(query_texts[0], where, max(2, common_limit // 4))
+        except Exception as e:
+            logger.debug(f"[V3Retriever] Authority stage failed in retrieve_many: {e}")
+
         # Build per-query contexts
         for i in range(N):
             items: List[RetrievedItem] = []
@@ -312,6 +329,7 @@ class V3Retriever:
             items = self._rerank(items, limits[i])
 
             ctx = RoleBasedContext()
+            ctx.definitions = self._rerank(authority_items, 3)
             ctx.evidence = items
 
             if PROFILE_RETRIEVAL:
@@ -325,6 +343,47 @@ class V3Retriever:
             contexts.append(ctx)
 
         return contexts
+
+    async def _authority_search(self, query_text: str, where: dict, limit: int) -> List[RetrievedItem]:
+        items: List[RetrievedItem] = []
+        if limit <= 0:
+            return items
+
+        authority_where = {}
+        if where.get("topic_id"):
+            authority_where["topic_id"] = where["topic_id"]
+
+        result = await self.adapter.chroma.query(
+            collection="authority_records",
+            query_text=query_text,
+            where=authority_where if authority_where else None,
+            limit=limit,
+        )
+        if not result or not result.get("documents") or not result["documents"][0]:
+            return items
+
+        for doc, meta, distance in zip(
+            result["documents"][0],
+            result["metadatas"][0],
+            result["distances"][0],
+        ):
+            item = RetrievedItem(
+                content=doc,
+                source=f"authority:{meta.get('authority_record_id', 'unknown')}",
+                strategy="authority",
+                knowledge_level="A",
+                item_type="authority",
+                relevance_score=1.0 - distance,
+                trust_score=float(meta.get("confidence") or 0.7),
+                recency_days=self._days_since(meta.get("captured_at")),
+                tech_density=0.7,
+                citation_key=meta.get("authority_record_id"),
+                concept_name=meta.get("maturity"),
+                metadata=meta or {},
+            )
+            items.append(item)
+
+        return items
 
 
     async def _structural_traversal(self, where: dict, limit: int) -> List[RetrievedItem]:

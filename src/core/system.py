@@ -355,6 +355,7 @@ class SystemManager:
         q = RetrievalQuery(
             text=text,
             project_filter=project_filter,
+            mission_filter=project_filter,
             topic_filter=topic_filter,
             max_results=max_results
         )

@@ -164,7 +164,7 @@ class SynthesisService:
 
             # Populate authority record atom layer from atoms actually used in synthesis.
             # This converts the placeholder empty lists into a real atom substrate.
-            all_atom_ids = list({
+            all_atom_ids = sorted({
                 atom_id
                 for s in sections_to_store
                 for atom_id in s.get("atom_ids_used", [])
@@ -183,6 +183,17 @@ class SynthesisService:
                             "freshness": "current",
                         },
                     })
+                    await self.adapter.set_authority_core_atoms(
+                        auth_id,
+                        [
+                            {
+                                "atom_id": atom_id,
+                                "position_rank": idx + 1,
+                                "role": "core",
+                            }
+                            for idx, atom_id in enumerate(all_atom_ids)
+                        ],
+                    )
                     logger.info(f"[Synthesis] Authority record {auth_id} updated with {len(all_atom_ids)} core atoms")
                 except Exception as e:
                     logger.warning(f"[Synthesis] Failed to update authority atom layer: {e}")
