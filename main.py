@@ -80,6 +80,20 @@ def _strip_ansi(text: str) -> str:
     """Remove ANSI escape codes from text."""
     return _ANSI_RE.sub('', text)
 
+def _reset_terminal():
+    """Reset terminal state to prevent ANSI corruption on exit."""
+    import sys
+    # Reset all terminal attributes
+    sys.stdout.write('\x1b[0m')  # Reset all attributes
+    sys.stdout.write('\x1b[?2004l')  # Disable bracketed paste mode
+    sys.stdout.write('\x1b[?1000l')  # Disable mouse tracking
+    sys.stdout.write('\x1b[?1002l')  # Disable button event tracking
+    sys.stdout.write('\x1b[?1003l')  # Disable any event tracking
+    sys.stdout.write('\x1b[?25h')  # Show cursor
+    sys.stdout.write('\x1b[?1049l')  # Exit alternate screen buffer
+    sys.stdout.write('\x1b[0m')  # Reset again for good measure
+    sys.stdout.flush()
+
 # Ensure src/ is on the Python path
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
@@ -141,6 +155,14 @@ class TUI:
         self.layout = self._build_layout()
         self.kb = self._build_keybindings()
         self.app = None
+
+    def _invalidate(self):
+        """Trigger prompt_toolkit to redraw the screen."""
+        if self.app:
+            try:
+                self.app.invalidate()
+            except Exception:
+                pass
 
     def _build_layout(self):
         """3-pane layout: Menu (left 28) | Chat (rest) over Logs (bottom 10)"""
@@ -283,6 +305,7 @@ class TUI:
 
     def append_chat(self, text: str, prefix: str = "", flush: bool = True):
         """Add text to chat history. flush=True adds a newline (new message)."""
+        text = _strip_ansi(text)
         if prefix:
             text = f"{prefix}{text}"
         current = self.chat_history.text
@@ -294,19 +317,23 @@ class TUI:
             self.chat_history.text = text
         # Auto-scroll to bottom
         self.chat_history.buffer.cursor_position = len(self.chat_history.buffer.text)
+        self._invalidate()
 
     def append_log(self, text: str):
         """Add a line to the log panel."""
+        text = _strip_ansi(text)
         ts = datetime.now().strftime("%H:%M:%S")
         line = f"[{ts}] {text}"
         self._log_lines.append(line)
         self.log_area.text = "\n".join(self._log_lines)
         # Auto-scroll to bottom
         self.log_area.buffer.cursor_position = len(self.log_area.buffer.text)
+        self._invalidate()
 
     def update_menu(self, lines: list[str]):
         """Update the menu/status panel."""
         self.menu_area.text = "\n".join(lines)
+        self._invalidate()
 
     def set_status(self, text: str):
         self.status_text = text
@@ -360,11 +387,11 @@ class TUIConsole:
         text = self._render_to_text(*objects)
         if text:
             for line in text.splitlines():
-                line = line.strip()
+                line = _strip_ansi(line.strip())
                 if line:
                     self._tui.append_chat(line, prefix="", flush=True)
         else:
-            raw = ' '.join(str(o) for o in objects)
+            raw = _strip_ansi(' '.join(str(o) for o in objects))
             if raw.strip():
                 self._tui.append_chat(raw.strip(), prefix="", flush=True)
 
@@ -436,6 +463,7 @@ async def run_tui(tui: TUI):
     """Main 3-pane TUI loop."""
     command_handler = None
     chat_app = None
+    background_tasks = []  # Track all background tasks for clean shutdown
 
     def on_chat_input(text: str):
         """Handle user input from chat pane."""
@@ -452,12 +480,14 @@ async def run_tui(tui: TUI):
         if text.startswith("/"):
             if command_handler:
                 # Run command in background so UI doesn't freeze
-                asyncio.create_task(_handle_command(command_handler, text, tui))
+                task = asyncio.create_task(_handle_command(command_handler, text, tui))
+                background_tasks.append(task)
             return
 
         # Normal chat
         if chat_app:
-            asyncio.create_task(_process_chat(chat_app, text, tui))
+            task = asyncio.create_task(_process_chat(chat_app, text, tui))
+            background_tasks.append(task)
 
     tui.set_on_input(on_chat_input)
 
@@ -518,7 +548,8 @@ async def run_tui(tui: TUI):
         ])
 
         # Start mission status updater
-        asyncio.create_task(_update_menu_status(tui))
+        menu_task = asyncio.create_task(_update_menu_status(tui))
+        background_tasks.append(menu_task)
 
     except Exception as e:
         tui.append_log(f"Init error: {e}")
@@ -544,6 +575,9 @@ async def run_tui(tui: TUI):
         mouse_support=True,
     )
 
+    # Assign app reference NOW so background tasks can trigger redraws
+    tui.app = app
+
     from prompt_toolkit.patch_stdout import patch_stdout
 
     # Focus the chat input
@@ -551,10 +585,25 @@ async def run_tui(tui: TUI):
 
     # patch_stdout() captures all print()/logging output and routes it
     # through prompt_toolkit's renderer instead of corrupting the terminal
-    with patch_stdout():
-        result = await app.run_async()
-    if result == "exit":
-        await system_manager.cleanup()
+    try:
+        with patch_stdout():
+            result = await app.run_async()
+        if result == "exit":
+            await system_manager.cleanup()
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    except Exception as e:
+        tui.append_log(f"TUI error: {e}")
+    finally:
+        # Clean shutdown: cancel all background tasks
+        for task in background_tasks:
+            if not task.done():
+                task.cancel()
+        # Wait for cancellations to complete
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
+        # Reset terminal state to prevent ANSI corruption
+        _reset_terminal()
 
 
 async def _handle_command(command_handler, text: str, tui: TUI):
@@ -639,7 +688,10 @@ async def async_main():
     tui = TUI()
     try:
         await run_tui(tui)
+    except (KeyboardInterrupt, SystemExit):
+        pass
     finally:
+        _reset_terminal()
         await system_manager.cleanup()
 
 
@@ -647,8 +699,10 @@ if __name__ == "__main__":
     try:
         asyncio.run(async_main())
     except KeyboardInterrupt:
+        _reset_terminal()
         sys.exit(0)
     except Exception as e:
+        _reset_terminal()
         print(f"Fatal Error: {e}")
         traceback.print_exc()
         sys.exit(1)

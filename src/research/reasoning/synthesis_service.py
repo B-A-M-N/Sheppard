@@ -162,6 +162,31 @@ class SynthesisService:
             if citations_to_store:
                 await self.adapter.store_synthesis_citations(citations_to_store)
 
+            # Populate authority record atom layer from atoms actually used in synthesis.
+            # This converts the placeholder empty lists into a real atom substrate.
+            all_atom_ids = list({
+                atom_id
+                for s in sections_to_store
+                for atom_id in s.get("atom_ids_used", [])
+            })
+            if all_atom_ids:
+                try:
+                    await self.adapter.upsert_authority_record({
+                        "authority_record_id": auth_id,
+                        "atom_layer_json": {
+                            "core_atom_ids": all_atom_ids,
+                            "related_atom_ids": [],
+                        },
+                        "status_json": {
+                            "maturity": "synthesized",
+                            "confidence": 0.7,
+                            "freshness": "current",
+                        },
+                    })
+                    logger.info(f"[Synthesis] Authority record {auth_id} updated with {len(all_atom_ids)} core atoms")
+                except Exception as e:
+                    logger.warning(f"[Synthesis] Failed to update authority atom layer: {e}")
+
         console.print("\n[bold green][DONE][/bold green] Master Brief successfully synthesized and stored in Level D Memory.")
         return full_report
 

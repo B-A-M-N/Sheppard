@@ -43,6 +43,7 @@ class CommandHandler:
                 '/missions': self._handle_missions,
                 '/nudge': self._handle_nudge,
                 '/query': self._handle_query,
+                '/analyze': self._handle_analyze, '/a': self._handle_analyze,
                 '/report': self._handle_report,
                 '/research': self._handle_research, '/r': self._handle_research,
                 '/status': self._handle_status,
@@ -142,6 +143,69 @@ class CommandHandler:
             ctx = await system_manager.query(text=text)
         if ctx: self.console.print(Panel(Markdown(ctx), title="Retrieval Results", border_style="cyan"))
 
+    async def _handle_analyze(self, *args, _tui=None) -> None:
+        """/analyze <problem statement> [--mission=<id>] [--topic=<id>]
+
+        Reason from the knowledge base toward a position, recommendation,
+        and adversarial stress-test. Grounds every conclusion in stored atoms.
+        """
+        if not args:
+            msg = "Usage: /analyze <problem statement> [--mission=<id>] [--topic=<id>]"
+            if _tui:
+                _tui.append_chat(msg, prefix="", flush=True)
+            else:
+                self.console.print(msg, style=STYLES['warning'])
+            return
+
+        # Parse args
+        mission_filter = None
+        topic_filter = None
+        problem_parts = []
+        for arg in args:
+            if arg.startswith('--mission='):
+                mission_filter = arg.split('=', 1)[1]
+            elif arg.startswith('--topic='):
+                topic_filter = arg.split('=', 1)[1]
+            else:
+                problem_parts.append(arg)
+
+        problem = ' '.join(problem_parts)
+        if not problem:
+            msg = "Please provide a problem statement."
+            if _tui:
+                _tui.append_chat(msg, prefix="", flush=True)
+            else:
+                self.console.print(msg, style=STYLES['warning'])
+            return
+
+        if _tui:
+            # Streaming path — write progress and result directly to TUI chat buffer
+            _tui.append_chat(f"Analyzing: {problem}\n", prefix="", flush=True)
+            try:
+                async for chunk in system_manager.analyze_stream(
+                    problem_statement=problem,
+                    mission_filter=mission_filter,
+                    topic_filter=topic_filter,
+                ):
+                    _tui.append_chat(chunk, prefix="", flush=False)
+                _tui.append_chat("", prefix="", flush=True)
+            except Exception as e:
+                logger.error(f"Analysis failed: {e}")
+                _tui.append_chat(f"Analysis error: {e}", prefix="", flush=True)
+        else:
+            # Console fallback (non-TUI)
+            with self.console.status("[bold cyan]Analyzing problem..."):
+                report = await system_manager.analyze(
+                    problem_statement=problem,
+                    mission_filter=mission_filter,
+                    topic_filter=topic_filter,
+                )
+            self.console.print(Panel(
+                report.formatted(),
+                title="Analysis Report",
+                border_style="yellow",
+            ))
+
     async def _handle_report(self, *args) -> None:
         """/report <topic_keyword>"""
         if not args:
@@ -149,25 +213,27 @@ class CommandHandler:
             return
             
         keyword = args[0].lower()
-        
-        # We need to find the topic ID. Let's ask DB via memory manager.
-        # Quick and dirty fuzzy match against topics in DB.
-        async with system_manager.memory.pg_pool.acquire() as conn:
-            topics = await conn.fetch("SELECT id, name FROM topics")
-            
-        matches = [t for t in topics if keyword in t['name'].lower()]
-        
+
+        # Match against V3 mission titles via adapter.pg
+        pg = system_manager.adapter.pg
+        async with pg.pool.acquire() as conn:
+            missions = await conn.fetch(
+                "SELECT mission_id, title FROM mission.research_missions ORDER BY created_at DESC"
+            )
+
+        matches = [m for m in missions if keyword in (m['title'] or '').lower()]
+
         if not matches:
-            self.console.print(f"[bold red]No topic found matching: '{keyword}'[/bold red]")
+            self.console.print(f"[bold red]No mission found matching: '{keyword}'[/bold red]")
             return
         elif len(matches) > 1:
-            self.console.print("[bold yellow]Multiple topics found. Please be more specific:[/bold yellow]")
-            for i, t in enumerate(matches):
-                self.console.print(f" [{i+1}] {t['name']}")
+            self.console.print("[bold yellow]Multiple missions found. Please be more specific:[/bold yellow]")
+            for i, m in enumerate(matches):
+                self.console.print(f" [{i+1}] {m['title']}")
             return
-            
-        topic_id = str(matches[0]['id'])
-        topic_name = matches[0]['name']
+
+        topic_id = str(matches[0]['mission_id'])
+        topic_name = matches[0]['title']
         
         self.console.print(f"[bold cyan]Triggering Tier 4 Synthesis for: '{topic_name}'[/bold cyan]")
         report = await system_manager.generate_report(topic_id)
@@ -380,7 +446,39 @@ class CommandHandler:
         table.add_row("/learn", "Start background mission")
         table.add_row("/knowledge", "View all stored topics and material")
         table.add_row("/query", "Query the knowledge stack")
+        table.add_row(r"/analyze \[/a]", "Reason from knowledge toward a recommendation (Analyst + Critic)")
+        table.add_row("/report", "Generate a full Master Brief (Archivist)")
         table.add_row("/distill", "Manual knowledge distillation")
         table.add_row("/status", "Full system dashboard")
         table.add_row("/settings", "Modify configuration")
         self.console.print(table)
+
+    async def handle_command_with_tui(self, input_text: str, tui) -> None:
+        """
+        TUI-aware command dispatch. Routes commands that support direct
+        TUI buffer writes (streaming output) through the _tui= pathway.
+        Falls back to the standard handle_command() for commands that
+        don't need streaming.
+        """
+        if not input_text.startswith('/'):
+            return
+        try:
+            parts = shlex.split(input_text)
+            command = parts[0].lower()
+            args = tuple(parts[1:]) if len(parts) > 1 else ()
+
+            # Commands that support _tui streaming
+            tui_handlers = {
+                '/analyze': self._handle_analyze,
+                '/a':       self._handle_analyze,
+                '/knowledge': self._handle_knowledge,
+                '/kb':        self._handle_knowledge,
+            }
+
+            if command in tui_handlers:
+                await tui_handlers[command](*args, _tui=tui)
+            else:
+                await self.handle_command(input_text)
+        except Exception as e:
+            logger.error(f"TUI command error: {e}")
+            tui.append_chat(f"[Error: {e}]", prefix="", flush=True)

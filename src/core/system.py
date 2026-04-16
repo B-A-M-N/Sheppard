@@ -14,7 +14,7 @@ import json
 import logging
 import os
 import re
-from typing import AsyncGenerator, List, Optional, Dict, Any, Tuple
+from typing import AsyncGenerator, List, Optional, Dict, Any, Tuple, Set
 
 # V2 Acquisitions
 from src.research.acquisition.budget import BudgetMonitor, BudgetConfig, CondensationPriority
@@ -66,6 +66,7 @@ class SystemManager:
         self.condenser: Optional[DistillationPipeline] = None
         self.retriever: Optional[V3Retriever] = None
         self.synthesis_service: Optional[SynthesisService] = None
+        self.analysis_service = None  # AnalysisService — reasoning layer
         self.research_system: Optional[ResearchSystem] = None
         # CMK (Cognitive Memory Kernel)
         self.cmk_runtime = None
@@ -79,6 +80,7 @@ class SystemManager:
         self.active_frontiers: Dict[str, AdaptiveFrontier] = {}
         self._monitor_task: Optional[asyncio.Task] = None
         self._vampire_tasks: List[asyncio.Task] = []
+        self._condensation_tasks: Set[asyncio.Task] = set()
         self._initialized = False
 
     async def initialize(self) -> Tuple[bool, Optional[str]]:
@@ -88,6 +90,10 @@ class SystemManager:
 
         try:
             logger.info("[System] Initializing Sheppard Infrastructure...")
+
+            # 0a. Ensure external research services are running (SearXNG, Playwright, Firecrawl)
+            from src.research.service_watchdog import ensure_research_stack
+            await ensure_research_stack()
 
             # 0. Boot V3 Triad Adapters
             from src.config.database import DatabaseConfig
@@ -178,6 +184,22 @@ class SystemManager:
                 ingest_redis=async_redis,
             )
 
+            # 4.1 CMK Chat Bridge — cross-document reasoning layer
+            try:
+                from src.core.memory.cmk.chat_bridge import CMKChatBridge
+
+                self.chat_bridge = CMKChatBridge(
+                    redis_client=async_redis,
+                    pg_pool=self.adapter.pg,
+                    ollama_host=settings.OLLAMA_API_HOST,
+                    distillation_pipeline=self.condenser,
+                )
+                await self.chat_bridge.initialize()
+                logger.info("[System] CMK Chat Bridge initialized with cross-document reasoning")
+            except Exception as bridge_err:
+                logger.debug(f"[System] CMK Chat Bridge not available: {bridge_err}")
+                self.chat_bridge = None
+
             # 4.5 Auto-apply pending migrations (never ask user to run SQL manually)
             await self._apply_pending_migrations()
 
@@ -207,6 +229,14 @@ class SystemManager:
                 memory=None,
                 assembler=assembler,
                 adapter=self.adapter
+            )
+
+            # 7b. Analysis service (reasoning layer — Analyst + Adversarial Critic)
+            from src.research.reasoning.analysis_service import AnalysisService
+            self.analysis_service = AnalysisService(
+                ollama=self.ollama,
+                retriever=self.retriever,
+                assembler=assembler,
             )
 
             # 7. Research system (V3 deep research)
@@ -302,9 +332,26 @@ class SystemManager:
         topic_filter: Optional[str] = None,
         max_results: int = 12
     ) -> str:
-        """Run hybrid retrieval and return formatted context."""
+        """Run hybrid retrieval with cross-document reasoning."""
         self._check_initialized()
-        
+
+        # Try CMK reasoning path first (belief graph expansion)
+        if self.chat_bridge:
+            try:
+                result = await self.chat_bridge.query_with_cmk(
+                    user_query=text,
+                    topic_filter=topic_filter,
+                    mission_filter=project_filter,
+                    use_reasoning=True,
+                )
+                pack = result.get("evidence_pack")
+                if pack and not pack.is_empty:
+                    from src.core.memory.cmk.prompt_contract import _format_evidence_context
+                    return _format_evidence_context(pack)
+            except Exception as e:
+                logger.debug(f"[System] CMK query failed, falling back to retriever: {e}")
+
+        # Fallback: direct retriever
         q = RetrievalQuery(
             text=text,
             project_filter=project_filter,
@@ -313,6 +360,47 @@ class SystemManager:
         )
         ctx = await self.retriever.retrieve(q)
         return self.retriever.build_context_block(ctx, project_name=project_filter)
+
+    async def analyze(
+        self,
+        problem_statement: str,
+        mission_filter: Optional[str] = None,
+        topic_filter: Optional[str] = None,
+    ):
+        """
+        Applied reasoning pipeline: frame the problem → retrieve evidence →
+        Analyst forms a position → Adversarial Critic challenges it →
+        return AnalysisReport with formatted output.
+
+        Unlike query() (which returns facts) and generate_report() (which
+        writes a library document), analyze() reasons toward a recommendation
+        and stress-tests it. Both layers are grounded in the same atom store.
+        """
+        self._check_initialized()
+        if not self.analysis_service:
+            raise RuntimeError("AnalysisService not initialized")
+        return await self.analysis_service.analyze(
+            problem_statement=problem_statement,
+            mission_filter=mission_filter,
+            topic_filter=topic_filter,
+        )
+
+    async def analyze_stream(
+        self,
+        problem_statement: str,
+        mission_filter: Optional[str] = None,
+        topic_filter: Optional[str] = None,
+    ):
+        """Streaming version of analyze() for TUI display."""
+        self._check_initialized()
+        if not self.analysis_service:
+            raise RuntimeError("AnalysisService not initialized")
+        async for chunk in self.analysis_service.analyze_stream(
+            problem_statement=problem_statement,
+            mission_filter=mission_filter,
+            topic_filter=topic_filter,
+        ):
+            yield chunk
 
     async def chat(
         self,
@@ -479,9 +567,27 @@ class SystemManager:
         for task in self._crawl_tasks.values():
             if not task.done():
                 task.cancel()
-        
+
         for vt in self._vampire_tasks:
             if not vt.done(): vt.cancel()
+
+        # Wait for any in-flight condensation to finish (up to 120s) before shutting down.
+        # Condensation involves LLM calls that write knowledge atoms — cancelling mid-run
+        # produces 0 atoms and wastes all the work done so far.
+        if self._condensation_tasks:
+            active = {t for t in self._condensation_tasks if not t.done()}
+            if active:
+                console.print(f"[yellow][Distillery][/yellow] Waiting for {len(active)} condensation task(s) to finish...")
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*active, return_exceptions=True),
+                        timeout=120.0
+                    )
+                    console.print(f"[green][Distillery][/green] Condensation tasks completed cleanly.")
+                except asyncio.TimeoutError:
+                    console.print(f"[yellow][Distillery][/yellow] Condensation timed out after 120s — cancelling.")
+                    for t in active:
+                        t.cancel()
 
         # Close network sessions
         if self.crawler:
@@ -823,6 +929,25 @@ class SystemManager:
             console.print(f"[bold blue][DONE][/bold blue] Mission complete. [green]{total_ingested}[/green] total sources ingested.")
             await self.adapter.update_mission_status(mission_id, "completed")
 
+            # Spawn follow-on missions for emergent topics discovered during this mission
+            if self.condenser:
+                try:
+                    emergent = await self.condenser.get_emergent_topics_to_spawn(mission_id)
+                    for cand in emergent:
+                        concept = cand["concept"]
+                        atom_count = cand["atom_count"]
+                        try:
+                            new_id = await self.learn(topic_name=concept, query=concept)
+                            console.print(
+                                f"[bold green][Discovery][/bold green] Auto-started follow-on mission: "
+                                f"[cyan]{concept}[/cyan] (from {atom_count} emergent atoms)"
+                            )
+                            logger.info("[System] Spawned emergent mission '%s' → %s", concept, new_id)
+                        except Exception as e:
+                            logger.warning("[System] Failed to spawn emergent mission for '%s': %s", concept, e)
+                except Exception as e:
+                    logger.warning("[System] Emergent mission spawn failed: %s", e)
+
             # TUI-02: Publish mission complete
             try:
                 await publish_status(self.redis_client, "frontier", "mission_complete", {
@@ -873,12 +998,18 @@ class SystemManager:
         return await self.synthesis_service.generate_master_brief(mission_id)
 
     async def _condensation_callback(self, mission_id: str, priority: CondensationPriority) -> None:
+        # Register this task so cleanup() can await it instead of cancelling it
+        current_task = asyncio.current_task()
+        if current_task:
+            self._condensation_tasks.add(current_task)
         try:
             console.print(f"[bold magenta][Distillery][/bold magenta] Budget triggered {priority.value} condensation for mission {mission_id[:8]}")
             if not self.condenser:
                 console.print(f"[bold red][Distillery][/bold red] Condenser not initialized!")
                 return
-            await self.condenser.run(mission_id, priority)
+            # Shield the actual distillation work from external cancellation.
+            # CancelledError from event loop shutdown will still propagate after shield completes.
+            await asyncio.shield(self.condenser.run(mission_id, priority))
             console.print(f"[bold green][Distillery][/bold green] Condensation pass complete for mission {mission_id[:8]}")
         except asyncio.CancelledError:
             logger.warning(f"[Distillery] Condensation cancelled for mission {mission_id[:8]}")
@@ -889,6 +1020,9 @@ class SystemManager:
             logger.error(f"[Distillery] Condensation failed for mission {mission_id[:8]}: {e}\n{tb}")
             console.print(f"[bold red][Distillery][/bold red] ERROR for {mission_id[:8]}: {e}")
         finally:
+            # Deregister from tracked tasks
+            if current_task:
+                self._condensation_tasks.discard(current_task)
             # Always reset budget flag so it can retry
             if self.budget:
                 budget = self.budget.get_status(mission_id)
@@ -958,23 +1092,30 @@ class SystemManager:
         return atoms
 
     async def _fetch_doc(self, doc_id: str) -> Optional[Dict[str, Any]]:
-        """Fetch document content by ID from Redis metadata + DB."""
+        """Fetch document content by source_id — text lives in corpus.chunks, not corpus.sources."""
         if not self.adapter or not self.adapter.pg:
             return None
 
         try:
-            # Try fetching from sources table
             async with self.adapter.pg.pool.acquire() as conn:
                 row = await conn.fetchrow(
-                    "SELECT url, inline_text, content_hash FROM corpus.sources WHERE source_id = $1",
-                    doc_id
+                    """
+                    SELECT s.source_id, s.url, s.mission_id,
+                           string_agg(c.inline_text, ' ' ORDER BY c.chunk_index) AS content
+                    FROM corpus.sources s
+                    JOIN corpus.chunks c ON c.source_id = s.source_id
+                    WHERE s.source_id = $1
+                      AND c.inline_text IS NOT NULL
+                    GROUP BY s.source_id, s.url, s.mission_id
+                    """,
+                    doc_id,
                 )
-                if row and row.get("inline_text"):
+                if row and row.get("content"):
                     return {
                         "id": doc_id,
                         "url": row.get("url", ""),
-                        "content": row["inline_text"],
-                        "mission_id": doc_id[:36] if len(doc_id) > 36 else doc_id,
+                        "content": row["content"],
+                        "mission_id": str(row["mission_id"]),
                     }
         except Exception as e:
             logger.debug(f"[IngestionControl] Failed to fetch doc {doc_id}: {e}")
@@ -987,38 +1128,63 @@ class SystemManager:
             return
 
         try:
+            async with self.adapter.pg.pool.acquire() as conn:
+                # Resolve true mission_id and domain_profile_id from the source row.
+                source_row = await conn.fetchrow(
+                    "SELECT mission_id, topic_id FROM corpus.sources WHERE source_id = $1",
+                    doc_id,
+                )
+                if not source_row:
+                    logger.warning(f"[IngestionControl] Source {doc_id} not found; skipping atom store")
+                    return
+
+                true_mission_id = str(source_row["mission_id"])
+                true_topic_id   = str(source_row["topic_id"])
+
+                # Use an existing domain_profile_id for this topic, or fall back to any profile.
+                domain_profile_id = await conn.fetchval(
+                    "SELECT domain_profile_id FROM knowledge.knowledge_atoms WHERE topic_id = $1 LIMIT 1",
+                    true_topic_id,
+                )
+                if not domain_profile_id:
+                    domain_profile_id = await conn.fetchval(
+                        "SELECT profile_id FROM config.domain_profiles LIMIT 1"
+                    )
+                if not domain_profile_id:
+                    logger.warning("[IngestionControl] No domain profile found; skipping atom store")
+                    return
+
             for atom in atoms:
                 atom_id = atom.get("id", "")
                 if not atom_id:
                     continue
 
-                # Create atom row compatible with existing schema
+                content = atom.get("content", "")
                 atom_row = {
-                    "atom_id": atom_id,
-                    "topic_id": doc_id[:36],
-                    "mission_id": doc_id,
-                    "domain_profile_id": f"profile_{doc_id[:8]}",
-                    "atom_type": atom.get("type", "claim"),
-                    "title": atom["content"][:50],
-                    "statement": atom["content"],
-                    "summary": atom["content"],
-                    "confidence": atom.get("confidence", 0.5),
-                    "importance": atom.get("importance", 0.5),
-                    "novelty": atom.get("novelty", 0.5),
-                    "scope": {},
-                    "qualifiers": {},
-                    "lineage": {
-                        "mission_id": doc_id,
-                        "extraction_mode": "ingestion_control_tier2"
+                    "atom_id":           atom_id,
+                    "topic_id":          true_topic_id,
+                    "mission_id":        true_mission_id,
+                    "domain_profile_id": domain_profile_id,
+                    "atom_type":         atom.get("type", "claim"),
+                    "title":             content[:50],
+                    "statement":         content,
+                    "summary":           content,
+                    "confidence":        atom.get("confidence", 0.5),
+                    "importance":        atom.get("importance", 0.5),
+                    "novelty":           atom.get("novelty", 0.5),
+                    "scope_json":        {},
+                    "qualifiers_json":   {},
+                    "lineage_json":      {
+                        "mission_id":       true_mission_id,
+                        "extraction_mode":  "ingestion_control_tier2",
                     },
-                    "metadata": {"source_id": doc_id},
+                    "metadata_json":     {"source_id": doc_id},
                 }
 
-                # V3 integrity invariant: at least one evidence row required
                 evidence_row = {
-                    "atom_id": atom_id,
-                    "source_id": doc_id,
-                    "chunk_id": None,
+                    "atom_id":          atom_id,
+                    "source_id":        doc_id,
+                    "chunk_id":         None,
                     "evidence_strength": 0.7,
                     "supports_statement": True,
                 }

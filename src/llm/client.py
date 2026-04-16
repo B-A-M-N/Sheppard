@@ -159,6 +159,53 @@ class OllamaClient:
         async for token in self.chat_stream(model=model, messages=messages, format=format, **kwargs):
             yield ChunkWrap(token)
 
+    async def task_stream(self, task: TaskType, messages: List[dict], format: Optional[Union[str, Dict[str, Any]]] = None, **kwargs) -> AsyncGenerator[Any, None]:
+        """Streaming call routed to the task-specific host and model (not the CHAT lane).
+
+        Use this for EXTRACT_ATOMS, CRITIQUE, DECOMPOSITION, etc. so that extraction
+        workers hit the extraction host rather than the reasoning host.
+        """
+        config = self.router.get(task)
+
+        class ChunkWrap:
+            def __init__(self, content): self.content = content
+
+        payload = {
+            'model': config.model_name,
+            'messages': messages,
+            'stream': True,
+            'options': {
+                'temperature': kwargs.get('temperature', config.temperature),
+                'top_p': kwargs.get('top_p', 0.9),
+            }
+        }
+        if format is not None:
+            payload['format'] = format
+        elif kwargs.get('json_mode'):
+            payload['format'] = 'json'
+
+        try:
+            timeout = aiohttp.ClientTimeout(
+                total=settings.REQUEST_TIMEOUT,
+                connect=settings.CONNECTION_TIMEOUT,
+                sock_read=settings.REQUEST_TIMEOUT
+            )
+            connector = aiohttp.TCPConnector(force_close=True)
+            async with aiohttp.ClientSession(base_url=config.api_host, timeout=timeout, connector=connector) as session:
+                async with session.post("/api/chat", json=payload) as response:
+                    if response.status != 200:
+                        await self._handle_api_error(response, f"task_stream({task.name})")
+                    async for line in response.content:
+                        if line:
+                            try:
+                                chunk = json.loads(line)
+                                if 'message' in chunk and 'content' in chunk['message']:
+                                    yield ChunkWrap(chunk['message']['content'])
+                            except Exception:
+                                continue
+        except Exception as e:
+            logger.error(f"task_stream({task.name}) failed on {config.api_host}: {e}")
+
     async def chat_stream(self, model: str, messages: List[dict], system_prompt: Optional[str] = None, format: Optional[Union[str, Dict[str, Any]]] = None, **kwargs) -> AsyncGenerator[str, None]:
         """Streaming chat routed to the primary reasoning host.
 

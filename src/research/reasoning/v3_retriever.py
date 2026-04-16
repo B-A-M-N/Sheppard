@@ -31,9 +31,11 @@ class V3Retriever:
     Retrieves from V3 knowledge store using semantic search over
     knowledge_atoms and chunks via the StorageAdapter's Chroma backend.
 
-    This is a simplified retriever for V3 activation. Advanced features
-    (lexical prefilter, structural traversal, contradiction detection,
-    project artifact linking) will be added in later phases.
+    Active retrieval stages:
+      Stage 1 (Lexical):    Postgres ILIKE keyword search — runs in parallel with semantic
+      Stage 2 (Semantic):   ChromaDB vector search on knowledge_atoms
+      Stage 3 (Structural): Graph traversal from authority_record core_atom_ids
+      Stage 4 (Re-ranking): Composite score (relevance × trust × recency)
     """
 
     def __init__(self, adapter, cmk_runtime: Optional[CMKRuntime] = None):
@@ -112,18 +114,56 @@ class V3Retriever:
                 t_post_end = time.perf_counter()
 
         # ── FALLBACK: Postgres keyword search when Chroma has too few results ──
-        if len(items) < query.max_results // 2:
-            remaining = query.max_results - len(items)
-            try:
-                pg_items = await self._postgres_fallback(query.text, where, remaining)
-                items.extend(pg_items)
-                logger.info(f"[V3Retriever] Postgres fallback: +{len(pg_items)} keyword matches")
-            except Exception as e:
-                logger.warning(f"[V3Retriever] Postgres fallback failed: {e}")
+        # Stage 1: Lexical search runs in parallel with semantic results — always,
+        # not only as a fallback.  Dedup by atom_id so a result from both lanes
+        # appears only once (semantic version kept since it carries a distance score).
+        try:
+            pg_items = await self._postgres_fallback(query.text, where, query.max_results)
+            seen_ids = {
+                m.get("atom_id")
+                for item in items
+                for m in [item.metadata]
+                if isinstance(m, dict) and m.get("atom_id")
+            }
+            added = 0
+            for pg_item in pg_items:
+                pg_id = (pg_item.metadata or {}).get("atom_id")
+                if pg_id and pg_id not in seen_ids:
+                    items.append(pg_item)
+                    seen_ids.add(pg_id)
+                    added += 1
+            if added:
+                logger.info(f"[V3Retriever] Lexical stage: +{added} unique keyword matches")
+        except Exception as e:
+            logger.warning(f"[V3Retriever] Lexical stage failed: {e}")
 
-        # TODO: Stage 1 Lexical prefilter (Postgres ILIKE on atoms)
-        # TODO: Stage 3 Structural (graph traversal from core_atom_ids)
-        # TODO: Stage 4 Re-ranking with trust, recency, project proximity
+        # Stage 3: Structural — pull authority core_atom_ids for the mission and
+        # fetch their immediate neighbours from atom_relationships.  Adds atoms
+        # that are authoritative for the topic even if they scored low on
+        # semantic distance.  Skips silently when no authority data exists.
+        try:
+            structural_items = await self._structural_traversal(where, query.max_results // 4)
+            if structural_items:
+                seen_ids = {
+                    (item.metadata or {}).get("atom_id")
+                    for item in items
+                }
+                added = 0
+                for s_item in structural_items:
+                    s_id = (s_item.metadata or {}).get("atom_id")
+                    if s_id and s_id not in seen_ids:
+                        items.append(s_item)
+                        seen_ids.add(s_id)
+                        added += 1
+                if added:
+                    logger.info(f"[V3Retriever] Structural stage: +{added} authority-graph atoms")
+        except Exception as e:
+            logger.debug(f"[V3Retriever] Structural stage failed: {e}")
+
+        # Stage 4: Re-rank by composite score — relevance (semantic closeness) ×
+        # trust × recency decay.  Ensures high-trust, recent atoms surface first
+        # regardless of which retrieval lane found them.
+        items = self._rerank(items, query.max_results)
 
         # Assemble into role-based context
         ctx = RoleBasedContext()
@@ -207,6 +247,13 @@ class V3Retriever:
         if not docs_outer or len(docs_outer) == 0:
             return [RoleBasedContext() for _ in range(N)]
 
+        # Stage 3: Structural traversal — run once (same filter for all queries)
+        structural_items: List[RetrievedItem] = []
+        try:
+            structural_items = await self._structural_traversal(where, common_limit // 4)
+        except Exception as e:
+            logger.debug(f"[V3Retriever] Structural stage failed in retrieve_many: {e}")
+
         # Build per-query contexts
         for i in range(N):
             items: List[RetrievedItem] = []
@@ -232,6 +279,38 @@ class V3Retriever:
                 )
                 items.append(item)
 
+            # Stage 1: Lexical — per-query keyword search
+            try:
+                pg_items = await self._postgres_fallback(queries[i].text, where, limits[i])
+                seen_ids = {
+                    (item.metadata or {}).get("atom_id")
+                    for item in items
+                    if isinstance(item.metadata, dict)
+                }
+                for pg_item in pg_items:
+                    pg_id = (pg_item.metadata or {}).get("atom_id")
+                    if pg_id and pg_id not in seen_ids:
+                        items.append(pg_item)
+                        seen_ids.add(pg_id)
+            except Exception as e:
+                logger.warning(f"[V3Retriever] Lexical stage failed in retrieve_many[{i}]: {e}")
+
+            # Merge structural results (not yet seen)
+            if structural_items:
+                seen_ids = {
+                    (item.metadata or {}).get("atom_id")
+                    for item in items
+                    if isinstance(item.metadata, dict)
+                }
+                for s_item in structural_items:
+                    s_id = (s_item.metadata or {}).get("atom_id")
+                    if s_id and s_id not in seen_ids:
+                        items.append(s_item)
+                        seen_ids.add(s_id)
+
+            # Stage 4: Re-rank
+            items = self._rerank(items, limits[i])
+
             ctx = RoleBasedContext()
             ctx.evidence = items
 
@@ -247,6 +326,114 @@ class V3Retriever:
 
         return contexts
 
+
+    async def _structural_traversal(self, where: dict, limit: int) -> List[RetrievedItem]:
+        """Stage 3: Fetch atoms anchored in the authority graph.
+
+        1. Find the authority record for the mission/topic.
+        2. Pull core_atom_ids from its atom_layer_json.
+        3. Expand one hop via atom_relationships to include related atoms.
+        4. Return those atoms as RetrievedItems with strategy='structural'.
+        """
+        if not where or not self.adapter:
+            return []
+
+        topic_id = where.get("topic_id") or where.get("mission_id")
+        if not topic_id:
+            return []
+
+        items: List[RetrievedItem] = []
+
+        async with self.adapter.pg.pool.acquire() as conn:
+            # 1. Find authority record for this topic
+            auth_row = await conn.fetchrow(
+                """
+                SELECT authority_record_id,
+                       atom_layer_json -> 'core_atom_ids' AS core_ids
+                FROM authority.authority_records
+                WHERE topic_id = $1
+                  AND atom_layer_json -> 'core_atom_ids' != '[]'::jsonb
+                LIMIT 1
+                """,
+                topic_id,
+            )
+            if not auth_row or not auth_row["core_ids"]:
+                return []
+
+            import json as _json
+            core_ids: list = _json.loads(auth_row["core_ids"]) if isinstance(auth_row["core_ids"], str) else auth_row["core_ids"]
+            if not core_ids:
+                return []
+
+            # 2. Expand one hop via atom_relationships
+            expanded_ids = list(core_ids)
+            if core_ids:
+                neighbour_rows = await conn.fetch(
+                    """
+                    SELECT DISTINCT related_atom_id
+                    FROM knowledge.atom_relationships
+                    WHERE atom_id = ANY($1::text[])
+                    LIMIT $2
+                    """,
+                    core_ids,
+                    limit * 2,
+                )
+                for r in neighbour_rows:
+                    nid = r["related_atom_id"]
+                    if nid not in expanded_ids:
+                        expanded_ids.append(nid)
+
+            # 3. Fetch atoms — cap at limit
+            atom_rows = await conn.fetch(
+                """
+                SELECT atom_id, statement, atom_type, confidence, importance,
+                       topic_id, created_at
+                FROM knowledge.knowledge_atoms
+                WHERE atom_id = ANY($1::text[])
+                LIMIT $2
+                """,
+                expanded_ids[:limit * 2],
+                limit,
+            )
+
+        for row in atom_rows:
+            is_core = row["atom_id"] in core_ids
+            item = RetrievedItem(
+                content=row["statement"] or "",
+                source=f"authority:{topic_id[:8]}",
+                strategy="structural",
+                knowledge_level="A" if is_core else "B",
+                item_type=row["atom_type"] or "claim",
+                relevance_score=float(row["importance"] or 0.6),
+                trust_score=float(row["confidence"] or 0.7),
+                recency_days=self._days_since(
+                    row["created_at"].isoformat() if row["created_at"] else None
+                ),
+                metadata={
+                    "atom_id": row["atom_id"],
+                    "atom_type": row["atom_type"],
+                    "is_core_atom": is_core,
+                    "topic_id": row["topic_id"],
+                },
+            )
+            items.append(item)
+
+        return items
+
+    def _rerank(self, items: List[RetrievedItem], limit: int) -> List[RetrievedItem]:
+        """Stage 4: Composite re-ranking.
+
+        Score = relevance × 0.60 + trust × 0.25 + recency_factor × 0.15
+        recency_factor decays from 1.0 (today) toward 0.0 over ~1 year.
+        """
+        def _score(item: RetrievedItem) -> float:
+            relevance = max(0.0, min(1.0, item.relevance_score or 0.5))
+            trust     = max(0.0, min(1.0, item.trust_score or 0.5))
+            days      = item.recency_days if item.recency_days is not None else 9999
+            recency   = 1.0 / (1.0 + days / 365.0)
+            return relevance * 0.60 + trust * 0.25 + recency * 0.15
+
+        return sorted(items, key=_score, reverse=True)[:limit]
 
     def _days_since(self, date_str: Optional[str]) -> int:
         """Calculate days since a timestamp string, or return large default."""

@@ -354,8 +354,8 @@ class KnowledgeAtom(BaseModel):
     statement: str
     summary: Optional[str] = None
     confidence: float = 0.7
-    importance: float = 0.5
-    novelty: float = 0.5
+    importance: Optional[float] = None  # Computed by pipeline, not defaulted to 0.5
+    novelty: Optional[float] = None     # Computed by pipeline, not defaulted to 0.5
     stability: str = "medium"
     
     scope: AtomScope = Field(default_factory=AtomScope)

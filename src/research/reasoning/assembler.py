@@ -222,18 +222,24 @@ Output ONLY valid JSON in this format:
         async with pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT c.description,
-                       a.global_id as atom_a_global_id,
-                       a.content as atom_a_content,
-                       b.global_id as atom_b_global_id,
-                       b.content as atom_b_content
-                FROM contradictions c
-                JOIN knowledge_atoms a ON a.id = c.atom_a_id
-                JOIN knowledge_atoms b ON b.id = c.atom_b_id
-                WHERE c.topic_id = $1 AND c.resolved = FALSE
+                SELECT cs.summary AS description,
+                       a1.atom_id AS atom_a_global_id,
+                       a1.statement AS atom_a_content,
+                       a2.atom_id AS atom_b_global_id,
+                       a2.statement AS atom_b_content
+                FROM knowledge.contradiction_sets cs
+                JOIN knowledge.contradiction_members m1
+                     ON m1.contradiction_set_id = cs.contradiction_set_id
+                JOIN knowledge.knowledge_atoms a1 ON a1.atom_id = m1.atom_id
+                JOIN knowledge.contradiction_members m2
+                     ON m2.contradiction_set_id = cs.contradiction_set_id
+                    AND m2.atom_id > m1.atom_id
+                JOIN knowledge.knowledge_atoms a2 ON a2.atom_id = m2.atom_id
+                WHERE cs.topic_id = $1
+                  AND cs.resolution_status = 'unresolved'
                 LIMIT $2
                 """,
-                _uuid.UUID(str(mission_id)), limit
+                str(mission_id), limit
             )
             return [dict(r) for r in rows]
 
