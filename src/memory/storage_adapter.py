@@ -139,6 +139,7 @@ class AuthorityStore(Protocol):
     ) -> list[JsonDict]: ...
 
     async def set_authority_core_atoms(self, authority_record_id: str, rows: Sequence[JsonDict]) -> None: ...
+    async def set_authority_contradictions(self, authority_record_id: str, rows: Sequence[JsonDict]) -> None: ...
     async def set_authority_related_records(self, authority_record_id: str, rows: Sequence[JsonDict]) -> None: ...
     async def set_authority_advisories(self, authority_record_id: str, rows: Sequence[JsonDict]) -> None: ...
 
@@ -792,6 +793,12 @@ class SheppardStorageAdapter(StorageAdapter):
         if rows:
             payload = [dict(r, authority_record_id=authority_record_id) for r in rows]
             await self.pg.bulk_insert("authority.authority_core_atoms", payload)
+
+    async def set_authority_contradictions(self, authority_record_id: str, rows: Sequence[JsonDict]) -> None:
+        await self.pg.delete_where("authority.authority_contradictions", {"authority_record_id": authority_record_id})
+        if rows:
+            payload = [dict(r, authority_record_id=authority_record_id) for r in rows]
+            await self.pg.bulk_insert("authority.authority_contradictions", payload)
 
     async def set_authority_related_records(self, authority_record_id: str, rows: Sequence[JsonDict]) -> None:
         await self.pg.delete_where("authority.authority_related_records", {"authority_record_id": authority_record_id})

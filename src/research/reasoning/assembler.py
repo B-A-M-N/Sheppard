@@ -182,6 +182,7 @@ Output ONLY valid JSON in this format:
             conflicts = await self._get_unresolved_contradictions(mission_id, limit=5)
             for c in conflicts:
                 packet.contradictions.append({
+                    "contradiction_set_id": c.get("contradiction_set_id", ""),
                     "description": c['description'],
                     "claim_a": c['atom_a_content'],
                     "claim_b": c['atom_b_content'],
@@ -213,6 +214,7 @@ Output ONLY valid JSON in this format:
             rows = await conn.fetch(
                 """
                 SELECT cs.summary AS description,
+                       cs.contradiction_set_id,
                        a1.atom_id AS atom_a_global_id,
                        a1.statement AS atom_a_content,
                        a2.atom_id AS atom_b_global_id,

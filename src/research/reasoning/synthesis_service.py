@@ -194,6 +194,20 @@ class SynthesisService:
                             for idx, atom_id in enumerate(all_atom_ids)
                         ],
                     )
+                    contradiction_ids = sorted({
+                        c.get("contradiction_set_id")
+                        for packet in all_packets.values()
+                        for c in packet.contradictions
+                        if c.get("contradiction_set_id")
+                    })
+                    if contradiction_ids:
+                        await self.adapter.set_authority_contradictions(
+                            auth_id,
+                            [
+                                {"contradiction_set_id": contradiction_set_id}
+                                for contradiction_set_id in contradiction_ids
+                            ],
+                        )
                     logger.info(f"[Synthesis] Authority record {auth_id} updated with {len(all_atom_ids)} core atoms")
                 except Exception as e:
                     logger.warning(f"[Synthesis] Failed to update authority atom layer: {e}")

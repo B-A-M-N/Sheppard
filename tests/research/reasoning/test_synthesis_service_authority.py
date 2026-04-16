@@ -7,6 +7,7 @@ from src.research.reasoning.assembler import SectionPlan, EvidencePacket
 class FakeAdapter:
     def __init__(self):
         self.core_atom_calls = []
+        self.contradiction_calls = []
         self.artifacts = []
         self.sections = []
         self.citations = []
@@ -22,6 +23,9 @@ class FakeAdapter:
 
     async def set_authority_core_atoms(self, authority_record_id, rows):
         self.core_atom_calls.append((authority_record_id, rows))
+
+    async def set_authority_contradictions(self, authority_record_id, rows):
+        self.contradiction_calls.append((authority_record_id, rows))
 
     async def store_synthesis_artifact(self, artifact):
         self.artifacts.append(artifact)
@@ -44,6 +48,7 @@ class FakeAssembler:
                 section_title="Section",
                 section_objective="Purpose",
                 atoms=[{"global_id": "[A1]", "text": "Atom one."}],
+                contradictions=[{"contradiction_set_id": "contra-1"}],
                 atom_ids_used=["atom-2", "atom-1"],
             )
         }
@@ -74,4 +79,7 @@ async def test_generate_master_brief_populates_authority_core_atoms():
     assert rows == [
         {"atom_id": "atom-1", "position_rank": 1, "role": "core"},
         {"atom_id": "atom-2", "position_rank": 2, "role": "core"},
+    ]
+    assert adapter.contradiction_calls == [
+        ("dar_mission-", [{"contradiction_set_id": "contra-1"}])
     ]
