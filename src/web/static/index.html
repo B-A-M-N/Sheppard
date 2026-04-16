@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sheppard</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ── Header ─────────────────────────────────────────── -->
+  <div id="header">
+    <div id="header-left">
+      <div id="logo">SHEPPARD</div>
+      <div id="version-badge">v1.2</div>
+    </div>
+    <div id="status-bar">
+      <div class="stat-item">
+        <div id="status-dot" class="stat-dot idle"></div>
+        <span id="status-text">connecting...</span>
+      </div>
+      <div class="stat-item">📚 <span id="status-atoms">— atoms</span></div>
+      <div class="stat-item">🎯 <span id="status-missions">— missions</span></div>
+    </div>
+  </div>
+
+  <!-- ── Tab Bar ────────────────────────────────────────── -->
+  <div id="tab-bar">
+    <div class="tab active" data-tab="chat">Chat</div>
+    <div class="tab" data-tab="missions">Missions</div>
+    <div class="tab" data-tab="knowledge">Knowledge</div>
+    <div class="tab" data-tab="logs">Logs</div>
+  </div>
+
+  <!-- ── Content ────────────────────────────────────────── -->
+  <div id="content">
+
+    <!-- ── Chat Pane ──────────────────────────────────────── -->
+    <div id="chat-pane" class="tab-pane active">
+      <div id="chat-sidebar">
+        <div id="chat-sidebar-header">Mode</div>
+        <div id="mode-select">
+          <div class="mode-btn active" data-mode="chat">Chat</div>
+          <div class="mode-btn" data-mode="analyze">Analyze</div>
+        </div>
+        <div id="chat-sidebar-header" style="border-top:1px solid var(--border)">Filter to Mission</div>
+        <div id="mission-filter-list"></div>
+      </div>
+      <div id="chat-main">
+        <div id="chat-history">
+          <div class="message system">
+            <div class="message-bubble">
+              Sheppard online. Use Chat mode to ask questions, Analyze mode for deep problem reasoning.<br>
+              Type <span class="crimson">/learn &lt;topic&gt;</span> to start a knowledge mission,
+              or <span class="crimson">/help</span> for all commands.
+            </div>
+          </div>
+        </div>
+        <div id="chat-input-area">
+          <textarea
+            id="chat-input"
+            rows="1"
+            placeholder="Ask Sheppard anything..."
+          ></textarea>
+          <button id="send-btn">Send</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Missions Pane ──────────────────────────────────── -->
+    <div id="missions-pane" class="tab-pane">
+      <div id="missions-header">
+        <h2>MISSIONS</h2>
+        <div id="new-mission-form">
+          <input id="new-mission-input" type="text" placeholder="Topic to learn about...">
+          <button id="start-mission-btn" class="btn-primary">Start Mission</button>
+          <button class="btn-ghost" onclick="purgeEmptyMissions()" title="Delete all missions with zero atoms">Purge Empty</button>
+        </div>
+      </div>
+
+      <div id="stats-row">
+        <div class="stat-card">
+          <div class="stat-card-value" id="stat-atoms">—</div>
+          <div class="stat-card-label">Knowledge Atoms</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-card-value" id="stat-missions">—</div>
+          <div class="stat-card-label">Total Missions</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-card-value" id="stat-concepts">—</div>
+          <div class="stat-card-label">Distinct Concepts</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-card-value" id="stat-sources">—</div>
+          <div class="stat-card-label">Sources Ingested</div>
+        </div>
+      </div>
+
+      <div id="missions-list">
+        <div class="empty-state" style="height:200px">
+          <div class="empty-icon">📡</div>
+          <div>Loading missions...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Knowledge Pane ─────────────────────────────────── -->
+    <div id="knowledge-pane" class="tab-pane">
+      <div id="knowledge-sidebar">
+        <div id="knowledge-sidebar-header">Concepts</div>
+        <input id="concept-search" type="text" placeholder="Filter concepts...">
+        <div id="concept-list">
+          <div class="empty-state" style="padding:20px; height:auto; color:var(--grey)">
+            Loading...
+          </div>
+        </div>
+      </div>
+      <div id="knowledge-main">
+        <div id="knowledge-view-toggle">
+          <button class="view-btn active" data-view="graph">Graph</button>
+          <button class="view-btn" data-view="atoms">Atoms</button>
+          <div id="atoms-controls" class="hidden">
+            <label style="font-size:11px; color:var(--grey); font-family:var(--font); display:flex; align-items:center; gap:6px;">
+              Min confidence
+              <input type="range" id="conf-slider" min="0" max="100" value="30" style="width:80px; accent-color:var(--crimson)">
+              <span id="conf-label" style="color:var(--crimson); min-width:32px">30%</span>
+            </label>
+            <select id="sort-select" style="background:var(--bg3); border:1px solid var(--border); border-radius:4px; color:var(--white); padding:3px 8px; font-family:var(--font); font-size:11px;">
+              <option value="importance">Sort: Importance</option>
+              <option value="confidence">Sort: Confidence</option>
+              <option value="created_at">Sort: Newest</option>
+            </select>
+          </div>
+        </div>
+        <div id="graph-container">
+          <div id="graph-tooltip"></div>
+          <div class="empty-state">
+            <div class="empty-icon">🔗</div>
+            <div>Loading graph...</div>
+          </div>
+        </div>
+        <div id="atoms-container" class="hidden"></div>
+        <div id="atoms-pagination" class="hidden"></div>
+      </div>
+    </div>
+
+    <!-- ── Logs Pane ───────────────────────────────────────── -->
+    <div id="logs-pane" class="tab-pane">
+      <div id="logs-toolbar">
+        <input id="logs-search" type="text" placeholder="Filter logs...">
+        <div class="level-filter">
+          <button class="level-btn active INFO" data-level="INFO">INFO</button>
+          <button class="level-btn active WARNING" data-level="WARNING">WARN</button>
+          <button class="level-btn active ERROR" data-level="ERROR">ERROR</button>
+          <button class="level-btn DEBUG" data-level="DEBUG">DEBUG</button>
+        </div>
+        <span id="logs-status" class="grey">connecting...</span>
+      </div>
+      <div id="log-container"></div>
+    </div>
+
+  </div><!-- /#content -->
+</div><!-- /#app -->
+
+<!-- Mission detail modal -->
+<div id="mission-modal-overlay" class="hidden">
+  <div id="mission-modal">
+    <div id="mission-modal-header">
+      <div id="mission-modal-title">Mission Details</div>
+      <button id="mission-modal-close">✕</button>
+    </div>
+    <div id="mission-modal-body"></div>
+  </div>
+</div>
+
+<!-- D3 v7 -->
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
