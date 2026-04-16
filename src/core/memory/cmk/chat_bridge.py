@@ -100,6 +100,8 @@ class CMKChatBridge:
             pack = await self.runtime.query_with_concepts(
                 user_query,
                 top_k_concepts=self.runtime.config.retrieval.top_k_concepts,
+                topic_filter=topic_filter,
+                mission_filter=mission_filter,
             )
         else:
             pack = await self.runtime.query(

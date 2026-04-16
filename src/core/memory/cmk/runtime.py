@@ -253,6 +253,8 @@ class CMKRuntime:
         self,
         user_query: str,
         top_k_concepts: int = 5,
+        topic_filter: Optional[str] = None,
+        mission_filter: Optional[str] = None,
     ) -> EvidencePack:
         """
         Query using concept-level retrieval (v2).
@@ -268,7 +270,11 @@ class CMKRuntime:
         """
         if not self.config.enable_concepts or not self.concept_retriever:
             # Fallback to standard query
-            return await self.query(user_query)
+            return await self.query(
+                user_query,
+                topic_filter=topic_filter,
+                mission_filter=mission_filter,
+            )
 
         # Embed query
         query_vec = self.embedder.embed(user_query)
@@ -277,6 +283,20 @@ class CMKRuntime:
         concept_scores, concept_atoms = self.concept_retriever.retrieve_and_expand(
             query_vec, top_k=top_k_concepts
         )
+
+        if topic_filter or mission_filter:
+            concept_atoms = [
+                atom for atom in concept_atoms
+                if (not topic_filter or atom.topic_id == topic_filter)
+                and (not mission_filter or atom.mission_id == mission_filter)
+            ]
+
+        if not concept_atoms:
+            return await self.query(
+                user_query,
+                topic_filter=topic_filter,
+                mission_filter=mission_filter,
+            )
 
         # Build evidence pack from expanded atoms
         scored_atoms = [(atom, atom.reliability) for atom in concept_atoms]
@@ -338,6 +358,20 @@ class CMKRuntime:
         concepts = await self.store.load_concepts(topic_id=topic_filter)
         if concepts:
             self.concepts = concepts
+            needed_atom_ids = {
+                atom_id
+                for concept in concepts
+                for atom_id in concept.atom_ids
+                if atom_id and atom_id not in self.atoms
+            }
+            if needed_atom_ids:
+                loaded_atoms = await self.store.load_atoms(
+                    atom_ids=sorted(needed_atom_ids),
+                    topic_id=topic_filter,
+                    limit=max(len(needed_atom_ids), 1),
+                )
+                for atom in loaded_atoms:
+                    self.atoms[atom.id] = atom
             self.concept_retriever = CMKRetriever(concepts, self.atoms)
             logger.info(f"[CMK] Loaded {len(concepts)} concepts from store")
 
@@ -409,15 +443,23 @@ class CMKRuntime:
                 query_vec,
                 top_k=self.config.retrieval.top_k_concepts,
             )
-            return atoms
         else:
             # Direct atom retrieval (fallback)
-            scored = self.concept_retriever.retrieve_direct(
+            retriever = self.concept_retriever or CMKRetriever([], self.atoms)
+            scored = retriever.retrieve_direct(
                 query_vec,
                 top_k=self.config.retrieval.max_total_atoms,
-            ) if self.concept_retriever else []
+            )
+            atoms = [atom for atom, _ in scored]
 
-            return [atom for atom, _ in scored]
+        if topic_filter or mission_filter:
+            atoms = [
+                atom for atom in atoms
+                if (not topic_filter or atom.topic_id == topic_filter)
+                and (not mission_filter or atom.mission_id == mission_filter)
+            ]
+
+        return atoms
 
     # ── Activation & Consolidation ──
 

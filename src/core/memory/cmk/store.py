@@ -10,7 +10,7 @@ Designed to work alongside Sheppard's existing Postgres/Redis adapters.
 
 import json
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Sequence
 
 from .types import CMKAtom, Concept
 from .config import CMKConfig
@@ -161,6 +161,74 @@ class CMKStore:
                 logger.warning(f"[CMKStore] Failed to load concept {row.get('id')}: {e}")
 
         return concepts
+
+    async def load_atoms(
+        self,
+        atom_ids: Optional[Sequence[str]] = None,
+        topic_id: Optional[str] = None,
+        mission_id: Optional[str] = None,
+        limit: int = 500,
+    ) -> List[CMKAtom]:
+        """
+        Load CMK-compatible atoms from the canonical V3 atom store.
+
+        This backfills the in-memory atom substrate when CMK concepts are loaded
+        from Postgres after a restart.
+        """
+        if not self.pg_pool:
+            return []
+
+        clauses: list[str] = []
+        params: list[Any] = []
+        p = 1
+
+        if atom_ids:
+            clauses.append(f"atom_id = ANY(${p}::text[])")
+            params.append(list(atom_ids))
+            p += 1
+
+        if topic_id:
+            clauses.append(f"topic_id = ${p}")
+            params.append(topic_id)
+            p += 1
+
+        if mission_id:
+            clauses.append(f"mission_id = ${p}")
+            params.append(mission_id)
+            p += 1
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+
+        try:
+            async with self.pg_pool.acquire() as conn:
+                rows = await conn.fetch(
+                    f"""
+                    SELECT atom_id, statement, atom_type, confidence, importance, novelty,
+                           mission_id, topic_id, metadata_json
+                    FROM knowledge.knowledge_atoms
+                    {where}
+                    ORDER BY created_at DESC
+                    LIMIT ${p}
+                    """,
+                    *params,
+                )
+        except Exception as e:
+            logger.warning(f"[CMKStore] load_atoms failed: {e}")
+            return []
+
+        atoms: list[CMKAtom] = []
+        for row in rows:
+            try:
+                atom = CMKAtom.from_knowledge_atom(dict(row))
+                embedding = await self.load_atom_embedding(atom.id)
+                if embedding:
+                    atom.embedding = embedding
+                atoms.append(atom)
+            except Exception as e:
+                logger.warning(f"[CMKStore] Failed to load atom {row.get('atom_id')}: {e}")
+
+        return atoms
 
     # ── Atom embedding caching ──
 

@@ -201,25 +201,15 @@ Output ONLY valid JSON in this format:
     async def _get_unresolved_contradictions(self, mission_id: str, limit: int = 5) -> List[Dict]:
         """V3-native contradiction retrieval via direct PG adapter query.
 
-        Returns contradictions from the knowledge.contradictions table
-        (FK-linked to knowledge_atoms). Uses atomic global_ids for
-        citation-compatible formatting.
+        Returns unresolved contradictions from the V3 contradiction tables
+        using the live adapter pool rather than a private side pool.
         """
-        import uuid as _uuid
-        from src.config.database import DatabaseConfig
-
-        dsn = DatabaseConfig.DB_URLS.get("sheppard_v3")
-        if not dsn:
-            logger.warning("[Assembler] No PG connection available; skipping contradictions")
+        pg = getattr(self.adapter, "pg", None) or getattr(getattr(self.retriever, "adapter", None), "pg", None)
+        if not pg:
+            logger.warning("[Assembler] No adapter PG pool available; skipping contradictions")
             return []
 
-        pool = getattr(self, "_contradiction_pool", None)
-        if pool is None:
-            import asyncpg
-            pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
-            self._contradiction_pool = pool
-
-        async with pool.acquire() as conn:
+        async with pg.pool.acquire() as conn:
             rows = await conn.fetch(
                 """
                 SELECT cs.summary AS description,
