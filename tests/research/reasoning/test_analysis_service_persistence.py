@@ -13,6 +13,25 @@ class RecordingAdapter:
         self.outputs = []
         self.lineage = []
         self.evidence = []
+        self.authority_updates = []
+        self.authority_records = {
+            "auth-1": {
+                "authority_record_id": "auth-1",
+                "topic_id": "mission-1",
+                "domain_profile_id": "profile-1",
+                "title": "Authority One",
+                "canonical_title": "Authority One",
+                "scope_json": {},
+                "frontier_summary_json": {},
+                "corpus_layer_json": {},
+                "atom_layer_json": {},
+                "synthesis_layer_json": {},
+                "lineage_layer_json": {},
+                "status_json": {"maturity": "synthesized", "application_count": 2, "authority_score": 0.4},
+                "advisory_layer_json": {"decision_rules": ["Existing rule"]},
+                "reuse_json": {"application_history": []},
+            }
+        }
 
     async def create_application_query(self, query):
         self.queries.append(query)
@@ -25,6 +44,12 @@ class RecordingAdapter:
 
     async def bind_application_evidence(self, application_query_id, rows):
         self.evidence.append((application_query_id, rows))
+
+    async def get_authority_record(self, authority_record_id):
+        return self.authority_records.get(authority_record_id)
+
+    async def upsert_authority_record(self, row):
+        self.authority_updates.append(row)
 
 
 class StubAssembler:
@@ -52,12 +77,17 @@ async def test_persist_application_run_records_query_output_and_evidence():
         confidence=0.82,
         reasoning="Reasoning",
         recommendation="Reduce contention",
+        recommendation_rationale="The queue hotspot dominates the evidence.",
+        risks=["Could increase tail latency during bursts."],
+        open_questions=["Do spikes correlate with deployment windows?"],
         key_atoms=["[A1]"],
     )
     report.critic = CriticOutput(
         strongest_objection="Could also be packet loss.",
         overlooked_atoms=["[A2]"],
+        overlooked_reasoning="The packet-loss evidence was underweighted.",
         counter_recommendation="Measure drops first.",
+        confidence_assessment="Slightly too high.",
     )
     report.atom_count = 2
     report.mission_filter = "mission-1"
@@ -69,9 +99,9 @@ async def test_persist_application_run_records_query_output_and_evidence():
         section_title="analysis",
         section_objective="objective",
         atoms=[
-            {"metadata": {"atom_id": "atom-1", "authority_record_id": "auth-1"}},
-            {"metadata": {"atom_id": "atom-1", "authority_record_id": "auth-1"}},
-            {"metadata": {"atom_id": "atom-2"}},
+            {"global_id": "[A1]", "metadata": {"atom_id": "atom-1", "authority_record_id": "auth-1"}},
+            {"global_id": "[A1]", "metadata": {"atom_id": "atom-1", "authority_record_id": "auth-1"}},
+            {"global_id": "[A2]", "metadata": {"atom_id": "atom-2"}},
         ],
         contradictions=[{"description": "conflict"}],
     )
@@ -89,12 +119,35 @@ async def test_persist_application_run_records_query_output_and_evidence():
     assert adapter.queries[0]["project_id"] == "mission-1"
     assert adapter.outputs[0]["output_type"] == "analysis_report"
     assert adapter.outputs[0]["inline_text"] == "full analysis text"
+    assert [output["output_type"] for output in adapter.outputs] == [
+        "analysis_report",
+        "analysis_risk_register",
+        "critic_challenge",
+        "analysis_open_questions",
+    ]
     assert len(adapter.evidence) == 1
     application_query_id, rows = adapter.evidence[0]
     assert application_query_id == report.application_query_id
     assert adapter.lineage[0][0] == report.application_query_id
     assert adapter.lineage[0][1]["frame"]["problem_type"] == "diagnostic"
     assert adapter.lineage[0][1]["critic"]["counter_recommendation"] == "Measure drops first."
+    assert len(adapter.authority_updates) == 1
+    authority_update = adapter.authority_updates[0]
+    assert authority_update["authority_record_id"] == "auth-1"
+    assert authority_update["topic_id"] == "mission-1"
+    assert authority_update["domain_profile_id"] == "profile-1"
+    assert authority_update["title"] == "Authority One"
+    assert authority_update["canonical_title"] == "Authority One"
+    assert authority_update["status_json"]["application_count"] == 3
+    assert authority_update["status_json"]["successful_application_count"] == 1
+    assert authority_update["status_json"]["authority_score"] > 0.4
+    assert authority_update["status_json"]["has_critic_review"] is True
+    assert authority_update["advisory_layer_json"]["application_feedback"]["last_application_query_id"] == report.application_query_id
+    assert authority_update["advisory_layer_json"]["risk_register"] == ["Could increase tail latency during bursts."]
+    assert authority_update["advisory_layer_json"]["critic_objections"] == ["Could also be packet loss."]
+    assert authority_update["reuse_json"]["last_application_query_id"] == report.application_query_id
+    assert authority_update["reuse_json"]["key_atom_ids"] == ["atom-1"]
+    assert authority_update["reuse_json"]["critic_overlooked_atom_ids"] == ["atom-2"]
     assert rows == [
         {"authority_record_id": "auth-1", "atom_id": "atom-1", "bundle_id": None},
         {"authority_record_id": None, "atom_id": "atom-2", "bundle_id": None},

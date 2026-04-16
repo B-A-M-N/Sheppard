@@ -14,7 +14,9 @@ import json
 import logging
 import os
 import re
+from contextlib import suppress
 from typing import AsyncGenerator, List, Optional, Dict, Any, Tuple, Set
+from urllib.parse import urlparse
 
 # V2 Acquisitions
 from src.research.acquisition.budget import BudgetMonitor, BudgetConfig, CondensationPriority
@@ -97,7 +99,8 @@ class SystemManager:
 
             # 0. Boot V3 Triad Adapters
             from src.config.database import DatabaseConfig
-            pg_dsn = DatabaseConfig.DB_URLS.get("sheppard_v3")
+            pg_dsn = os.getenv("SHEPPARD_POSTGRES_URL", DatabaseConfig.DB_URLS.get("sheppard_v3"))
+            await self._ensure_local_postgres_ready(pg_dsn)
             
             self.pg_pool = await asyncpg.create_pool(
                 pg_dsn,
@@ -675,6 +678,16 @@ class SystemManager:
             'phase_13_pipeline_audit': "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='audit' AND table_name='pipeline_runs')",
             'phase_14_pipeline_integrity': "SELECT EXISTS (SELECT 1 FROM information_schema.schemas WHERE schema_name='audit') AND EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='audit' AND table_name='embedding_registry')",
             'phase_17_consolidation': "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='knowledge' AND table_name='knowledge_atoms' AND column_name='is_golden')",
+            'phase_20_application_evidence_nullable': """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema='application'
+                      AND table_name='application_evidence'
+                      AND column_name='bundle_id'
+                      AND is_nullable='YES'
+                )
+            """,
         }
         return checks.get(migration_name)
 
@@ -1043,6 +1056,82 @@ class SystemManager:
     def _check_initialized(self) -> None:
         if not self._initialized:
             raise RuntimeError("System not initialized")
+
+    async def _ensure_local_postgres_ready(self, pg_dsn: Optional[str]) -> None:
+        """Start local PostgreSQL on launch if the configured DSN targets this host and PG is down."""
+        if not pg_dsn or os.getenv("SHEPPARD_AUTO_START_POSTGRES", "1") == "0":
+            return
+
+        target = self._parse_postgres_target(pg_dsn)
+        if not target:
+            return
+        host, port = target
+        if not self._is_local_postgres_target(host):
+            return
+        if await self._postgres_port_ready(host, port):
+            return
+
+        logger.info("[System] Local PostgreSQL is down on %s:%s; attempting startup", host, port)
+        await self._start_local_postgres_service()
+
+        for _ in range(20):
+            if await self._postgres_port_ready(host, port):
+                logger.info("[System] PostgreSQL is accepting connections on %s:%s", host, port)
+                return
+            await asyncio.sleep(0.5)
+
+        raise RuntimeError(f"PostgreSQL did not become ready on {host}:{port} after startup attempt")
+
+    @staticmethod
+    def _parse_postgres_target(pg_dsn: str) -> Optional[Tuple[str, int]]:
+        parsed = urlparse(pg_dsn)
+        if not parsed.hostname:
+            return None
+        return parsed.hostname, parsed.port or 5432
+
+    @staticmethod
+    def _is_local_postgres_target(host: str) -> bool:
+        return host in {"localhost", "127.0.0.1", "::1"}
+
+    async def _postgres_port_ready(self, host: str, port: int) -> bool:
+        try:
+            reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=1.0)
+            writer.close()
+            with suppress(Exception):
+                await writer.wait_closed()
+            return True
+        except Exception:
+            return False
+
+    async def _start_local_postgres_service(self) -> None:
+        commands = [
+            ("systemctl", "start", "postgresql"),
+            ("service", "postgresql", "start"),
+        ]
+        last_error = None
+        for command in commands:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            except FileNotFoundError as exc:
+                last_error = exc
+                continue
+
+            stdout, stderr = await proc.communicate()
+            if proc.returncode == 0:
+                if stdout:
+                    logger.debug("[System] %s", stdout.decode(errors="ignore").strip())
+                return
+            last_error = RuntimeError(
+                f"{' '.join(command)} failed with code {proc.returncode}: "
+                f"{stderr.decode(errors='ignore').strip() or stdout.decode(errors='ignore').strip()}"
+            )
+
+        if last_error:
+            raise last_error
 
     # ── Ingestion Control Helpers ──
 

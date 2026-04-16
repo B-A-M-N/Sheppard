@@ -62,6 +62,7 @@ test_iter*.json
 verification_benchmark.json
 run_full_guardrail.py
 run_guardrail_tests.py
+!tests/**/test_*.py
 
 # Scripts (ad-hoc, not part of main codebase)
 scripts/clean_corrupted_redis_keys.py

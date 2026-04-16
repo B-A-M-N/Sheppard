@@ -35,6 +35,15 @@ class FakeChroma:
 
 
 class FakeConn:
+    async def fetchrow(self, *args, **kwargs):
+        query = args[0]
+        if "FROM authority.authority_records" in query:
+            return {
+                "authority_record_id": "auth-1",
+                "core_ids": ["atom-core"],
+            }
+        return None
+
     async def fetch(self, *args, **kwargs):
         query = args[0]
         if "FROM knowledge.contradiction_sets" in query:
@@ -46,6 +55,31 @@ class FakeConn:
                 "atom_b_id": "atom-b",
                 "atom_b_statement": "Method B is best.",
             }]
+        if "FROM knowledge.atom_relationships" in query:
+            return [{"related_atom_id": "atom-related"}]
+        if "FROM knowledge.knowledge_atoms" in query:
+            return [
+                {
+                    "atom_id": "atom-core",
+                    "statement": "Core authority atom.",
+                    "atom_type": "claim",
+                    "confidence": 0.97,
+                    "importance": 0.92,
+                    "topic_id": "topic-1",
+                    "created_at": None,
+                    "mission_title": "Topic 1",
+                },
+                {
+                    "atom_id": "atom-related",
+                    "statement": "Related authority atom.",
+                    "atom_type": "claim",
+                    "confidence": 0.74,
+                    "importance": 0.55,
+                    "topic_id": "topic-1",
+                    "created_at": None,
+                    "mission_title": "Topic 1",
+                },
+            ]
         return []
 
 
@@ -86,8 +120,10 @@ async def test_retrieve_includes_authority_hits_in_definitions():
     assert len(ctx.contradictions) == 1
     assert ctx.contradictions[0].item_type == "contradiction"
     assert ctx.contradictions[0].metadata["contradiction_set_id"] == "contra-1"
-    assert len(ctx.evidence) == 1
-    assert ctx.evidence[0].metadata["atom_id"] == "atom-1"
+    evidence_ids = {item.metadata["atom_id"] for item in ctx.evidence}
+    assert "atom-1" in evidence_ids
+    assert "atom-core" in evidence_ids
+    assert "atom-related" in evidence_ids
 
 
 @pytest.mark.asyncio
@@ -100,3 +136,33 @@ async def test_retrieve_maps_mission_filter_to_authority_topic_scope():
 
     assert len(ctx.definitions) == 1
     assert ctx.definitions[0].metadata["authority_record_id"] == "auth-1"
+
+
+@pytest.mark.asyncio
+async def test_structural_traversal_marks_core_and_related_atoms():
+    retriever = V3Retriever(FakeAdapter())
+
+    items = await retriever._structural_traversal({"topic_id": "topic-1"}, limit=4)
+
+    assert [item.metadata["atom_id"] for item in items] == ["atom-core", "atom-related"]
+    assert items[0].metadata["is_core_atom"] is True
+    assert items[0].knowledge_level == "A"
+    assert items[1].metadata["is_core_atom"] is False
+    assert items[1].knowledge_level == "B"
+
+
+@pytest.mark.asyncio
+async def test_contradiction_search_returns_bound_atom_ids():
+    retriever = V3Retriever(FakeAdapter())
+
+    items = await retriever._contradiction_search({"topic_id": "topic-1"}, limit=3)
+
+    assert len(items) == 1
+    assert items[0].item_type == "contradiction"
+    assert items[0].metadata == {
+        "contradiction_set_id": "contra-1",
+        "atom_a_id": "atom-a",
+        "atom_b_id": "atom-b",
+    }
+    assert "Method A is best." in items[0].content
+    assert "Method B is best." in items[0].content

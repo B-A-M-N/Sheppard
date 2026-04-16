@@ -4,49 +4,66 @@
 
 **Current Milestone:** v1.2 — Derived Insight & Report Excellence Layer  
 **Previous Milestone:** v1.1 — Performance & Observability (✅ SHIPPED 2026-03-31)
+**Post-release focus:** DB-backed authority/application stabilization for the live V3 path
 
 ## Active Phase: 12-A — Derived Claim Engine
 
-### Status: 🟡 IN PROGRESS
+### Status: ✅ COMPLETE
 
 **What's been built (12-A done):**
-- ✅ `src/research/derivation/engine.py` — DerivationEngine, DerivedClaim, compute_delta, compute_percent_change, compute_rank
+- ✅ `src/research/derivation/engine.py` — DerivationEngine, DerivedClaim, compute_delta, compute_percent_change, compute_rank, plus ratio and chronology rules
 - ✅ `src/research/derivation/__init__.py` — module exports
 - ✅ `src/research/reasoning/assembler.py` — modified: added `derived_claims` to EvidencePacket, calls `DerivationEngine().run(items_parallel)`
 - ✅ `tests/research/derivation/test_engine.py` — 18 tests (all passing)
-- ✅ All 50 tests pass (18 derivation + 24 ranking + 8 phase-11 invariants, zero regressions)
+- ✅ `tests/retrieval/test_validator_derived.py` — 7 tests for derived claim validation (all passing)
+- ✅ All 57 tests pass (18 derivation + 24 ranking + 8 phase-11 invariants + 7 validator, zero regressions)
 
-**What's remaining (12-A todo):**
-- ⬜ Extend `src/retrieval/validator.py` to verify derived claims (also 12-B)
-- ⬜ Create `12-A-SUMMARY.md` artifact
-- ⬜ Commit changes
+## Analysis & Rationale: Validation and Core Engine Complete
+
+The derived claim engine and dual-validator extension are fully implemented:
+
+1. **Derivation Engine** (`src/research/derivation/engine.py`): Supports 7 rules — `delta`, `percent_change`, `rank`, `ratio`, `chronology`, `simple_support_rollup`, `simple_conflict_rollup`. All are deterministic, pure functions with no LLM calls. Engine properly splits compute into independent rule methods for testability and graceful failure handling.
+
+2. **Validator** (`src/retrieval/validator.py`): Both single-citation checks and multi-citation derived claim verification are complete. `_verify_derived_claim()` handles `delta` and `percent_change` recomputation; `_validate_multi_citation_block()` handles multi-atom numeric relationships with comparative language detection; entity and lexical overlap checks apply universally.
+
+3. **Tests**: `tests/research/derivation/test_engine.py` covers all 7 rules; `tests/retrieval/test_validator_derived.py` covers correct/incorrect delta, correct/incorrect percent, single-citation regression, non-comparative multi-citation, and kill tests.
 
 ## Next Phase: 12-B — Dual Validator Extension
 
-### Status: ⬜ PLANNED, NOT STARTED
+### Status: ✅ COMPLETE
 
 **Plan:** 12-B-PLAN.md written  
-**Purpose:** Extend `validate_response_grounding()` to detect multi-atom numeric relationships, recompute from cited atoms, and verify correctness.
+**Purpose:** Extend `validate_response_grounding()` to detect multi-atom numeric relationships, recompute from cited atoms, and verify correctness — **IMPLEMENTED**.
 
-**Tests to write:**
-- test_validator_correct_derived_delta (correct % → PASS)
-- test_validator_correct_derived_percent (correct % → PASS)
-- test_validator_incorrect_derived_delta (wrong number → FAIL)
-- test_validator_incorrect_derived_percent (wrong number → FAIL)
-- test_validator_single_citation_still_passes (no regression)
-- test_validator_non_comparative_multi_citation (skip derived check)
-- test_validator_kill_test_incorrect_percentage (validator catch)
+The validator already performs full dual-atom validation against derived claims including:
+- delta detection/recomputation
+- percent_change detection/recomputation  
+- lexical overlap (>=2 content words)
+- entity consistency
+- number presence in cited atoms
+- comparative language handling
 
 ## Phase Queue for v1.2
 
 | Phase | Plan | Research | Status | Key Focus |
 |-------|------|----------|--------|-----------|
-| 12-A | ✅ PLAN.md | ✅ | 🟡 Partial | Derived Claim Engine |
-| 12-B | ✅ PLAN.md | — | ⬜ Planned | Dual Validator Extension |
+| 12-A | ✅ PLAN.md | ✅ | ✅ COMPLETE | Derived Claim Engine |
+| 12-B | ✅ PLAN.md | — | ✅ COMPLETE | Dual Validator Extension |
 | 12-C | — | ✅ CONTEXT.md | ⬜ Planned | Claim Graph Builder |
 | 12-D | — | ✅ CONTEXT.md | ⬜ Planned | Section Planner (evidence-aware) |
 | 12-E | — | ✅ CONTEXT.md | ⬜ Planned | Two-stage synthesis + Frontier scope fix |
 | 12-F | — | ✅ CONTEXT.md | ⬜ Planned | Adversarial Critic |
+
+## Shipped in v1.2
+- **Derived Claim Engine**: Deterministic, non-LLM transformations (delta, percent_change) integrated into `EvidencePacket`.
+- **Dual Validator**: Extended `validate_response_grounding` to verify multi-citation numeric claims via recomputation.
+- **V3 Authority Core**: Initial implementation of `AuthorityStore` and `DomainAuthorityRecord` for technical authority tracking.
+
+## Post-v1.2 Stabilization
+- **Live DB-backed integration path restored**: `SystemManager.initialize()` now auto-starts local PostgreSQL when the configured V3 DSN targets localhost and the service is down.
+- **Application evidence contract fixed**: `application.application_evidence` now supports nullable `authority_record_id`, `atom_id`, and `bundle_id` with a non-empty binding check via `migrations/phase_20_application_evidence_nullable.sql`.
+- **Authority feedback persistence fixed**: `AnalysisService` now preserves required authority record identity fields when writing feedback-layer updates.
+- **DB-backed E2E coverage added**: live-path integration tests now cover authority synthesis binding, application feedback persistence, and retrieval of authority plus contradictions through the real adapter path.
 
 ## Spec Authority (12-A)
 
@@ -71,9 +88,9 @@
 ## Git State
 
 - Tag: v1.0, v1.1 exist
-- Tag: v1.2 not yet created
-- Latest commit: "chore: archive v1.1 milestone"
-- Uncommitted changes: 12-A implementation files
+- Tag: v1.2 exists and points to `68db57b` (`chore: archive v1.2 milestone`)
+- Current HEAD: working tree ahead of `v1.2` with post-release stabilization changes
+- Uncommitted changes: DB-backed integration and startup hardening work
 
 ## Working Directory
 
@@ -85,6 +102,12 @@
 python -m pytest tests/research/derivation/test_engine.py -v          # 12-A tests
 python -m pytest tests/research/ -x -q                                # Full research suite
 python -m pytest tests/research/reasoning/test_*.py -v                # Phase 11 + ranking
+pytest -q tests/integration/test_knowledge_pipeline.py \
+  tests/integration/test_authority_pipeline_e2e.py \
+  tests/integration/test_analysis_application_e2e.py \
+  tests/integration/test_retrieval_authority_contradiction_e2e.py \
+  tests/integration/test_authority_maturity_flow_e2e.py \
+  tests/integration/test_analysis_feedback_loop_e2e.py                # Live DB-backed V3 path
 ```
 
 # Key Rules

@@ -543,11 +543,13 @@ CREATE TABLE IF NOT EXISTS application.application_outputs (
 CREATE INDEX IF NOT EXISTS idx_application_outputs_query_id ON application.application_outputs(application_query_id);
 
 CREATE TABLE IF NOT EXISTS application.application_evidence (
+    evidence_id BIGSERIAL PRIMARY KEY,
     application_query_id TEXT NOT NULL REFERENCES application.application_queries(application_query_id) ON DELETE CASCADE,
     authority_record_id TEXT REFERENCES authority.authority_records(authority_record_id) ON DELETE SET NULL,
     atom_id TEXT REFERENCES knowledge.knowledge_atoms(atom_id) ON DELETE SET NULL,
     bundle_id TEXT REFERENCES knowledge.evidence_bundles(bundle_id) ON DELETE SET NULL,
-    PRIMARY KEY (application_query_id, authority_record_id, atom_id, bundle_id)
+    CONSTRAINT application_evidence_nonempty_binding
+        CHECK (authority_record_id IS NOT NULL OR atom_id IS NOT NULL OR bundle_id IS NOT NULL)
 );
 
 CREATE TABLE IF NOT EXISTS application.application_lineage (

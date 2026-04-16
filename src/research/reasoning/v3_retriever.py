@@ -152,6 +152,18 @@ class V3Retriever:
             logger.debug(f"[V3Retriever] Contradiction stage failed: {e}")
             contradiction_items = []
 
+        try:
+            project_artifacts = await self._project_artifact_search(
+                query.text,
+                where,
+                query.max_project_artifacts,
+            )
+        except Exception as e:
+            logger.debug(f"[V3Retriever] Project artifact stage failed: {e}")
+            project_artifacts = []
+
+        unresolved_items = self._build_unresolved_items(contradiction_items, query.max_unresolved)
+
         # Stage 3: Structural — pull authority core_atom_ids for the mission and
         # fetch their immediate neighbours from atom_relationships.  Adds atoms
         # that are authoritative for the topic even if they scored low on
@@ -180,12 +192,15 @@ class V3Retriever:
         # regardless of which retrieval lane found them.
         items = self._rerank(items, query.max_results)
         authority_items = self._rerank(authority_items, 3)
+        project_artifacts = self._rerank(project_artifacts, query.max_project_artifacts)
 
         # Assemble into role-based context
         ctx = RoleBasedContext()
         ctx.definitions = authority_items
         ctx.contradictions = contradiction_items
         ctx.evidence = items
+        ctx.project_artifacts = project_artifacts
+        ctx.unresolved = unresolved_items
 
         # Attach profiling data if enabled
         if PROFILE_RETRIEVAL:
@@ -284,6 +299,16 @@ class V3Retriever:
         except Exception as e:
             logger.debug(f"[V3Retriever] Contradiction stage failed in retrieve_many: {e}")
 
+        project_artifacts: List[RetrievedItem] = []
+        try:
+            project_artifacts = await self._project_artifact_search(
+                query_texts[0],
+                where,
+                max(1, queries[0].max_project_artifacts),
+            )
+        except Exception as e:
+            logger.debug(f"[V3Retriever] Project artifact stage failed in retrieve_many: {e}")
+
         # Build per-query contexts
         for i in range(N):
             items: List[RetrievedItem] = []
@@ -345,6 +370,8 @@ class V3Retriever:
             ctx.definitions = self._rerank(authority_items, 3)
             ctx.contradictions = contradiction_items
             ctx.evidence = items
+            ctx.project_artifacts = self._rerank(project_artifacts, queries[i].max_project_artifacts)
+            ctx.unresolved = self._build_unresolved_items(contradiction_items, queries[i].max_unresolved)
 
             if PROFILE_RETRIEVAL:
                 total_ms = (t_end - t_start) * 1000 if t_start and t_end else 0.0
@@ -459,6 +486,96 @@ class V3Retriever:
             )
         return items
 
+    async def _project_artifact_search(self, query_text: str, where: dict, limit: int) -> List[RetrievedItem]:
+        if limit <= 0 or not where or not self.adapter:
+            return []
+
+        topic_id = where.get("topic_id") or where.get("mission_id")
+        if not topic_id:
+            return []
+
+        query_words = [w.lower() for w in query_text.split() if len(w) > 2][:5]
+        if not query_words:
+            return []
+
+        params: list = [topic_id]
+        word_clauses = []
+        for word in query_words:
+            params.append(f"%{word}%")
+            idx = len(params)
+            word_clauses.append(f"(LOWER(sa.title) LIKE ${idx} OR LOWER(COALESCE(sa.abstract, '')) LIKE ${idx})")
+        params.append(limit)
+
+        async with self.adapter.pg.pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT sa.artifact_id,
+                       sa.title,
+                       sa.abstract,
+                       sa.artifact_type,
+                       ar.authority_record_id,
+                       ar.status_json ->> 'maturity' AS maturity
+                FROM authority.synthesis_artifacts sa
+                JOIN authority.authority_records ar
+                  ON ar.authority_record_id = sa.authority_record_id
+                WHERE ar.topic_id = $1
+                  AND ({' OR '.join(word_clauses)})
+                ORDER BY sa.updated_at DESC
+                LIMIT ${len(params)}
+                """,
+                *params,
+            )
+
+        items: List[RetrievedItem] = []
+        for row in rows:
+            items.append(
+                RetrievedItem(
+                    content=row["abstract"] or row["title"] or "",
+                    source=f"artifact:{row['artifact_id']}",
+                    strategy="project",
+                    knowledge_level="D",
+                    item_type=row["artifact_type"] or "artifact",
+                    relevance_score=0.82,
+                    trust_score=0.78,
+                    recency_days=30,
+                    tech_density=0.65,
+                    project_proximity=1.0,
+                    citation_key=row["artifact_id"],
+                    metadata={
+                        "artifact_id": row["artifact_id"],
+                        "authority_record_id": row["authority_record_id"],
+                        "maturity": row["maturity"],
+                        "artifact_type": row["artifact_type"],
+                    },
+                )
+            )
+        return items
+
+    def _build_unresolved_items(self, contradiction_items: List[RetrievedItem], limit: int) -> List[RetrievedItem]:
+        if limit <= 0:
+            return []
+
+        items: List[RetrievedItem] = []
+        for contradiction in contradiction_items[:limit]:
+            meta = contradiction.metadata or {}
+            items.append(
+                RetrievedItem(
+                    content=f"Resolve contradiction {meta.get('contradiction_set_id', contradiction.citation_key)} before reusing this authority.",
+                    source=contradiction.source,
+                    strategy="unresolved",
+                    knowledge_level="B",
+                    item_type="unresolved",
+                    relevance_score=contradiction.relevance_score,
+                    trust_score=contradiction.trust_score,
+                    recency_days=contradiction.recency_days,
+                    tech_density=contradiction.tech_density,
+                    is_contradiction=True,
+                    citation_key=contradiction.citation_key,
+                    metadata=dict(meta),
+                )
+            )
+        return items
+
 
     async def _structural_traversal(self, where: dict, limit: int) -> List[RetrievedItem]:
         """Stage 3: Fetch atoms anchored in the authority graph.
@@ -564,7 +681,16 @@ class V3Retriever:
             trust     = max(0.0, min(1.0, item.trust_score or 0.5))
             days      = item.recency_days if item.recency_days is not None else 9999
             recency   = 1.0 / (1.0 + days / 365.0)
-            return relevance * 0.60 + trust * 0.25 + recency * 0.15
+            metadata = item.metadata or {}
+            authority_bonus = 0.0
+            if metadata.get("is_core_atom"):
+                authority_bonus += 0.10
+            if metadata.get("authority_record_id"):
+                authority_bonus += 0.06
+            if metadata.get("exact_match"):
+                authority_bonus += 0.08
+            project_bonus = max(0.0, min(0.15, item.project_proximity or 0.0))
+            return relevance * 0.54 + trust * 0.22 + recency * 0.14 + authority_bonus + project_bonus
 
         return sorted(items, key=_score, reverse=True)[:limit]
 
@@ -632,6 +758,7 @@ class V3Retriever:
         """Keyword search fallback when Chroma has too few results."""
         items: List[RetrievedItem] = []
         query_words = [w for w in query_text.split() if len(w) > 2]
+        normalized_query = query_text.strip().lower()
         
         async with self.adapter.pg.pool.acquire() as conn:
             conditions = []
@@ -679,6 +806,8 @@ class V3Retriever:
                         "importance": float(row['importance'] or 0.5),
                         "novelty": float(row['novelty'] or 0.5),
                         "mission_title": row['mission_title'],
+                        "exact_match": normalized_query in (row['statement'] or '').lower()
+                        or normalized_query in (row['title'] or '').lower(),
                     }
                 )
                 items.append(item)

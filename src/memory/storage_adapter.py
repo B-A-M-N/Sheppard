@@ -308,6 +308,7 @@ class SemanticProjectionBuilder:
     def build_atom_metadata(atom: JsonDict) -> JsonDict:
         return {
             "atom_id": atom["atom_id"],
+            "mission_id": atom.get("mission_id"),
             "authority_record_id": atom.get("authority_record_id"),
             "topic_id": atom.get("topic_id"),
             "domain_profile_id": atom.get("domain_profile_id"),
@@ -954,9 +955,25 @@ class SheppardStorageAdapter(StorageAdapter):
         )
 
     async def bind_application_evidence(self, application_query_id: str, rows: Sequence[JsonDict]) -> None:
-        if not rows: return
-        payload = [dict(r, application_query_id=application_query_id) for r in rows]
-        await self.pg.bulk_upsert("application.application_evidence", ["application_query_id", "authority_record_id", "atom_id", "bundle_id"], payload)
+        if not rows:
+            return
+
+        payload: list[JsonDict] = []
+        seen: set[tuple[Any, Any, Any]] = set()
+        for row in rows:
+            bound = dict(row, application_query_id=application_query_id)
+            dedupe_key = (
+                bound.get("authority_record_id"),
+                bound.get("atom_id"),
+                bound.get("bundle_id"),
+            )
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            payload.append(bound)
+
+        if payload:
+            await self.pg.bulk_insert("application.application_evidence", payload)
 
     # =====================================================
     # RuntimeStore

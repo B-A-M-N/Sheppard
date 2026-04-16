@@ -120,6 +120,31 @@ async def test_retrieve_many_merges_semantic_lexical_and_structural_then_reranks
             metadata={"authority_record_id": "auth-1"},
         )
     ])
+    retriever._project_artifact_search = AsyncMock(return_value=[
+        RetrievedItem(
+            content="artifact summary",
+            source="artifact:1",
+            strategy="project",
+            item_type="master_brief",
+            relevance_score=0.8,
+            trust_score=0.8,
+            recency_days=4,
+            project_proximity=1.0,
+            metadata={"artifact_id": "artifact-1"},
+        )
+    ])
+    retriever._contradiction_search = AsyncMock(return_value=[
+        RetrievedItem(
+            content="conflict summary",
+            source="contradiction:1",
+            strategy="contradiction",
+            item_type="contradiction",
+            relevance_score=0.75,
+            trust_score=0.7,
+            recency_days=9999,
+            metadata={"contradiction_set_id": "contra-1"},
+        )
+    ])
 
     contexts = await retriever.retrieve_many([
         RetrievalQuery(text="alpha", mission_filter="mission-1", max_results=2),
@@ -131,6 +156,11 @@ async def test_retrieve_many_merges_semantic_lexical_and_structural_then_reranks
     assert [item.content for item in contexts[1].definitions] == ["authority summary"]
     assert [item.content for item in contexts[0].evidence] == ["lexical alpha", "structural support"]
     assert [item.content for item in contexts[1].evidence] == ["lexical beta", "structural support"]
+    assert [item.content for item in contexts[0].project_artifacts] == ["artifact summary"]
+    assert [item.content for item in contexts[0].unresolved] == [
+        "Resolve contradiction contra-1 before reusing this authority."
+    ]
     retriever._structural_traversal.assert_awaited_once()
     retriever._authority_search.assert_awaited_once()
+    retriever._project_artifact_search.assert_awaited_once()
     assert retriever._postgres_fallback.await_count == 2

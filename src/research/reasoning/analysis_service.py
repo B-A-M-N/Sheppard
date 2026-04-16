@@ -17,10 +17,12 @@ both anchor to the same atoms, serve different purposes.
 """
 
 import asyncio
+import json
 import logging
 import uuid
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
-from typing import List, Optional, AsyncGenerator, Tuple
+from typing import List, Optional, AsyncGenerator, Tuple, Any
 
 from src.llm.client import OllamaClient
 from src.research.reasoning.assembler import EvidencePacket, EvidenceAssembler, SectionPlan
@@ -334,6 +336,35 @@ class AnalysisService:
                     "counter_recommendation": report.critic.counter_recommendation,
                 },
             })
+            if report.analyst.risks:
+                await adapter.store_application_output({
+                    "application_query_id": application_query_id,
+                    "output_type": "analysis_risk_register",
+                    "inline_text": "\n".join(report.analyst.risks),
+                    "confidence": report.analyst.confidence,
+                    "metadata_json": {"risks": report.analyst.risks},
+                })
+            if report.critic.strongest_objection:
+                await adapter.store_application_output({
+                    "application_query_id": application_query_id,
+                    "output_type": "critic_challenge",
+                    "inline_text": report.critic.strongest_objection,
+                    "confidence": report.analyst.confidence,
+                    "metadata_json": {
+                        "strongest_objection": report.critic.strongest_objection,
+                        "overlooked_reasoning": report.critic.overlooked_reasoning,
+                        "counter_recommendation": report.critic.counter_recommendation,
+                        "confidence_assessment": report.critic.confidence_assessment,
+                    },
+                })
+            if report.analyst.open_questions:
+                await adapter.store_application_output({
+                    "application_query_id": application_query_id,
+                    "output_type": "analysis_open_questions",
+                    "inline_text": "\n".join(report.analyst.open_questions),
+                    "confidence": report.analyst.confidence,
+                    "metadata_json": {"open_questions": report.analyst.open_questions},
+                })
             await adapter.store_application_lineage(
                 application_query_id,
                 {
@@ -378,8 +409,172 @@ class AnalysisService:
 
             if evidence_rows:
                 await adapter.bind_application_evidence(application_query_id, evidence_rows)
+                await self._persist_authority_feedback(
+                    adapter=adapter,
+                    application_query_id=application_query_id,
+                    report=report,
+                    packet=packet,
+                    evidence_rows=evidence_rows,
+                )
         except Exception as exc:
             logger.warning("[AnalysisService] Failed to persist application run: %s", exc)
+
+    async def _persist_authority_feedback(
+        self,
+        adapter: Any,
+        application_query_id: str,
+        report: AnalysisReport,
+        packet: EvidencePacket,
+        evidence_rows: list[dict[str, Any]],
+    ) -> None:
+        authority_ids = sorted({
+            row["authority_record_id"]
+            for row in evidence_rows
+            if row.get("authority_record_id")
+        })
+        if not authority_ids:
+            return
+
+        timestamp = datetime.now(timezone.utc).isoformat()
+        packet_atoms_by_citation = {
+            self._normalize_citation(atom.get("global_id")): atom
+            for atom in packet.atoms
+            if atom.get("global_id")
+        }
+        key_atoms = [
+            packet_atoms_by_citation[citation]
+            for citation in (self._normalize_citation(value) for value in report.analyst.key_atoms)
+            if citation in packet_atoms_by_citation
+        ]
+        overlooked_atoms = [
+            packet_atoms_by_citation[citation]
+            for citation in (self._normalize_citation(value) for value in report.critic.overlooked_atoms)
+            if citation in packet_atoms_by_citation
+        ]
+
+        co_cited_ids = set(authority_ids)
+        for authority_record_id in authority_ids:
+            existing = {}
+            if hasattr(adapter, "get_authority_record"):
+                existing = await adapter.get_authority_record(authority_record_id) or {}
+            status = self._parse_json_field(existing.get("status_json") or existing.get("status"))
+            advisory = self._parse_json_field(existing.get("advisory_layer_json") or existing.get("advisory_layer"))
+            reuse = self._parse_json_field(existing.get("reuse_json") or existing.get("reuse"))
+
+            advisory["application_feedback"] = {
+                "last_application_query_id": application_query_id,
+                "last_diagnosis": report.analyst.diagnosis,
+                "last_recommendation": report.analyst.recommendation,
+                "recent_risks": report.analyst.risks,
+                "critic_objection": report.critic.strongest_objection,
+                "open_questions": report.analyst.open_questions,
+                "updated_at": timestamp,
+            }
+            if key_atoms:
+                advisory["decision_rules"] = self._merge_unique_text(
+                    advisory.get("decision_rules", []),
+                    [report.analyst.recommendation_rationale or report.analyst.recommendation],
+                )
+            if report.analyst.risks:
+                advisory["risk_register"] = self._merge_unique_text(
+                    advisory.get("risk_register", []),
+                    report.analyst.risks,
+                )
+            if report.critic.strongest_objection:
+                advisory["critic_objections"] = self._merge_unique_text(
+                    advisory.get("critic_objections", []),
+                    [report.critic.strongest_objection],
+                )
+
+            reuse_history = reuse.get("application_history", [])
+            reuse_history.append({
+                "application_query_id": application_query_id,
+                "problem_type": report.frame.problem_type,
+                "recommendation": report.analyst.recommendation,
+                "confidence": report.analyst.confidence,
+                "timestamp": timestamp,
+            })
+            reuse["application_history"] = reuse_history[-10:]
+            reuse["last_application_query_id"] = application_query_id
+            reuse["last_recommendation"] = report.analyst.recommendation
+            reuse["key_atom_ids"] = self._merge_unique_text(
+                reuse.get("key_atom_ids", []),
+                [atom.get("metadata", {}).get("atom_id") for atom in key_atoms],
+            )
+            reuse["critic_overlooked_atom_ids"] = self._merge_unique_text(
+                reuse.get("critic_overlooked_atom_ids", []),
+                [atom.get("metadata", {}).get("atom_id") for atom in overlooked_atoms],
+            )
+            related_ids = sorted(co_cited_ids - {authority_record_id})
+            if related_ids:
+                reuse["related_authority_record_ids"] = related_ids
+
+            status["application_count"] = int(status.get("application_count", 0) or 0) + 1
+            status["last_applied_at"] = timestamp
+            status["last_application_query_id"] = application_query_id
+            status["latest_analysis_confidence"] = report.analyst.confidence
+            status["has_critic_review"] = True
+            status.setdefault("freshness", "current")
+            prior_authority = float(status.get("authority_score", 0.0) or 0.0)
+            confidence_gain = max(0.0, min(0.12, report.analyst.confidence * 0.08))
+            status["authority_score"] = round(min(1.0, prior_authority + confidence_gain), 4)
+            status["successful_application_count"] = int(status.get("successful_application_count", 0) or 0) + 1
+
+            update_row = {
+                "authority_record_id": authority_record_id,
+                "topic_id": existing.get("topic_id"),
+                "domain_profile_id": existing.get("domain_profile_id"),
+                "title": existing.get("title"),
+                "canonical_title": existing.get("canonical_title"),
+                "scope_json": self._parse_json_field(existing.get("scope_json") or existing.get("scope")),
+                "frontier_summary_json": self._parse_json_field(existing.get("frontier_summary_json") or existing.get("frontier_summary")),
+                "corpus_layer_json": self._parse_json_field(existing.get("corpus_layer_json") or existing.get("corpus_layer")),
+                "atom_layer_json": self._parse_json_field(existing.get("atom_layer_json") or existing.get("atom_layer")),
+                "synthesis_layer_json": self._parse_json_field(existing.get("synthesis_layer_json") or existing.get("synthesis_layer")),
+                "lineage_layer_json": self._parse_json_field(existing.get("lineage_layer_json") or existing.get("lineage_layer")),
+                "status_json": status,
+                "advisory_layer_json": advisory,
+                "reuse_json": reuse,
+            }
+            await adapter.upsert_authority_record(update_row)
+
+    @staticmethod
+    def _normalize_citation(value: Optional[str]) -> str:
+        if not value:
+            return ""
+        text = value.strip()
+        if not text:
+            return ""
+        if not text.startswith("["):
+            text = f"[{text}]"
+        return text
+
+    @staticmethod
+    def _parse_json_field(value: Any) -> dict[str, Any]:
+        if value is None:
+            return {}
+        if isinstance(value, dict):
+            return dict(value)
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                return parsed if isinstance(parsed, dict) else {}
+            except json.JSONDecodeError:
+                return {}
+        return {}
+
+    @staticmethod
+    def _merge_unique_text(existing: list[Any], incoming: list[Any]) -> list[Any]:
+        merged = []
+        seen = set()
+        for value in [*(existing or []), *(incoming or [])]:
+            if not value:
+                continue
+            if value in seen:
+                continue
+            seen.add(value)
+            merged.append(value)
+        return merged
 
     async def _multi_query_retrieve(
         self,
