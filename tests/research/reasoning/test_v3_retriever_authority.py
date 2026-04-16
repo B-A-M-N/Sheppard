@@ -88,3 +88,15 @@ async def test_retrieve_includes_authority_hits_in_definitions():
     assert ctx.contradictions[0].metadata["contradiction_set_id"] == "contra-1"
     assert len(ctx.evidence) == 1
     assert ctx.evidence[0].metadata["atom_id"] == "atom-1"
+
+
+@pytest.mark.asyncio
+async def test_retrieve_maps_mission_filter_to_authority_topic_scope():
+    retriever = V3Retriever(FakeAdapter())
+
+    ctx = await retriever.retrieve(
+        RetrievalQuery(text="authority query", mission_filter="topic-1", max_results=5)
+    )
+
+    assert len(ctx.definitions) == 1
+    assert ctx.definitions[0].metadata["authority_record_id"] == "auth-1"

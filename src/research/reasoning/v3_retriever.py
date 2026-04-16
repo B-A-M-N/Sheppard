@@ -364,8 +364,9 @@ class V3Retriever:
             return items
 
         authority_where = {}
-        if where.get("topic_id"):
-            authority_where["topic_id"] = where["topic_id"]
+        topic_scope = where.get("topic_id") or where.get("mission_id")
+        if topic_scope:
+            authority_where["topic_id"] = topic_scope
 
         result = await self.adapter.chroma.query(
             collection="authority_records",
