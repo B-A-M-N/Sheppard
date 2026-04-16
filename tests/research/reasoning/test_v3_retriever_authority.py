@@ -36,6 +36,16 @@ class FakeChroma:
 
 class FakeConn:
     async def fetch(self, *args, **kwargs):
+        query = args[0]
+        if "FROM knowledge.contradiction_sets" in query:
+            return [{
+                "contradiction_set_id": "contra-1",
+                "summary": "Conflict on method",
+                "atom_a_id": "atom-a",
+                "atom_a_statement": "Method A is best.",
+                "atom_b_id": "atom-b",
+                "atom_b_statement": "Method B is best.",
+            }]
         return []
 
 
@@ -73,5 +83,8 @@ async def test_retrieve_includes_authority_hits_in_definitions():
     assert len(ctx.definitions) == 1
     assert ctx.definitions[0].item_type == "authority"
     assert ctx.definitions[0].metadata["authority_record_id"] == "auth-1"
+    assert len(ctx.contradictions) == 1
+    assert ctx.contradictions[0].item_type == "contradiction"
+    assert ctx.contradictions[0].metadata["contradiction_set_id"] == "contra-1"
     assert len(ctx.evidence) == 1
     assert ctx.evidence[0].metadata["atom_id"] == "atom-1"

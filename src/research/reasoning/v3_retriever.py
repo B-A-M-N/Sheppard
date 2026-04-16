@@ -146,6 +146,12 @@ class V3Retriever:
             logger.debug(f"[V3Retriever] Authority stage failed: {e}")
             authority_items = []
 
+        try:
+            contradiction_items = await self._contradiction_search(where, max(2, query.max_results // 4))
+        except Exception as e:
+            logger.debug(f"[V3Retriever] Contradiction stage failed: {e}")
+            contradiction_items = []
+
         # Stage 3: Structural — pull authority core_atom_ids for the mission and
         # fetch their immediate neighbours from atom_relationships.  Adds atoms
         # that are authoritative for the topic even if they scored low on
@@ -178,6 +184,7 @@ class V3Retriever:
         # Assemble into role-based context
         ctx = RoleBasedContext()
         ctx.definitions = authority_items
+        ctx.contradictions = contradiction_items
         ctx.evidence = items
 
         # Attach profiling data if enabled
@@ -271,6 +278,12 @@ class V3Retriever:
         except Exception as e:
             logger.debug(f"[V3Retriever] Authority stage failed in retrieve_many: {e}")
 
+        contradiction_items: List[RetrievedItem] = []
+        try:
+            contradiction_items = await self._contradiction_search(where, max(2, common_limit // 4))
+        except Exception as e:
+            logger.debug(f"[V3Retriever] Contradiction stage failed in retrieve_many: {e}")
+
         # Build per-query contexts
         for i in range(N):
             items: List[RetrievedItem] = []
@@ -330,6 +343,7 @@ class V3Retriever:
 
             ctx = RoleBasedContext()
             ctx.definitions = self._rerank(authority_items, 3)
+            ctx.contradictions = contradiction_items
             ctx.evidence = items
 
             if PROFILE_RETRIEVAL:
@@ -383,6 +397,65 @@ class V3Retriever:
             )
             items.append(item)
 
+        return items
+
+    async def _contradiction_search(self, where: dict, limit: int) -> List[RetrievedItem]:
+        if limit <= 0 or not where or not self.adapter:
+            return []
+
+        topic_id = where.get("topic_id") or where.get("mission_id")
+        if not topic_id:
+            return []
+
+        items: List[RetrievedItem] = []
+        async with self.adapter.pg.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT cs.contradiction_set_id,
+                       cs.summary,
+                       a1.atom_id AS atom_a_id,
+                       a1.statement AS atom_a_statement,
+                       a2.atom_id AS atom_b_id,
+                       a2.statement AS atom_b_statement
+                FROM knowledge.contradiction_sets cs
+                JOIN knowledge.contradiction_members m1
+                  ON m1.contradiction_set_id = cs.contradiction_set_id
+                JOIN knowledge.knowledge_atoms a1 ON a1.atom_id = m1.atom_id
+                JOIN knowledge.contradiction_members m2
+                  ON m2.contradiction_set_id = cs.contradiction_set_id
+                 AND m2.atom_id > m1.atom_id
+                JOIN knowledge.knowledge_atoms a2 ON a2.atom_id = m2.atom_id
+                WHERE cs.topic_id = $1
+                  AND cs.resolution_status = 'unresolved'
+                LIMIT $2
+                """,
+                topic_id,
+                limit,
+            )
+
+        for row in rows:
+            summary = row["summary"] or "Unresolved contradiction"
+            content = f"{summary}: {row['atom_a_statement']} VS {row['atom_b_statement']}"
+            items.append(
+                RetrievedItem(
+                    content=content,
+                    source=f"contradiction:{row['contradiction_set_id']}",
+                    strategy="contradiction",
+                    knowledge_level="B",
+                    item_type="contradiction",
+                    relevance_score=0.75,
+                    trust_score=0.7,
+                    recency_days=9999,
+                    tech_density=0.6,
+                    is_contradiction=True,
+                    citation_key=row["contradiction_set_id"],
+                    metadata={
+                        "contradiction_set_id": row["contradiction_set_id"],
+                        "atom_a_id": row["atom_a_id"],
+                        "atom_b_id": row["atom_b_id"],
+                    },
+                )
+            )
         return items
 
 
