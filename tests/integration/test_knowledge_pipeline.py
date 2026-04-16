@@ -40,17 +40,28 @@ async def test_condensation_pipeline_full_flow():
         "url": "http://example.com/article"
     }])
     mock_adapter.pg.update_row = AsyncMock()
-    mock_adapter.get_text_ref = AsyncMock(return_value={
-        "inline_text": "Python is a programming language. It supports OOP."
-    })
+    mock_adapter.pg.fetch_one = AsyncMock(return_value=None)
+    mock_adapter.pg.insert_row = AsyncMock()
+    mock_conn_1 = AsyncMock()
+    mock_conn_1.execute = AsyncMock(return_value="UPDATE 1")
+    mock_adapter.pg.pool = MagicMock()
+    mock_adapter.pg.pool.acquire = AsyncMock(return_value=mock_conn_1)
+    mock_adapter.pg.pool.release = AsyncMock()
+    _content_1 = ("Python is a high-level general-purpose programming language. Its design philosophy emphasizes "
+                  "code readability with significant indentation. Python is dynamically typed and garbage-collected. "
+                  "It supports multiple programming paradigms including structured, object-oriented, and functional "
+                  "programming. It is often described as a batteries-included language due to its comprehensive "
+                  "standard library. Guido van Rossum began working on Python in the late 1980s.")
+    mock_adapter.get_text_ref = AsyncMock(return_value={"inline_text": _content_1})
     mock_adapter.get_mission = AsyncMock(return_value={
         "domain_profile_id": "dp1",
         "topic_id": "t1"
     })
     mock_adapter.store_atom_with_evidence = AsyncMock()
+    mock_adapter.get_mission_atoms = AsyncMock(return_value=[])
     mock_adapter.list_chunks_for_source = AsyncMock(return_value=[{
         "chunk_id": "chunk1",
-        "inline_text": "Python is a programming language. It supports OOP."
+        "inline_text": _content_1
     }])
 
     mock_ollama = MagicMock()
@@ -62,6 +73,7 @@ async def test_condensation_pipeline_full_flow():
 
     mock_budget = MagicMock()
     mock_budget.record_condensation_result = AsyncMock()
+    mock_budget.record_source_condensed = AsyncMock()
 
     pipeline = DistillationPipeline(mock_ollama, None, mock_budget, adapter=mock_adapter)
 
@@ -74,10 +86,10 @@ async def test_condensation_pipeline_full_flow():
     # Verify atoms were stored
     mock_adapter.store_atom_with_evidence.assert_called_once()
 
-    # Verify source was marked as condensed (not rejected or error)
-    update_calls = [c for c in mock_adapter.pg.update_row.call_args_list if c[0][1] == "source_id"]
-    statuses = [c[0][2]["status"] for c in update_calls]
-    assert "condensed" in statuses, f"Expected 'condensed', got {statuses}"
+    # Verify source was marked as condensed — status transitions via conn.execute (state_machine.py)
+    execute_calls = mock_conn_1.execute.call_args_list
+    status_args = [c[0][1] for c in execute_calls if len(c[0]) > 1 and "UPDATE corpus.sources" in str(c[0][0])]
+    assert "condensed" in status_args, f"Expected 'condensed' in status transitions, got {status_args}"
 
 
 # ============================================================================
@@ -151,10 +163,23 @@ async def test_smelter_status_transitions():
         {"source_id": "src2", "mission_id": "m1", "status": "fetched", "canonical_text_ref": "ref2", "url": "http://example.com/2"}
     ])
     mock_adapter.pg.update_row = AsyncMock()
-    mock_adapter.get_text_ref = AsyncMock(return_value={"inline_text": "Content here"})
+    mock_adapter.pg.fetch_one = AsyncMock(return_value=None)
+    mock_adapter.pg.insert_row = AsyncMock()
+    mock_conn_3 = AsyncMock()
+    mock_conn_3.execute = AsyncMock(return_value="UPDATE 1")
+    mock_adapter.pg.pool = MagicMock()
+    mock_adapter.pg.pool.acquire = AsyncMock(return_value=mock_conn_3)
+    mock_adapter.pg.pool.release = AsyncMock()
+    _content_3 = ("Python is a high-level general-purpose programming language. Its design philosophy emphasizes "
+                  "code readability with significant indentation. Python is dynamically typed and garbage-collected. "
+                  "It supports multiple programming paradigms including structured, object-oriented, and functional "
+                  "programming. It is often described as a batteries-included language due to its comprehensive "
+                  "standard library. Guido van Rossum began working on Python in the late 1980s.")
+    mock_adapter.get_text_ref = AsyncMock(return_value={"inline_text": _content_3})
     mock_adapter.get_mission = AsyncMock(return_value={"domain_profile_id": "dp1", "topic_id": "t1"})
     mock_adapter.store_atom_with_evidence = AsyncMock()
-    mock_adapter.list_chunks_for_source = AsyncMock(return_value=[{"chunk_id": "c1", "inline_text": "Content"}])
+    mock_adapter.get_mission_atoms = AsyncMock(return_value=[])
+    mock_adapter.list_chunks_for_source = AsyncMock(return_value=[{"chunk_id": "c1", "inline_text": _content_3}])
 
     mock_ollama = MagicMock()
     async def mock_chat(messages, stream=False, temperature=None):
@@ -165,6 +190,7 @@ async def test_smelter_status_transitions():
 
     mock_budget = MagicMock()
     mock_budget.record_condensation_result = AsyncMock()
+    mock_budget.record_source_condensed = AsyncMock()
 
     pipeline = DistillationPipeline(mock_ollama, None, mock_budget, adapter=mock_adapter)
 
@@ -180,12 +206,15 @@ async def test_smelter_status_transitions():
     with patch('research.condensation.pipeline.extract_technical_atoms', side_effect=mock_extract):
         await pipeline.run("m1", MagicMock())
 
-    # Check status transitions
-    update_calls = [c for c in mock_adapter.pg.update_row.call_args_list if c[0][1] == "source_id"]
-    statuses = {c[0][2]["source_id"]: c[0][2]["status"] for c in update_calls}
-    
-    assert statuses.get("src1") == "condensed", "First source should be condensed (has atoms)"
-    assert statuses.get("src2") == "rejected", "Second source should be rejected (no atoms)"
+    # Status transitions via conn.execute (state_machine.py): (sql, new_status, source_id, old_status)
+    execute_calls = mock_conn_3.execute.call_args_list
+    src_status_map = {}
+    for c in execute_calls:
+        if len(c[0]) >= 3 and "UPDATE corpus.sources" in str(c[0][0]):
+            src_status_map[c[0][2]] = c[0][1]  # source_id -> new_status
+
+    assert src_status_map.get("src1") == "condensed", f"First source should be condensed, got {src_status_map}"
+    assert src_status_map.get("src2") == "rejected", f"Second source should be rejected, got {src_status_map}"
 
 
 # ============================================================================
@@ -280,10 +309,23 @@ async def test_pipeline_error_resilience():
         {"source_id": "src2", "mission_id": "m1", "status": "fetched", "canonical_text_ref": "ref2", "url": "http://example.com"}
     ])
     mock_adapter.pg.update_row = AsyncMock()
-    mock_adapter.get_text_ref = AsyncMock(return_value={"inline_text": "Content"})
+    mock_adapter.pg.fetch_one = AsyncMock(return_value=None)
+    mock_adapter.pg.insert_row = AsyncMock()
+    mock_conn_6 = AsyncMock()
+    mock_conn_6.execute = AsyncMock(return_value="UPDATE 1")
+    mock_adapter.pg.pool = MagicMock()
+    mock_adapter.pg.pool.acquire = AsyncMock(return_value=mock_conn_6)
+    mock_adapter.pg.pool.release = AsyncMock()
+    _content_6 = ("Python is a high-level general-purpose programming language. Its design philosophy emphasizes "
+                  "code readability with significant indentation. Python is dynamically typed and garbage-collected. "
+                  "It supports multiple programming paradigms including structured, object-oriented, and functional "
+                  "programming. It is often described as a batteries-included language due to its comprehensive "
+                  "standard library. Guido van Rossum began working on Python in the late 1980s.")
+    mock_adapter.get_text_ref = AsyncMock(return_value={"inline_text": _content_6})
     mock_adapter.get_mission = AsyncMock(return_value={"domain_profile_id": "dp1", "topic_id": "t1"})
     mock_adapter.store_atom_with_evidence = AsyncMock()
-    mock_adapter.list_chunks_for_source = AsyncMock(return_value=[{"chunk_id": "c1", "inline_text": "Content"}])
+    mock_adapter.get_mission_atoms = AsyncMock(return_value=[])
+    mock_adapter.list_chunks_for_source = AsyncMock(return_value=[{"chunk_id": "c1", "inline_text": _content_6}])
 
     mock_ollama = MagicMock()
     async def mock_chat(messages, stream=False, temperature=None):
@@ -294,6 +336,7 @@ async def test_pipeline_error_resilience():
 
     mock_budget = MagicMock()
     mock_budget.record_condensation_result = AsyncMock()
+    mock_budget.record_source_condensed = AsyncMock()
 
     pipeline = DistillationPipeline(mock_ollama, None, mock_budget, adapter=mock_adapter)
 
@@ -303,9 +346,12 @@ async def test_pipeline_error_resilience():
         # Should not raise despite first source having no text_ref
         await pipeline.run("m1", MagicMock())
 
-    # First source should be marked error, second condensed
-    update_calls = [c for c in mock_adapter.pg.update_row.call_args_list if c[0][1] == "source_id"]
-    statuses = {c[0][2]["source_id"]: c[0][2]["status"] for c in update_calls}
-    
-    assert statuses.get("src1") == "error", "First source should be error (no text_ref)"
-    assert statuses.get("src2") == "condensed", "Second source should be condensed"
+    # Status transitions via conn.execute (state_machine.py): (sql, new_status, source_id, old_status)
+    execute_calls = mock_conn_6.execute.call_args_list
+    src_status_map = {}
+    for c in execute_calls:
+        if len(c[0]) >= 3 and "UPDATE corpus.sources" in str(c[0][0]):
+            src_status_map[c[0][2]] = c[0][1]  # source_id -> new_status
+
+    assert src_status_map.get("src1") == "error", f"First source should be error (no text_ref), got {src_status_map}"
+    assert src_status_map.get("src2") == "condensed", f"Second source should be condensed, got {src_status_map}"

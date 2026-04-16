@@ -315,6 +315,11 @@ class SemanticProjectionBuilder:
             "stability": atom.get("stability"),
             "core_atom_flag": atom.get("core_atom_flag", False),
             "contradiction_flag": atom.get("contradiction_flag", False),
+            # Source-level fields — populated by store_atom_with_evidence enrichment
+            "source_url": atom.get("source_url"),
+            "trust_score": atom.get("trust_score", 0.5),
+            "captured_at": atom.get("captured_at"),
+            "citation_key": atom.get("citation_key"),
         }
 
     @staticmethod
@@ -688,8 +693,34 @@ class SheppardStorageAdapter(StorageAdapter):
 
                 await conn.execute(ev_query, *ev_flat_values)
 
+        # Enrich atom with source metadata before Chroma indexing so that
+        # V3Retriever's trust_score / source_url / captured_at / citation_key fields
+        # are real values rather than synthetic defaults.
+        enriched = dict(atom)
+        primary_source_id = evidence_rows[0].get("source_id") if evidence_rows else None
+        if primary_source_id:
+            try:
+                async with self.pg.pool.acquire() as conn:
+                    src = await conn.fetchrow(
+                        "SELECT url, trust_score, captured_at FROM corpus.sources WHERE source_id = $1",
+                        primary_source_id,
+                    )
+                if src:
+                    enriched["source_url"] = src["url"]
+                    enriched["trust_score"] = float(src["trust_score"]) if src["trust_score"] is not None else 0.5
+                    enriched["captured_at"] = (
+                        src["captured_at"].isoformat() if src["captured_at"] else None
+                    )
+                    # Derive a short citation key from the URL (domain + first path segment)
+                    from urllib.parse import urlparse
+                    parsed = urlparse(src["url"] or "")
+                    path_part = parsed.path.strip("/").split("/")[0] if parsed.path.strip("/") else ""
+                    enriched["citation_key"] = f"{parsed.netloc}/{path_part}" if parsed.netloc else primary_source_id[:12]
+            except Exception as _e:
+                pass  # enrichment is best-effort; don't block storage
+
         # Index and cache after successful commit
-        await self.index_atom(atom)
+        await self.index_atom(enriched)
         await self.redis_cache.cache_hot_object("atom", atom_id, atom, ttl_s=3600)
 
     async def replace_atom_relationships(self, atom_id: str, relationships: Sequence[JsonDict]) -> None:

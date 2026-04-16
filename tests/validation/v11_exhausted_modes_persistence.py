@@ -85,8 +85,19 @@ async def test_v11_exhausted_modes_persistence():
     try:
         await adapter.pg.delete_where("mission.mission_nodes", {"mission_id": mission_id})
         await adapter.pg.delete_where("mission.research_missions", {"mission_id": mission_id})
+        await adapter.pg.delete_where("mission.domain_profiles", {"domain_profile_id": "profile_test"})
     except Exception:
         pass  # Ignore if tables don't exist or rows absent
+
+    # Insert domain_profiles row required by FK constraint
+    try:
+        await adapter.pg.insert_row("mission.domain_profiles", {
+            "domain_profile_id": "profile_test",
+            "topic_id": mission_id,
+            "profile_name": "Test Profile V11",
+        })
+    except Exception:
+        pass  # Row may already exist
 
     # Insert mission row
     mission_row = {
@@ -144,4 +155,8 @@ async def test_v11_exhausted_modes_persistence():
     # Cleanup: remove test data
     await adapter.pg.delete_where("mission.mission_nodes", {"mission_id": mission_id})
     await adapter.pg.delete_where("mission.research_missions", {"mission_id": mission_id})
+    try:
+        await adapter.pg.delete_where("mission.domain_profiles", {"domain_profile_id": "profile_test"})
+    except Exception:
+        pass
     await pg_pool.close()

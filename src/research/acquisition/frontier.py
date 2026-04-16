@@ -399,24 +399,45 @@ Output valid JSON:
 
         except Exception as e:
             logger.error(f"[Frontier] Policy generation failed: {e}. Activating Fallback Depth.")
-            console.print(f"[yellow][Frontier][/yellow] Fallback: generating heuristic nodes for '{self.topic_name}'")
-            fallbacks = [
-                self.topic_name,
-                f"{self.topic_name} technical architecture",
-                f"{self.topic_name} implementation details",
-                f"{self.topic_name} failure modes",
-                f"{self.topic_name} best practices",
-                f"{self.topic_name} performance optimization",
-                f"{self.topic_name} security considerations",
-                f"{self.topic_name} scalability patterns",
-                f"{self.topic_name} testing and validation",
-                f"{self.topic_name} deployment strategies",
-                f"{self.topic_name} monitoring and observability",
-                f"{self.topic_name} data management",
-                f"{self.topic_name} integration patterns",
-                f"{self.topic_name} error handling",
-                f"{self.topic_name} versioning and compatibility"
-            ]
+            console.print(f"[yellow][Frontier][/yellow] Fallback: generating topic-specific nodes for '{self.topic_name}'")
+
+            # Attempt a simpler LLM call before resorting to generic templates.
+            # Uses a minimal prompt that is less likely to produce malformed JSON.
+            fallbacks = []
+            try:
+                simple_prompt = (
+                    f"List 12 specific research subtopics for: {self.topic_name}\n"
+                    f'Output JSON only: {{"nodes": ["subtopic 1", "subtopic 2", ...]}}'
+                )
+                simple_resp = await self.sm.ollama.complete(TaskType.QUERY_EXPANSION, simple_prompt)
+                if simple_resp:
+                    import re as _re
+                    m = _re.search(r'"nodes"\s*:\s*\[(.*?)\]', simple_resp, _re.DOTALL)
+                    if m:
+                        fallbacks = _re.findall(r'"([^"]{4,80})"', m.group(1))
+                        logger.info(f"[Frontier] Fallback LLM: {len(fallbacks)} topic-specific nodes")
+            except Exception as fe:
+                logger.debug(f"[Frontier] Fallback LLM also failed: {fe}")
+
+            # Final fallback: generic template strings
+            if not fallbacks:
+                fallbacks = [
+                    self.topic_name,
+                    f"{self.topic_name} technical architecture",
+                    f"{self.topic_name} implementation details",
+                    f"{self.topic_name} failure modes",
+                    f"{self.topic_name} best practices",
+                    f"{self.topic_name} performance optimization",
+                    f"{self.topic_name} security considerations",
+                    f"{self.topic_name} scalability patterns",
+                    f"{self.topic_name} testing and validation",
+                    f"{self.topic_name} deployment strategies",
+                    f"{self.topic_name} monitoring and observability",
+                    f"{self.topic_name} data management",
+                    f"{self.topic_name} integration patterns",
+                    f"{self.topic_name} error handling",
+                    f"{self.topic_name} versioning and compatibility",
+                ]
             node_count = 0
             for fn in fallbacks:
                 try:
@@ -494,14 +515,15 @@ CONCEPT: {node.concept}
 MODE: {mode} ({MODES[mode]})
 
 Generate 3 search queries with varying complexity:
-1. KEYWORD: 3-4 highly specific keywords related to the concept.
-2. PHRASE: A concise search phrase (5-8 words).
-3. INTENT: A high-intent, specific question a researcher would ask.
+1. KEYWORD: 3-4 highly specific keywords related to the concept within {self.topic_name}.
+2. PHRASE: A concise search phrase (5-8 words) that includes {self.topic_name}.
+3. INTENT: A high-intent, specific question a researcher in {self.topic_name} would ask.
 
 CRITICAL:
 - NO "Node X" or "Node X:" prefixes.
 - NO Boolean logic, quotes, or operators.
-- Think like a professional researcher in this specific field.
+- Every query MUST be scoped to {self.topic_name} — never use the concept alone.
+- Think like a professional researcher in {self.topic_name}, not a generalist.
 - Response must be 3 lines, one query per line.
 """
         logger.debug("[Frontier] About to call ollama.complete")
@@ -515,13 +537,14 @@ CRITICAL:
             c = re.sub(r'^(find|search|explain|analyze|what is|how to)\s+', '', c, flags=re.IGNORECASE)
             for term in [" AND ", " OR ", " NOT "]: c = c.replace(term, " ")
             if len(c) > 3: clean_queries.append(c)
-        
-        # Always include the raw concept as the ultimate anchor
-        # Ensure the concept itself is cleaned too
+
+        # Anchor query: concept + topic name to prevent cross-domain keyword bleed
+        # e.g. "Biological Bases of Behavior Psychology" not just "Biological Bases of Behavior"
         clean_concept = re.sub(r'^(Node\s*\d+:?|\d+[\.\)]\s*)', '', node.concept, flags=re.IGNORECASE).strip()
-        if clean_concept not in clean_queries:
-            clean_queries.insert(0, clean_concept)
-            
+        anchored_concept = f"{clean_concept} {self.topic_name}"
+        if anchored_concept not in clean_queries:
+            clean_queries.insert(0, anchored_concept)
+
         return clean_queries[:4]
 
     async def _respawn_nodes(self, parent_node: Optional[FrontierNode]):

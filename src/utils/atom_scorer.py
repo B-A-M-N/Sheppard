@@ -400,3 +400,105 @@ def filter_atoms_by_score(
             rejected.append(atom_with_score)
 
     return accepted, repair_candidates, rejected
+
+
+# ─────────────────────────────────────────────
+# IMPORTANCE & NOVELTY COMPUTATION
+# ─────────────────────────────────────────────
+
+def compute_importance(content: str) -> float:
+    """
+    Compute atom importance from measurable signals.
+
+    Higher importance for:
+    - Concrete metrics, numbers, measurements
+    - Named entities (architectures, methods, tools)
+    - Causal/mechanistic statements
+    - Comparative evaluations
+    """
+    if not content or len(content) < 10:
+        return 0.1
+
+    score = 0.0
+    text = content.lower()
+
+    # Concrete metrics boost importance (0-0.35)
+    numbers = re.findall(r'\d+\.?\d*', content)
+    metric_terms = re.findall(r'(?:percent|%|ms|gb|mb|tb|params|layers|epochs|accuracy|error|loss|score|flops|f1)', content, re.IGNORECASE)
+    if numbers:
+        score += min(len(numbers) * 0.05, 0.15)
+    if metric_terms:
+        score += min(len(metric_terms) * 0.08, 0.20)
+
+    # Named entities boost importance (0-0.25)
+    proper_nouns = re.findall(r'\b[A-Z][a-z]{2,}(?:Net|Model|Layer|Method|Algorithm|System|Framework|Transformer|CNN|RNN|LSTM|GAN|BERT|GPT|ResNet|VGG)\b', content)
+    if proper_nouns:
+        score += min(len(proper_nouns) * 0.10, 0.25)
+
+    # Causal/mechanistic language (0-0.20)
+    causal_terms = ['causes', 'enables', 'prevents', 'reduces', 'improves', 'achieves', 'produces', 'generates', 'determines', 'requires']
+    if any(term in text for term in causal_terms):
+        score += 0.20
+
+    # Comparative language (0-0.20)
+    comparative_terms = ['better', 'worse', 'higher', 'lower', 'faster', 'slower', 'more', 'less', 'superior', 'inferior', 'outperforms']
+    if any(term in text for term in comparative_terms):
+        score += 0.15
+
+    return min(max(score, 0.1), 1.0)
+
+
+def compute_novelty(content: str, all_atoms: Optional[List[Dict]] = None) -> float:
+    """
+    Compute atom novelty from content uniqueness.
+
+    Higher novelty for:
+    - Low redundancy (unique content)
+    - Specific/technical details vs generic statements
+    - New concepts/architectures vs well-known facts
+    """
+    if not content or len(content) < 10:
+        return 0.1
+
+    score = 0.0
+
+    # Specificity boost: generic statements have low novelty (0-0.30)
+    generic_phrases = [
+        'is a', 'is an', 'is the', 'refers to', 'known as',
+        'is used', 'is designed', 'is proposed', 'is called',
+    ]
+    text_lower = content.lower()
+    is_generic = any(text_lower.startswith(phrase) or f' {phrase}' in text_lower for phrase in generic_phrases)
+    if not is_generic:
+        score += 0.30
+    else:
+        score += 0.10  # Generic statements still get baseline
+
+    # Technical detail boost (0-0.35)
+    tech_indicators = [
+        r'\d+\.?\d*\s*(?:percent|%|ms|gb|mb|params|layers|epochs|accuracy)',
+        r'\b[A-Z][a-z]*(?:Net|Model|Layer|Algorithm|Framework)\b',
+        r'(?:dropout|batch.?norm|attention|residual|convolutional|recurrent)',
+    ]
+    for pattern in tech_indicators:
+        if re.search(pattern, content, re.IGNORECASE):
+            score += 0.12
+
+    # Uniqueness vs other atoms (0-0.35)
+    if all_atoms and len(all_atoms) > 1:
+        sig = _content_signature(content)
+        other_sigs = set()
+        for other in all_atoms[:50]:  # Sample for efficiency
+            other_content = other.get('text', '')
+            if other_content:
+                other_sigs.update(_content_signature(other_content))
+        if other_sigs:
+            overlap = len(sig & other_sigs) / max(len(sig | other_sigs), 1)
+            uniqueness = 1.0 - overlap
+            score += uniqueness * 0.35
+        else:
+            score += 0.20  # No comparison available
+    else:
+        score += 0.20  # Baseline when no comparison available
+
+    return min(max(score, 0.05), 1.0)

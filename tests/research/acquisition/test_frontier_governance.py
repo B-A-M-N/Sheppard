@@ -12,7 +12,14 @@ from research.acquisition.frontier import AdaptiveFrontier, FrontierNode
 async def test_zero_yield_triggers_failure_after_threshold():
     """Mission should fail after MAX_CONSECUTIVE_ZERO_YIELD consecutive zero-yield nodes."""
     mock_sm = MagicMock()
-    mock_sm.budget.get_status.return_value = MagicMock(usage_ratio=0.1)
+    budget_status = MagicMock()
+    budget_status.usage_ratio = 0.1
+    budget_status.raw_bytes = 0
+    budget_status.ceiling_bytes = 1024 * 1024 * 1024
+    budget_status.pending_source_count = 0
+    budget_status.condensed_bytes = 0
+    budget_status.condensation_running = False
+    mock_sm.budget.get_status.return_value = budget_status
     mock_sm.crawler.discover_and_enqueue = AsyncMock(return_value=0)
     mock_adapter = MagicMock()
     mock_adapter.list_mission_nodes = AsyncMock(return_value=[])
@@ -22,6 +29,8 @@ async def test_zero_yield_triggers_failure_after_threshold():
     mock_adapter.get_domain_profile = AsyncMock(return_value=None)
     mock_adapter.upsert_domain_profile = AsyncMock()
     mock_adapter.update_mission_status = AsyncMock()
+    mock_adapter.get_queue_depth = AsyncMock(return_value=0)
+    mock_adapter.get_discovery_entities = AsyncMock(return_value=[])
     mock_sm.adapter = mock_adapter
     mock_sm.ollama = MagicMock()
     mock_sm.ollama.complete = AsyncMock(return_value='{"policy": {"class": "general"}, "nodes": ["node1", "node2"]}')
@@ -52,6 +61,7 @@ async def test_respawn_nodes_with_none_parent():
     mock_adapter.get_domain_profile = AsyncMock(return_value=None)
     mock_adapter.upsert_domain_profile = AsyncMock()
     mock_adapter.update_mission_status = AsyncMock()
+    mock_adapter.get_queue_depth = AsyncMock(return_value=0)
     mock_sm.adapter = mock_adapter
     mock_sm.ollama = MagicMock()
     # Return a node name with length > 10 to pass the filter

@@ -271,7 +271,7 @@ class ConsolidationEngine:
             f'Respond in JSON format: {{"contradiction": true/false, "reason": "brief explanation"}}'
         )
         try:
-            result = await self.ollama.complete(TaskType.EXTRACTION, prompt, max_tokens=200)
+            result = await self.ollama.complete(TaskType.EXTRACT_ATOMS, prompt, max_tokens=200)
             cleaned = re.sub(r'^```(?:json)?\s*|\s*```$', '', result.strip(), flags=re.DOTALL)
             data = json.loads(cleaned)
             return data.get("contradiction", False), data.get("reason", "")

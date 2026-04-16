@@ -174,11 +174,11 @@ class DistillationPipeline:
         console.print(f"[bold magenta][Distillery][/bold magenta] Starting distillation pass for mission {mission_id[:8]}... (priority={priority.value})")
         async with self._semaphore:
             # 1. Fetch raw technical ore from V3 Corpus
-            # We process a small batch sequentially to ensure high quality with 8B models
+            # Dynamic batch size: scale with backlog to prevent throughput bottleneck
             sources = await self.adapter.pg.fetch_many(
                 "corpus.sources",
                 where={"mission_id": mission_id, "status": "fetched"},
-                limit=5
+                limit=15  # Increased from 5 — LLM calls are the limiter, not batch size
             )
             if not sources:
                 console.print(f"[yellow][Distillery][/yellow] No 'fetched' sources found for mission {mission_id[:8]} — skipping distillation")
@@ -283,283 +283,320 @@ class DistillationPipeline:
                 raise
 
     async def _process_sources(self, sources, mission_id, mission_row, run_id, priority):
-        """Process a batch of sources through the distillation pipeline."""
+        """Process a batch of sources through the distillation pipeline with parallel workers."""
         import uuid
         from src.research.domain_schema import KnowledgeAtom, AtomLineage
 
         self._total_atoms = 0
+        _concept_counts: dict = {}  # concept_name -> atom count this batch (for emergent topic detection)
+        # High-throughput: process sources in parallel with bounded concurrency
+        worker_semaphore = asyncio.Semaphore(4)  # 4 parallel distillation workers
+        results_lock = asyncio.Lock()  # Protect _total_atoms and _concept_counts
+        error_count = [0]
 
-        for s in sources:
-            # Guard: ensure source row is actually a dict
-            if not isinstance(s, dict):
-                logger.error(f"[Distillery] Skipping malformed source row: type={type(s).__name__}, value={repr(s)[:200]}")
-                continue
+        async def _process_single(s):
+            """Process one source through the full distillation pipeline."""
+            async with worker_semaphore:
+                if not isinstance(s, dict):
+                    logger.error(f"[Distillery] Skipping malformed source row: type={type(s).__name__}")
+                    return 0
 
-            source_id = s.get("source_id", "unknown")
+                source_id = s.get("source_id", "unknown")
 
-            # Idempotency check: skip if already extracted
-            content_hash = s.get("content_hash")
-            if await self._check_source_already_extracted(source_id, content_hash):
-                continue
+                # Idempotency check: skip if already extracted
+                content_hash = s.get("content_hash")
+                if await self._check_source_already_extracted(source_id, content_hash):
+                    return 0
 
-            # Get the content
-            text_ref = s.get("canonical_text_ref")
-            if not text_ref:
-                await transition_source_status(self.adapter, source_id, "error", current_status="fetched")
-                continue
+                # Check metadata for HTTP error status (403, 404, etc.) before processing
+                metadata = s.get("metadata_json")
+                if isinstance(metadata, str):
+                    try:
+                        import json as _json
+                        meta = _json.loads(metadata)
+                        status_code = meta.get("statusCode", meta.get("status_code", 0))
+                        if isinstance(status_code, int) and status_code >= 400:
+                            logger.info(f"[Pipeline] Skipping source {source_id}: HTTP {status_code}")
+                            await transition_source_status(self.adapter, source_id, "filtered_out", current_status="fetched")
+                            await self.adapter.pg.update_row("corpus.sources", "source_id", {
+                                "source_id": source_id,
+                                "filter_metadata": {"gate": "http_error", "status_code": status_code},
+                            })
+                            return 0
+                    except (json.JSONDecodeError, TypeError):
+                        pass  # Metadata not parseable, continue
 
-            ref = await self.adapter.get_text_ref(text_ref)
-            if not ref or not ref.get("inline_text"):
-                await transition_source_status(self.adapter, source_id, "error", current_status="fetched")
-                continue
+                # Get the content
+                text_ref = s.get("canonical_text_ref")
+                if not text_ref:
+                    await transition_source_status(self.adapter, source_id, "error", current_status="fetched")
+                    return 0
 
-            content = ref["inline_text"]
+                ref = await self.adapter.get_text_ref(text_ref)
+                if not ref or not ref.get("inline_text"):
+                    await transition_source_status(self.adapter, source_id, "error", current_status="fetched")
+                    return 0
 
-            # ── CMK Integration: Push to ingestion control Tier 0 ──
-            if self.cmk_runtime and self.ingest_redis:
-                try:
-                    doc_id = source_id
-                    content_hash = compute_content_hash(content)
-                    # Push to Tier 0 for dedup + novelty gate
-                    doc_meta = {
-                        "id": doc_id,
-                        "url": s.get("url", ""),
-                        "content": content,
-                        "mission_id": mission_id,
-                        "source": s.get("source", ""),
-                    }
-                    priority = compute_priority(doc_meta, novelty_score=0.5, graph_gap_score=0.0)
-                    await push_doc(self.ingest_redis, doc_id, priority, tier="tier0")
-                    # Mark source as "queued_for_ingestion" to skip direct processing
-                    await transition_source_status(
-                        self.adapter, source_id, "queued_for_ingestion", current_status="fetched"
-                    )
-                    logger.debug(f"[Distillery] Pushed {doc_id[:20]} to Tier 0 (priority={priority:.2f})")
-                    continue
-                except Exception as ic_err:
-                    logger.debug(f"[Distillery] Ingestion control push failed: {ic_err}, falling through to direct processing")
+                content = ref["inline_text"]
 
-            # ── GATE 0a: Heuristic pre-filter (CPU-only, fast) ──
-            from src.utils.embedding_distiller import gate_0a_heuristic
-            verdict, reason = gate_0a_heuristic(content, ref.get("raw_html", ""))
-            if verdict == "SKIP":
-                logger.debug(f"[Distillery] Gate 0a rejected {source_id}: {reason}")
-                await transition_source_status(
-                    self.adapter, source_id, "filtered_out", current_status="fetched"
-                )
-                # Normalize human-readable reason to canonical DB constraint value
-                canonical_reason = _normalize_filter_reason(reason)
-                await self.adapter.pg.update_row(
-                    "corpus.sources",
-                    "source_id",
-                    {
-                        "source_id": source_id,
-                        "filter_metadata": {
-                            "gate": "0a_heuristic",
-                            "reason": canonical_reason,
-                        },
-                    },
-                )
-                continue
+                # ── CMK Integration: Push to ingestion control Tier 0 ──
+                if self.cmk_runtime and self.ingest_redis:
+                    try:
+                        doc_id = source_id
+                        chash = compute_content_hash(content)
+                        doc_meta = {
+                            "id": doc_id,
+                            "url": s.get("url", ""),
+                            "content": content[:5000],
+                            "mission_id": mission_id,
+                            "source": s.get("source", ""),
+                        }
+                        pri = compute_priority(doc_meta, novelty_score=0.5, graph_gap_score=0.0)
+                        await push_doc(self.ingest_redis, doc_id, pri, tier="tier0", metadata=doc_meta)
+                        await transition_source_status(
+                            self.adapter, source_id, "queued_for_ingestion", current_status="fetched"
+                        )
+                        return 0  # Handled by ingestion pipeline
+                    except Exception:
+                        pass  # Fall through to direct processing
 
-            # Fetch chunks for this source (needed for evidence binding)
-            chunks = await self.adapter.list_chunks_for_source(source_id)
-            if not chunks:
-                logger.error(f"[Distillery] No chunks found for source {source_id}, cannot bind evidence")
-                await transition_source_status(self.adapter, source_id, "error", current_status="fetched")
-                continue
-
-            # Build quick access to chunk texts
-            chunk_infos = [(chunk['chunk_id'], chunk.get('inline_text', '')) for chunk in chunks]
-
-            console.print(f"[dim][Distillery] Smelting: {s.get('url', source_id)[:60]}...[/dim]")
-
-            try:
-                # Diagnostic: log types at entry point for debugging smelting failures
-                if not isinstance(mission_row, (dict, type(None))):
-                    logger.error(f"[Distillery] mission_row has unexpected type: {type(mission_row).__name__} = {repr(mission_row)[:200]}")
-                atoms_data = await extract_technical_atoms(
-                    self.ollama, content, mission_id,
-                    source_url=s.get('url', '')  # Pass source URL for quality gating
-                )
-
-                # 3. Storage & Indexing
-                atoms_this_source = 0
-
-                # EXTRACT-05: Compute source type for confidence scoring
-                content_for_classification = ref.get("inline_text", "")[:4000]
+                # ── GATE 0b: Source quality classification ──
+                # Run before LLM extraction so we skip low-value sources cheaply.
+                # Scores: academic=0.85, standard=0.55, skip=0.10
+                _QUALITY_SCORE_MAP = {"academic": 0.85, "standard": 0.55, "skip": 0.10}
+                content_for_classification = content[:4000]
                 source_type = classify_source_quality(s.get('url', ''), content_for_classification)
+                quality_score = _QUALITY_SCORE_MAP.get(source_type, 0.55)
 
-                for atom_dict in atoms_data:
-                    # Guard: ensure atom_dict is actually a dict before calling .get()
-                    if not isinstance(atom_dict, dict):
-                        logger.warning(f"[Distillery] Skipping non-dict atom: {type(atom_dict).__name__} = {repr(atom_dict)[:100]}")
-                        continue
+                # Write quality_score + trust_score back to corpus.sources so they're queryable
+                await self.adapter.pg.update_row("corpus.sources", "source_id", {
+                    "source_id": source_id,
+                    "quality_score": quality_score,
+                    "trust_score": quality_score,  # same signal for now; can diverge later
+                })
 
-                    # Additional guard: ensure text field exists and is a string
-                    normalized = normalize_atom_schema(atom_dict)
-                    content_value = normalized.get('text', '')
-                    if not content_value or not isinstance(content_value, str):
-                        logger.warning(f"[Distillery] Skipping atom with invalid content field: {type(content_value).__name__}")
-                        continue
+                if source_type == "skip":
+                    await transition_source_status(self.adapter, source_id, "filtered_out", current_status="fetched")
+                    await self.adapter.pg.update_row("corpus.sources", "source_id", {
+                        "source_id": source_id,
+                        "filter_metadata": {"gate": "0b_quality", "reason": "low_quality"},
+                    })
+                    return 0
 
-                    atom_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{mission_id}:{source_id}:{content_value[:200]}"))
-                    profile_id = mission_row.get("domain_profile_id") if isinstance(mission_row, dict) else f"profile_{mission_id[:8]}"
+                # ── GATE 0a: Heuristic pre-filter ──
+                from src.utils.embedding_distiller import gate_0a_heuristic
+                verdict, reason = gate_0a_heuristic(content, ref.get("raw_html", ""))
+                if verdict == "SKIP":
+                    await transition_source_status(self.adapter, source_id, "filtered_out", current_status="fetched")
+                    canonical_reason = _normalize_filter_reason(reason)
+                    await self.adapter.pg.update_row("corpus.sources", "source_id", {
+                        "source_id": source_id,
+                        "filter_metadata": {"gate": "0a_heuristic", "reason": canonical_reason},
+                    })
+                    return 0
 
-                    # Use normalize_atom_schema for importance/novelty (handles categorical → numeric)
-                    scored = normalize_atom_schema(atom_dict)
-                    atom_importance = scored.get("importance", 0.5)
-                    atom_novelty = scored.get("novelty", 0.5)
+                # Fetch chunks for evidence binding
+                chunks = await self.adapter.list_chunks_for_source(source_id)
+                if not chunks:
+                    await transition_source_status(self.adapter, source_id, "error", current_status="fetched")
+                    return 0
 
-                    atom = KnowledgeAtom(
-                        atom_id=atom_id,
-                        topic_id=mission_row.get("topic_id") if isinstance(mission_row, dict) else mission_id,
-                        domain_profile_id=profile_id,
-                        atom_type=atom_dict.get('atom_type', atom_dict.get('type', 'claim')),
-                        title=content_value[:50] + "...",
-                        statement=content_value,
-                        summary=content_value,
-                        confidence=compute_confidence(normalized, source_type, atoms_data),
-                        importance=atom_importance,
-                        novelty=atom_novelty,
-                        lineage=AtomLineage(
-                            mission_id=mission_id,
-                            extraction_mode="atomic_distillation"
-                        ),
-                        metadata={"type": atom_dict.get('atom_type', atom_dict.get('type')), "source_id": source_id}
+                chunk_infos = [(chunk['chunk_id'], chunk.get('inline_text', '')) for chunk in chunks]
+
+                try:
+                    atoms_data = await extract_technical_atoms(
+                        self.ollama, content, mission_id,
+                        source_url=s.get('url', '')
                     )
 
-                    # Determine appropriate chunk(s) for this atom
-                    atom_content = normalized.get('text', '').strip()
-                    matched_chunk_ids = []
-                    if atom_content:
-                        for chunk_id, chunk_text in chunk_infos:
-                            if atom_content in chunk_text or chunk_text in atom_content:
-                                matched_chunk_ids.append(chunk_id)
+                    # Transition fetched -> extracted before processing atoms
+                    await transition_source_status(self.adapter, source_id, "extracted", current_status="fetched")
 
-                        # If no direct match, fallback to first chunk
-                        if not matched_chunk_ids:
+                    atoms_this_source = 0
+
+                    for atom_dict in atoms_data:
+                        if not isinstance(atom_dict, dict):
+                            continue
+
+                        normalized = normalize_atom_schema(atom_dict)
+                        content_value = normalized.get('text', '')
+                        if not content_value or not isinstance(content_value, str):
+                            continue
+
+                        atom_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{mission_id}:{source_id}:{content_value[:200]}"))
+                        profile_id = mission_row.get("domain_profile_id") if isinstance(mission_row, dict) else f"profile_{mission_id[:8]}"
+
+                        # Compute importance/novelty if LLM didn't provide them
+                        atom_importance = normalized.get("importance")
+                        atom_novelty = normalized.get("novelty")
+                        if atom_importance is None:
+                            from src.utils.atom_scorer import compute_importance
+                            atom_importance = compute_importance(content_value)
+                        if atom_novelty is None:
+                            from src.utils.atom_scorer import compute_novelty
+                            atom_novelty = compute_novelty(content_value, atoms_data)
+
+                        atom = KnowledgeAtom(
+                            atom_id=atom_id,
+                            topic_id=mission_row.get("topic_id") if isinstance(mission_row, dict) else mission_id,
+                            domain_profile_id=profile_id,
+                            atom_type=atom_dict.get('atom_type', atom_dict.get('type', 'claim')),
+                            title=content_value[:50] + "...",
+                            statement=content_value,
+                            summary=content_value,
+                            confidence=compute_confidence(normalized, source_type, atoms_data),
+                            importance=atom_importance,
+                            novelty=atom_novelty,
+                            lineage=AtomLineage(mission_id=mission_id, extraction_mode="atomic_distillation"),
+                            metadata={"type": atom_dict.get('atom_type', atom_dict.get('type')), "source_id": source_id}
+                        )
+
+                        atom_content = normalized.get('text', '').strip()
+                        matched_chunk_ids = []
+                        if atom_content:
+                            atom_words = set(atom_content.lower().split())
+                            best_score = 0.0
+                            best_chunk_id = chunks[0]['chunk_id']
+                            for chunk_id, chunk_text in chunk_infos:
+                                # Exact substring match first (fast path)
+                                if atom_content in chunk_text or chunk_text in atom_content:
+                                    matched_chunk_ids.append(chunk_id)
+                                    continue
+                                # Word-overlap (Jaccard) for paraphrased atoms
+                                chunk_words = set(chunk_text.lower().split())
+                                union = atom_words | chunk_words
+                                if union:
+                                    score = len(atom_words & chunk_words) / len(union)
+                                    if score > best_score:
+                                        best_score = score
+                                        best_chunk_id = chunk_id
+                            if not matched_chunk_ids:
+                                # Use the chunk with highest word overlap (min 0.15 to be meaningful)
+                                matched_chunk_ids = [best_chunk_id] if best_score >= 0.15 else [chunks[0]['chunk_id']]
+                        else:
                             matched_chunk_ids = [chunks[0]['chunk_id']]
-                    else:
-                        matched_chunk_ids = [chunks[0]['chunk_id']]
 
-                    # Create evidence rows for all matched chunks
-                    evidence_rows = [
-                        {
-                            "source_id": source_id,
-                            "chunk_id": cid,
-                            "evidence_strength": 0.9,
-                            "supports_statement": True
-                        }
-                        for cid in matched_chunk_ids
-                    ]
+                        evidence_rows = [
+                            {"source_id": source_id, "chunk_id": cid, "evidence_strength": 0.9, "supports_statement": True}
+                            for cid in matched_chunk_ids
+                        ]
 
-                    # Store atom and evidence atomically via V3 Adapter
-                    atom_row = atom.to_pg_row()
-                    await self.adapter.store_atom_with_evidence(atom_row, evidence_rows)
+                        atom_row = atom.to_pg_row()
+                        await self.adapter.store_atom_with_evidence(atom_row, evidence_rows)
 
-                    # CMK Integration: activate in cognitive memory
-                    if self.cmk_runtime:
-                        try:
-                            await self._cmk_ingest_atom(atom, mission_id)
-                        except Exception as cmk_err:
-                            logger.debug(f"[Distillery] CMK ingest failed for {atom_id}: {cmk_err}")
+                        # Entity / concept tagging — populate knowledge.atom_entities
+                        raw_concept = atom_dict.get('concept', '').strip()
+                        if raw_concept:
+                            from src.utils.atom_quality import is_noise_concept
+                            if not is_noise_concept(raw_concept):
+                                try:
+                                    await self.adapter.replace_atom_entities(atom_id, [
+                                        {"atom_id": atom_id, "entity_name": raw_concept, "entity_type": "concept"}
+                                    ])
+                                    # Track concept frequency in-memory for emergent topic detection
+                                    async with results_lock:
+                                        _concept_counts[raw_concept.lower()] = _concept_counts.get(raw_concept.lower(), 0) + 1
+                                except Exception as ent_err:
+                                    logger.debug(f"[Distillery] Entity tag failed for {atom_id}: {ent_err}")
 
-                    self._total_atoms += 1
-                    atoms_this_source += 1
+                        # CMK Integration: activate + belief graph
+                        if self.cmk_runtime:
+                            try:
+                                await self._cmk_ingest_atom(atom, mission_id)
+                            except Exception as cmk_err:
+                                logger.debug(f"[Distillery] CMK ingest failed for {atom_id}: {cmk_err}")
 
-                # 5. Mark individual source as condensed only if atoms were stored
-                if atoms_this_source > 0:
-                    await transition_source_status(
-                        self.adapter, source_id, "condensed", current_status="extracted"
-                    )
-                    # Notify budget that a source has been condensed
-                    await self.budget.record_source_condensed(mission_id)
-                elif len(atoms_data) > 0:
-                    # Atoms were extracted but all failed quality gates → filtered_out
-                    await transition_source_status(
-                        self.adapter, source_id, "filtered_out", current_status="extracted"
-                    )
-                    await self.adapter.pg.update_row(
-                        "corpus.sources",
-                        "source_id",
-                        {
+                        async with results_lock:
+                            self._total_atoms += 1
+                        atoms_this_source += 1
+
+                    # Mark source status
+                    if atoms_this_source > 0:
+                        await transition_source_status(self.adapter, source_id, "condensed", current_status="extracted")
+                        await self.budget.record_source_condensed(mission_id)
+                    elif len(atoms_data) > 0:
+                        await transition_source_status(self.adapter, source_id, "filtered_out", current_status="extracted")
+                        await self.adapter.pg.update_row("corpus.sources", "source_id", {
                             "source_id": source_id,
                             "filter_metadata": {
-                                "reason": "low_quality",
-                                "raw_atoms_count": len(atoms_data),
+                                "reason": "low_quality", "raw_atoms_count": len(atoms_data),
                                 "passed_atoms_count": 0,
-                                "details": "All extracted atoms failed quality gates (too short, low score, duplicate, or semantic drift)",
+                                "details": "All extracted atoms failed quality gates",
                             },
-                        }
-                    )
-                else:
-                    # Zero atoms extracted — extraction failed or content was garbage
-                    await transition_source_status(
-                        self.adapter, source_id, "rejected", current_status="extracted"
-                    )
-                    await self.adapter.pg.update_row(
-                        "corpus.sources",
-                        "source_id",
-                        {
+                        })
+                    else:
+                        await transition_source_status(self.adapter, source_id, "rejected", current_status="extracted")
+                        await self.adapter.pg.update_row("corpus.sources", "source_id", {
                             "source_id": source_id,
-                            "filter_metadata": {
-                                "reason": "no_atoms",
-                                "raw_atoms_count": 0,
-                            },
-                        }
-                    )
-            except ExtractionError as e:
-                # LLM call failed — mark source as error, write DLQ
-                console.print(f"[bold red][Distillery] Extraction failed for {source_id}[/bold red]")
-                await transition_source_status(
-                    self.adapter, source_id, "error", current_status="fetched"
-                )
-                await _write_dead_letter(
-                    self.adapter, source_id, "extraction", "ExtractionError", str(e),
-                    worker_id="pipeline:condensation",
-                    payload={"mission_id": mission_id, "url": s.get("url", ""), "content_hash": s.get("content_hash")},
-                )
-            except Exception as e:
-                tb = traceback.format_exc()
-                console.print(f"[bold red][Distillery] Smelting failed for {source_id}: {e}[/bold red]")
-                console.print(f"[dim]{tb}[/dim]")
-                logger.error(f"[Distillery] Smelting failed for {source_id}: {e}\n{tb}")
-                await transition_source_status(
-                    self.adapter, source_id, "error", current_status="fetched"
-                )
-                await _write_dead_letter(
-                    self.adapter, source_id, "condensation", type(e).__name__, str(e),
-                    worker_id="pipeline:condensation",
-                    payload={"mission_id": mission_id, "url": s.get("url", ""), "content_hash": s.get("content_hash")},
-                )
+                            "filter_metadata": {"reason": "no_atoms", "raw_atoms_count": 0},
+                        })
+
+                    return atoms_this_source
+
+                except ExtractionError as e:
+                    console.print(f"[bold red][Distillery] Extraction failed for {source_id}[/bold red]")
+                    await transition_source_status(self.adapter, source_id, "error", current_status="fetched")
+                    await _write_dead_letter(self.adapter, source_id, "extraction", "ExtractionError", str(e),
+                        worker_id="pipeline:condensation",
+                        payload={"mission_id": mission_id, "url": s.get("url", ""), "content_hash": s.get("content_hash")})
+                    error_count[0] += 1
+                    return 0
+                except Exception as e:
+                    tb = traceback.format_exc()
+                    console.print(f"[bold red][Distillery] Smelting failed for {source_id}: {e}[/bold red]")
+                    console.print(f"[dim]{tb}[/dim]")
+                    logger.error(f"[Distillery] Smelting failed for {source_id}: {e}\n{tb}")
+                    await transition_source_status(self.adapter, source_id, "error", current_status="fetched")
+                    await _write_dead_letter(self.adapter, source_id, "condensation", type(e).__name__, str(e),
+                        worker_id="pipeline:condensation",
+                        payload={"mission_id": mission_id, "url": s.get("url", ""), "content_hash": s.get("content_hash")})
+                    error_count[0] += 1
+                    return 0
+
+        # Run all sources in parallel with bounded concurrency
+        results = await asyncio.gather(*[_process_single(s) for s in sources], return_exceptions=True)
+
+        # Log any exceptions from gather
+        for i, r in enumerate(results):
+            if isinstance(r, Exception):
+                logger.error(f"[Distillery] Parallel worker exception for source {i}: {r}")
+                error_count[0] += 1
 
         console.print(f"[bold green][Refinery][/bold green] Batch complete. Smelted technical atoms: [white]{self._total_atoms}[/white]")
 
-        # 6. Entity Discovery — extract named entities from all atoms for Frontier expansion
-        # These entities become new query targets for the Frontier's discovery loop
+        # Emergent topic detection — find adjacent concepts that accumulated enough atoms
+        # to warrant follow-on learning when this mission completes
+        if _concept_counts and self.adapter:
+            mission_title = mission_row.get("title", "") if isinstance(mission_row, dict) else ""
+            await self._record_emergent_topics(mission_id, mission_title, _concept_counts)
+
+        # Entity Discovery
         if self.adapter and self._total_atoms > 0:
-            # Fetch recently condensed atoms for entity extraction
             condensed_atoms = await self.adapter.get_mission_atoms(mission_id, limit=100)
             if condensed_atoms:
-                # Use semantic extraction with embedding-assisted clustering
                 entities = await _extract_entities_semantic(condensed_atoms, self.ollama)
                 if entities:
                     console.print(f"[bold cyan][Discovery][/bold cyan] Extracted {len(entities)} entities for Frontier expansion: {entities[:15]}")
-                    # Store entities as discovery targets
                     if hasattr(self.adapter, 'store_discovery_entities'):
                         await self.adapter.store_discovery_entities(mission_id, entities)
 
-        # 7. Higher-Order Refinement
+        # Higher-Order Refinement
         if self._total_atoms > 0:
             if priority in [CondensationPriority.HIGH, CondensationPriority.CRITICAL]:
                 await self.resolve_contradictions(mission_id)
+            # Run belief graph cross-linking + self-correction for new atoms
+            if self.cmk_runtime:
+                try:
+                    await self._belief_graph_cross_link(mission_id)
+                    await self._self_correct_beliefs(mission_id)
+                except Exception as e:
+                    logger.debug(f"[Distillery] Belief graph pipeline failed: {e}")
 
-        # 7. Budget Feedback
+        # Budget Feedback
         await self.budget.record_condensation_result(
             mission_id=mission_id,
-            raw_bytes_freed=sum(len(str(s).encode()) for s in sources), # Approximated
-            condensed_bytes_added=self._total_atoms * 500 # Estimate
+            raw_bytes_freed=sum(len(str(s).encode()) for s in sources),
+            condensed_bytes_added=self._total_atoms * 500
         )
 
     async def _cluster_sources(self, sources: List[Dict]) -> List[ExtractionCluster]:
@@ -567,6 +604,143 @@ class DistillationPipeline:
         # Simple clustering for the scaffold
         clusters = [ExtractionCluster(mission_id=sources[0].get('mission_id', sources[0].get('topic_id', '')), concept="batch_general", sources=sources)]
         return clusters
+
+    # ── Emergent Topic Detection ──────────────────────────────────────────────
+
+    # Minimum atoms from an adjacent concept before it's flagged as emergent
+    _EMERGENT_THRESHOLD = 5
+    # Minimum distinct atoms (not just raw count) — avoids flagging repeated mentions
+    _EMERGENT_DISTINCT_THRESHOLD = 3
+
+    async def _record_emergent_topics(
+        self,
+        mission_id: str,
+        mission_title: str,
+        concept_counts: dict,
+    ) -> None:
+        """
+        Examine concepts that accumulated during this distillation pass.
+        Any concept that:
+          - appears >= _EMERGENT_THRESHOLD times
+          - is NOT a substring match of the current mission title (i.e. it's adjacent)
+        is recorded as an emergent topic candidate in the mission frontier snapshot.
+
+        These candidates are queued as follow-on missions when the current
+        mission completes — the system learns about what it encountered
+        organically without derailing the active mission.
+        """
+        from src.utils.atom_quality import is_noise_concept
+
+        mission_lower = mission_title.lower()
+        candidates = []
+
+        for concept, count in concept_counts.items():
+            if count < self._EMERGENT_THRESHOLD:
+                continue
+            if is_noise_concept(concept):
+                continue
+            # Skip if the concept is the mission topic or a substring of it
+            if concept in mission_lower or mission_lower in concept:
+                continue
+            candidates.append({"concept": concept, "atom_count": count, "source_mission": mission_id})
+
+        if not candidates:
+            return
+
+        # Sort by atom count descending — most prominent adjacent topics first
+        candidates.sort(key=lambda c: c["atom_count"], reverse=True)
+        top = candidates[:10]  # Cap at 10 emergent candidates per pass
+
+        logger.info(
+            "[Distillery] Emergent topics detected: %s",
+            [c["concept"] for c in top],
+        )
+        console.print(
+            f"[bold yellow][Discovery][/bold yellow] {len(top)} emergent topic(s) detected: "
+            + ", ".join(f"[cyan]{c['concept']}[/cyan] ({c['atom_count']} atoms)" for c in top[:5])
+        )
+
+        # Store in mission frontier snapshot for retrieval at mission completion
+        try:
+            existing = await self.adapter.pg.fetch_many(
+                "mission.mission_frontier_snapshots",
+                where={"mission_id": mission_id},
+                limit=1,
+            )
+            existing_candidates = []
+            if existing:
+                snap = existing[0]
+                existing_candidates = snap.get("frontier_json", {}).get("emergent_topics", [])
+
+            # Merge: add new candidates, update counts for existing ones
+            existing_by_concept = {c["concept"]: c for c in existing_candidates}
+            for cand in top:
+                key = cand["concept"]
+                if key in existing_by_concept:
+                    existing_by_concept[key]["atom_count"] = max(
+                        existing_by_concept[key]["atom_count"], cand["atom_count"]
+                    )
+                else:
+                    existing_by_concept[key] = cand
+
+            merged = sorted(existing_by_concept.values(), key=lambda c: c["atom_count"], reverse=True)
+
+            await self.adapter.pg.insert_row("mission.mission_frontier_snapshots", {
+                "mission_id": mission_id,
+                "frontier_json": {"emergent_topics": merged},
+            })
+        except Exception as e:
+            logger.warning("[Distillery] Failed to record emergent topics: %s", e)
+
+    async def get_emergent_topics_to_spawn(self, mission_id: str) -> list[dict]:
+        """
+        Called when a mission completes. Reads the emergent topic candidates
+        accumulated during distillation and returns the ones that should become
+        follow-on missions — deduplicating against existing missions.
+
+        Returns list of dicts: {"concept": str, "atom_count": int}
+        Caller (system.py) is responsible for creating the actual missions via learn().
+        """
+        try:
+            snapshots = await self.adapter.pg.fetch_many(
+                "mission.mission_frontier_snapshots",
+                where={"mission_id": mission_id},
+                limit=1,
+            )
+            if not snapshots:
+                return []
+
+            candidates = snapshots[0].get("frontier_json", {}).get("emergent_topics", [])
+            if not candidates:
+                return []
+
+            # Only auto-spawn the top 3 emergent topics to avoid runaway expansion
+            above_threshold = [c for c in candidates if c["atom_count"] >= self._EMERGENT_THRESHOLD][:3]
+            if not above_threshold:
+                return []
+
+            to_spawn = []
+            for cand in above_threshold:
+                concept = cand["concept"]
+                try:
+                    # Skip if a mission for this concept already exists
+                    existing = await self.adapter.pg.fetch_many(
+                        "mission.research_missions",
+                        where={"title": concept},
+                        limit=1,
+                    )
+                    if existing:
+                        logger.info("[Distillery] Skipping emergent spawn for '%s' — mission exists", concept)
+                        continue
+                    to_spawn.append({"concept": concept, "atom_count": cand["atom_count"]})
+                except Exception as e:
+                    logger.warning("[Distillery] Dedup check failed for '%s': %s", concept, e)
+
+            return to_spawn
+
+        except Exception as e:
+            logger.warning("[Distillery] get_emergent_topics_to_spawn failed: %s", e)
+            return []
 
     async def resolve_contradictions(self, mission_id: str):
         """The Courtroom: Actively resolves open contradictions."""
@@ -583,6 +757,7 @@ class DistillationPipeline:
         1. Activate in working memory (activation boost)
         2. Create belief node if high-confidence
         3. Link to concept anchors based on atom type
+        4. Cross-link with existing beliefs (supports/contradicts)
         """
         from src.core.memory.cmk.types import CMKAtom
 
@@ -626,6 +801,211 @@ class DistillationPipeline:
             self.cmk_runtime.link_belief_to_concepts(
                 belief_id, concepts, atom.atom_type or "general"
             )
+
+    async def _belief_graph_cross_link(self, mission_id: str):
+        """
+        Cross-link new beliefs with existing ones.
+
+        For each new belief in this mission:
+        1. Find semantically similar existing beliefs
+        2. Create SUPPORTS edge if aligned
+        3. Create CONTRADICTS edge if opposed
+        4. Update confidence based on evidence weight
+        """
+        if not self.cmk_runtime or not self.cmk_runtime.belief_graph:
+            return
+
+        bg = self.cmk_runtime.belief_graph
+
+        # Get new beliefs from this mission
+        new_beliefs = bg.get_beliefs_by_mission(mission_id) if hasattr(bg, 'get_beliefs_by_mission') else []
+        if not new_beliefs:
+            return
+
+        cross_links = 0
+        for belief in new_beliefs:
+            # Find similar beliefs via embedding similarity
+            similar = bg.find_similar_beliefs(belief.id, limit=5, threshold=0.7) if hasattr(bg, 'find_similar_beliefs') else []
+
+            for other_id, sim_score in similar:
+                if other_id == belief.id:
+                    continue
+
+                other = bg.get_belief(other_id)
+                if not other:
+                    continue
+
+                # Determine relationship type
+                if sim_score > 0.85:
+                    # High similarity → likely supports
+                    if not bg.has_edge(belief.id, other_id, "supports"):
+                        bg.create_edge(
+                            from_node=belief.id, to_node=other_id,
+                            relation_type="supports",
+                            strength=sim_score,
+                            reason=f"Semantic similarity {sim_score:.2f}"
+                        )
+                        # Boost confidence — corroborating evidence
+                        belief.authority_score = min(1.0, belief.authority_score + 0.05 * sim_score)
+                        other.authority_score = min(1.0, other.authority_score + 0.05 * sim_score)
+                        cross_links += 1
+
+                elif sim_score > 0.7:
+                    # Moderate similarity → check for contradiction
+                    is_contradiction = await self._detect_contradiction(belief, other)
+                    if is_contradiction:
+                        if not bg.has_edge(belief.id, other_id, "contradicts"):
+                            bg.create_edge(
+                                from_node=belief.id, to_node=other_id,
+                                relation_type="contradicts",
+                                strength=sim_score,
+                                reason=f"Contradictory claims at similarity {sim_score:.2f}"
+                            )
+                            # Reduce confidence — contradiction pressure
+                            belief.contradiction_pressure = getattr(belief, 'contradiction_pressure', 0.0) + 0.1
+                            other.contradiction_pressure = getattr(other, 'contradiction_pressure', 0.0) + 0.1
+                            cross_links += 1
+
+        if cross_links > 0:
+            # Persist updated belief graph
+            bg.persist() if hasattr(bg, 'persist') else None
+            logger.info(f"[BeliefGraph] Cross-linked {cross_links} edges for mission {mission_id[:8]}")
+
+    async def _detect_contradiction(self, belief_a, belief_b) -> bool:
+        """
+        Detect if two beliefs contradict each other.
+
+        Uses LLM-based contradiction detection for accuracy.
+        Returns True if beliefs are contradictory.
+        """
+        try:
+            prompt = (
+                f"Do these two claims contradict each other? Answer ONLY with 'yes' or 'no'.\n\n"
+                f"Claim A: {belief_a.claim}\n"
+                f"Claim B: {belief_b.claim}\n"
+            )
+            answer = await self.ollama.complete(
+                TaskType.CONTRADICTION_DETECTION,
+                prompt,
+                max_tokens=10,
+            )
+            return (answer or "").strip().lower().startswith("yes")
+        except Exception:
+            # Fallback: if LLM unavailable, assume no contradiction
+            return False
+
+    async def _self_correct_beliefs(self, mission_id: str):
+        """
+        Self-correcting belief loop.
+
+        After new evidence arrives from a mission:
+        1. Find beliefs affected by new atoms
+        2. Update confidence based on supporting/contradicting evidence
+        3. Deprecate beliefs with confidence below threshold
+        NEVER delete beliefs — only reduce confidence.
+        """
+        if not self.cmk_runtime or not self.cmk_runtime.belief_graph:
+            return
+
+        bg = self.cmk_runtime.belief_graph
+        all_beliefs = bg.get_all_beliefs() if hasattr(bg, 'get_all_beliefs') else []
+
+        updated = 0
+        for belief in all_beliefs:
+            # Get supporting edges
+            support_weight = 0.0
+            contradict_weight = 0.0
+
+            for edge in bg.get_edges_for_node(belief.id):
+                if edge.relation_type == "supports":
+                    support_weight += edge.strength
+                elif edge.relation_type == "contradicts":
+                    contradict_weight += edge.strength
+
+            # Recalculate confidence
+            total_evidence = support_weight + contradict_weight
+            if total_evidence > 0:
+                new_confidence = (support_weight - contradict_weight * 0.5) / total_evidence
+                new_confidence = max(0.0, min(1.0, new_confidence))
+
+                # Smooth update — don't jump too fast
+                old_confidence = belief.authority_score
+                belief.authority_score = old_confidence * 0.7 + new_confidence * 0.3
+                updated += 1
+
+                # Deprecate if confidence too low (but never delete)
+                if belief.authority_score < 0.2:
+                    belief.stability_score = max(0.0, belief.stability_score - 0.1)
+
+        if updated > 0:
+            bg.persist() if hasattr(bg, 'persist') else None
+            logger.info(f"[BeliefCorrection] Updated {updated} beliefs for mission {mission_id[:8]}")
+
+    async def query_with_reasoning(self, query: str, mission_id: str = None) -> dict:
+        """
+        Cross-document reasoning engine.
+
+        1. Retrieve relevant beliefs via embedding search
+        2. Expand via graph traversal (depth=2)
+        3. Aggregate supporting/contradicting evidence
+        4. Generate grounded answer with conflict awareness
+
+        Returns: {answer, supporting_beliefs, contradicting_beliefs, confidence}
+        """
+        if not self.cmk_runtime:
+            return {"answer": "CMK not available", "supporting": [], "contradicting": [], "confidence": 0.0}
+
+        # Step 1: Retrieve relevant beliefs
+        relevant = await self.cmk_runtime.query(query, top_k=5)
+
+        # Step 2: Expand via graph
+        expanded = set()
+        if self.cmk_runtime.belief_graph:
+            for belief_id in [b.get("id") for b in relevant.get("beliefs", [])]:
+                expanded.add(belief_id)
+                neighbors = self.cmk_runtime.belief_graph.get_neighbors(belief_id, depth=2) if hasattr(self.cmk_runtime.belief_graph, 'get_neighbors') else []
+                expanded.update(neighbors)
+
+        # Step 3: Aggregate evidence
+        supporting = []
+        contradicting = []
+        for belief_id in expanded:
+            belief = self.cmk_runtime.belief_graph.get_belief(belief_id) if hasattr(self.cmk_runtime.belief_graph, 'get_belief') else None
+            if belief and belief.authority_score > 0.5:
+                if getattr(belief, 'contradiction_pressure', 0.0) < 0.3:
+                    supporting.append({"claim": belief.claim, "confidence": belief.authority_score})
+                else:
+                    contradicting.append({"claim": belief.claim, "confidence": belief.authority_score})
+
+        # Step 4: Generate answer
+        context_text = "\n".join(f"- {b['claim']} (confidence: {b['confidence']:.2f})" for b in supporting)
+        conflict_text = "\n".join(f"- {b['claim']} (confidence: {b['confidence']:.2f})" for b in contradicting)
+
+        prompt = (
+            f"Based on the following evidence, answer the query.\n\n"
+            f"Query: {query}\n\n"
+            f"Supporting evidence:\n{context_text or 'None'}\n\n"
+        )
+        if conflict_text:
+            prompt += f"Contradicting evidence (acknowledge these):\n{conflict_text}\n\n"
+
+        prompt += "Provide a concise answer that acknowledges any conflicts in the evidence."
+
+        try:
+            response = await self.ollama.complete(
+                TaskType.CHAT,
+                prompt,
+                max_tokens=500,
+            )
+        except Exception:
+            response = "Unable to generate response."
+
+        return {
+            "answer": response,
+            "supporting_beliefs": supporting,
+            "contradicting_beliefs": contradicting,
+            "confidence": max([b["confidence"] for b in supporting], default=0.0),
+        }
 
     @staticmethod
     def activate_retrieved_atoms_cmk(atoms: list, cmk_runtime) -> list:

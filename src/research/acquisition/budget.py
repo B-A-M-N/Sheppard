@@ -196,8 +196,6 @@ class BudgetMonitor:
         Also triggers condensation when pending source count is high (for small-page missions).
         Only fires each threshold once per condensation cycle.
         """
-        from src.utils.console import console
-        console.set_quiet(True)
         async with self._lock:
             budget = self._budgets[mission_id]
 

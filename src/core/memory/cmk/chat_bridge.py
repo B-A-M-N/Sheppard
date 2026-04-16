@@ -46,6 +46,7 @@ class CMKChatBridge:
         pg_pool=None,
         ollama_host: str = "http://localhost:11434",
         ollama_embed_model: str = "nomic-embed-text",
+        distillation_pipeline=None,
     ):
         config = CMKConfig.from_env()
         config.embedding.host = ollama_host
@@ -57,6 +58,7 @@ class CMKChatBridge:
             pg_pool=pg_pool,
         )
         self.governor = LoopGovernor()
+        self.distillation_pipeline = distillation_pipeline
         self._initialized = False
 
     async def initialize(self) -> bool:
@@ -76,9 +78,12 @@ class CMKChatBridge:
         topic_filter: Optional[str] = None,
         mission_filter: Optional[str] = None,
         use_concepts: bool = True,
+        use_reasoning: bool = True,
     ) -> Dict[str, Any]:
         """
         Full CMK query pipeline — drop-in replacement for V3Retriever.retrieve().
+
+        If use_reasoning=True, expands via belief graph cross-document reasoning.
 
         Returns:
             Dict with evidence_pack, intent, and governor decisions.
@@ -103,6 +108,31 @@ class CMKChatBridge:
                 mission_filter=mission_filter,
             )
 
+        # Cross-document reasoning expansion (if enabled and distillation pipeline available)
+        reasoning_context = None
+        if use_reasoning and self.distillation_pipeline:
+            try:
+                reasoning_context = await self.distillation_pipeline.query_with_reasoning(
+                    user_query
+                )
+                # Inject reasoning context into evidence pack
+                if reasoning_context.get("supporting_beliefs"):
+                    for sb in reasoning_context["supporting_beliefs"]:
+                        pack.extra_context.append({
+                            "claim": sb["claim"],
+                            "confidence": sb["confidence"],
+                            "source": "belief_graph",
+                        })
+                if reasoning_context.get("contradicting_beliefs"):
+                    for cb in reasoning_context["contradicting_beliefs"]:
+                        pack.extra_context.append({
+                            "claim": cb["claim"],
+                            "confidence": cb["confidence"],
+                            "source": "belief_graph_contradiction",
+                        })
+            except Exception as e:
+                logger.debug(f"[CMKChatBridge] Reasoning expansion failed: {e}")
+
         # Governor pre-generation checks
         atoms = pack.usable_atoms
         scores = [a.reliability for a in atoms]
@@ -116,6 +146,7 @@ class CMKChatBridge:
             "plan": plan,
             "compressed_context": compressed,
             "governor_decisions": gov_decisions,
+            "reasoning_context": reasoning_context,
         }
 
     def build_messages(

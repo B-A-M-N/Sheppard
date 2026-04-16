@@ -35,6 +35,20 @@ class Settings:
         self.OLLAMA_API_HOST: str = os.getenv('OLLAMA_API_HOST', 'http://localhost')
         self.OLLAMA_EMBED_HOST: str = os.getenv('OLLAMA_EMBED_HOST', self.OLLAMA_API_HOST)
         self.OLLAMA_API_PORT: str = os.getenv('OLLAMA_API_PORT', '11434')
+
+        # Multi-host routing: each falls back to OLLAMA_API_HOST if not set.
+        # Single-machine setups work without setting any of these.
+        _api = self.OLLAMA_API_HOST
+        self.OLLAMA_REASONING_HOST: str = os.getenv('OLLAMA_REASONING_HOST', _api)
+        self.OLLAMA_EXTRACTION_HOST: str = os.getenv('OLLAMA_EXTRACTION_HOST', _api)
+        self.OLLAMA_SUMMARIZE_HOST: str = os.getenv('OLLAMA_SUMMARIZE_HOST', _api)
+
+        # Per-role model overrides — fall back to OLLAMA_MODEL if not set.
+        # Lets extraction_host run a different (already-available) model without
+        # requiring the same model be pulled on every machine.
+        _model = self.OLLAMA_MODEL
+        self.OLLAMA_EXTRACTION_MODEL: str = os.getenv('OLLAMA_EXTRACTION_MODEL', _model)
+        self.OLLAMA_SUMMARIZE_MODEL: str = os.getenv('OLLAMA_SUMMARIZE_MODEL', 'llama3.2:latest')
         
         # Storage Settings
         self.REDIS_HOST: str = os.getenv('REDIS_HOST', 'localhost')

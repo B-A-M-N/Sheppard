@@ -113,17 +113,28 @@ class CMKStore:
         if not self.pg_pool:
             return []
 
-        async with self.pg_pool.acquire() as conn:
-            query = f"SELECT * FROM {self.config.store.concepts_table}"
-            params = []
+        try:
+            async with self.pg_pool.acquire() as conn:
+                query = f"SELECT * FROM {self.config.store.concepts_table}"
+                params = []
 
-            if topic_id:
-                query += " WHERE topic_id = $1"
-                params.append(topic_id)
+                if topic_id:
+                    query += " WHERE topic_id = $1"
+                    params.append(topic_id)
 
-            query += " ORDER BY reliability DESC"
+                query += " ORDER BY reliability DESC"
 
-            rows = await conn.fetch(query, *params)
+                rows = await conn.fetch(query, *params)
+        except Exception as e:
+            if "does not exist" in str(e) or "relation" in str(e).lower():
+                logger.warning(
+                    f"[CMKStore] Table {self.config.store.concepts_table!r} not found in V3 schema — "
+                    "CMK will operate on empty concept substrate. "
+                    "Run the CMK schema migration to enable persistent concepts."
+                )
+            else:
+                logger.warning(f"[CMKStore] load_concepts failed: {e}")
+            return []
 
         concepts = []
         for row in rows:

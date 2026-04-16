@@ -42,6 +42,39 @@ def _classify_atom_quality(content: str) -> str:
         return 'WEAK'  # Has verb and termination but short
 
 
+# Concepts that indicate the atom is noise or too generic to be useful
+_NOISE_CONCEPTS = frozenset({
+    # Function words / stopwords mistaken as concepts
+    "the", "a", "an", "this", "that", "it", "they", "various", "several",
+    # Generic document meta
+    "article", "document", "section", "paragraph", "page", "text",
+    "the article", "this article", "the document", "the paper", "this paper",
+    "the section", "this section", "the study", "this study",
+    # Meaningless generic labels
+    "general", "overview", "introduction", "summary", "conclusion",
+    "information", "content", "data", "details", "examples", "methods",
+    "approach", "process", "system", "various methods", "multiple methods",
+    # Navigational noise from web pages
+    "click here", "read more", "learn more", "see also", "related",
+    "navigation", "menu", "footer", "header", "sidebar",
+    # Completely topic-neutral
+    "research", "study", "analysis", "results", "findings",
+})
+
+
+def is_noise_concept(concept: str) -> bool:
+    """Return True if the extracted concept is too generic to be useful."""
+    if not concept or not concept.strip():
+        return True
+    normalized = concept.strip().lower()
+    if normalized in _NOISE_CONCEPTS:
+        return True
+    # Single-character or pure numeric
+    if len(normalized) <= 2:
+        return True
+    return False
+
+
 def _structural_validation(atoms: List[Dict[str, Any]]) -> Dict[str, int]:
     """Cheap local validation — no LLM calls. Classifies each atom."""
     report = {'VALID': 0, 'FRAGMENT': 0, 'WEAK': 0}

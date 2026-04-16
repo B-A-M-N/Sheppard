@@ -39,6 +39,7 @@ async def _call_llm_with_schema_guard(
     retry_temp: float = 0.05,
     format: Optional[Dict[str, Any]] = None,
     max_retries: int = 3,
+    task_type=None,
 ) -> Optional[List[Dict[str, Any]]]:
     """
     Generic LLM call with schema guard, Pydantic validation, and retry loop.
@@ -55,11 +56,12 @@ async def _call_llm_with_schema_guard(
         response_content = ""
 
         try:
-            async for chunk in llm_client.chat(
-                messages=messages, stream=True,
-                temperature=temperature, max_tokens=max_tokens,
-                format=format
-            ):
+            stream_fn = (
+                llm_client.task_stream(task_type, messages=messages, format=format, temperature=temperature)
+                if task_type is not None
+                else llm_client.chat(messages=messages, stream=True, temperature=temperature, max_tokens=max_tokens, format=format)
+            )
+            async for chunk in stream_fn:
                 if hasattr(chunk, 'content') and chunk.content:
                     response_content += chunk.content
                 elif isinstance(chunk, dict) and 'content' in chunk:
@@ -294,6 +296,29 @@ def _normalize_critique_item(item: Any) -> Optional[Dict[str, Any]]:
     return result
 
 
+# Prompt leakage patterns — LLM returning instructions instead of content
+_PROMPT_LEAKAGE_PATTERNS = [
+    "rephrase as",
+    "complete sentence version",
+    "or null",
+    "output format",
+    "respond with only",
+    "you must",
+    "do not",
+    "never produce",
+    "schema",
+    "knowledge atom contract",
+    "extract one finding",
+    "granularity rules",
+]
+
+
+def _is_prompt_leakage(content: str) -> bool:
+    """Detect if content is prompt instructions leaking into output."""
+    content_lower = content.lower()
+    return any(pattern in content_lower for pattern in _PROMPT_LEAKAGE_PATTERNS)
+
+
 from src.utils.normalize_atom_schema import normalize_atom_schema
 
 
@@ -308,6 +333,10 @@ def _normalize_single_atom(item: Any) -> Optional[Dict[str, Any]]:
         if len(content) < 15:
             return None
         if content.startswith('http') and ' ' not in content[:100]:
+            return None
+        # Reject prompt leakage artifacts
+        if _is_prompt_leakage(content):
+            logger.debug(f"[schema_guard] Rejecting prompt leakage: {content[:80]!r}")
             return None
 
         atom_type = str(item.get('type', 'claim')).lower().strip()
@@ -345,6 +374,10 @@ def _normalize_single_atom_fallback(item: Any) -> Optional[Dict[str, Any]]:
     if len(content) < 20:
         return None
     if content.startswith('http') and ' ' not in content[:100]:
+        return None
+    # Reject prompt leakage artifacts
+    if _is_prompt_leakage(content):
+        logger.debug(f"[schema_guard_fallback] Rejecting prompt leakage: {content[:80]!r}")
         return None
 
     atom_type = str(item.get('type', 'claim')).lower().strip()

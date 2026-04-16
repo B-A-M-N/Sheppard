@@ -99,6 +99,7 @@ from src.utils.llm_schema_guard import (
     _normalize_single_atom,
     _normalize_single_atom_fallback,
 )
+from src.llm.model_router import TaskType as _TaskType
 from src.utils.llm_schemas import (
     ATOM_EXTRACTION_SCHEMA,
     CRITIQUE_SCHEMA,
@@ -136,7 +137,8 @@ async def llm_compress_to_claims(
         llm_client, prompt, expected_schema='claims',
         temperature=0.1, max_tokens=4096,
         error_prefix="Compress",
-        format=COMPRESSION_SCHEMA
+        format=COMPRESSION_SCHEMA,
+        task_type=_TaskType.EXTRACT_ATOMS,
     )
 
     if result is None:
@@ -189,7 +191,7 @@ You are a knowledge extraction engine. You are in extraction mode ONLY.
 You MUST return JSON with the key "atoms". If you return anything else, it is invalid.
 
 OUTPUT FORMAT — respond with ONLY this JSON structure:
-{{"atoms": [{{"type": "claim", "content": "complete factual statement, 20-300 characters."}}]}}
+{{"atoms": [{{"type": "claim", "content": "complete factual statement, 20-300 characters.", "concept": "the primary named concept, entity, or topic this atom is specifically about — e.g. 'transformer attention', 'T-rex locomotion', 'reinforcement learning'. One to four words. NOT the document topic itself."}}]}}
 
 KNOWLEDGE ATOM CONTRACT — every "content" value MUST:
 ✅ Be a COMPLETE sentence (subject + verb + object)
@@ -239,7 +241,8 @@ DOCUMENT:
         llm_client, prompt, expected_schema='atoms',
         temperature=0.1, max_tokens=8192,
         error_prefix="Pass 1",
-        format=ATOM_EXTRACTION_SCHEMA
+        format=ATOM_EXTRACTION_SCHEMA,
+        task_type=_TaskType.EXTRACT_ATOMS,
     )
 
 
@@ -285,7 +288,8 @@ FRAGMENTS:
         llm_client, prompt, expected_schema='atoms',
         temperature=0.2, max_tokens=4096,
         error_prefix="Pass 2",
-        format=ATOM_EXTRACTION_SCHEMA
+        format=ATOM_EXTRACTION_SCHEMA,
+        task_type=_TaskType.EXTRACT_ATOMS,
     )
     if rewritten is None:
         raise ExtractionError("Pass 2: LLM call failed during atomization")
@@ -339,7 +343,8 @@ ATOMS TO REVIEW:
         llm_client, prompt, expected_schema='critique',
         temperature=0.0, max_tokens=4096,
         error_prefix="Pass 3",
-        format=CRITIQUE_SCHEMA
+        format=CRITIQUE_SCHEMA,
+        task_type=_TaskType.CRITIQUE,
     )
 
     if critique_result is None:
@@ -457,12 +462,44 @@ async def extract_technical_atoms(
                 f"chunking into {len(chunks)} extraction chunks"
             )
 
+            # Summarization pre-pass for very long documents (>7000 tokens / ~4+ chunks).
+            # Generates a holistic document summary using the summarization lane so that
+            # per-chunk extraction has high-level context and the summarization model is
+            # actually used rather than sitting idle.
+            doc_summary_atoms: list = []
+            if token_count > 7000:
+                try:
+                    summary_prompt = (
+                        f"You are a technical summarizer. Produce a dense, factual summary of the "
+                        f"following document that preserves all named entities, numerical claims, "
+                        f"technical terms, and key findings. Focus on content relevant to: {topic}\n\n"
+                        f"DOCUMENT:\n{text[:10000]}\n\n"
+                        f"Summary (300-600 words, no preamble):"
+                    )
+                    doc_summary = await llm_client.complete(
+                        _TaskType.SUMMARIZATION, summary_prompt, max_tokens=1024
+                    )
+                    if doc_summary and len(doc_summary.strip()) > 150:
+                        summary_atoms = await _extract_raw_atoms(llm_client, doc_summary, topic, source_type)
+                        if summary_atoms:
+                            doc_summary_atoms = summary_atoms
+                            logger.info(
+                                f"[Distillery] Summarization pre-pass: {len(summary_atoms)} atoms "
+                                f"from {token_count}-token document summary"
+                            )
+                except Exception as e:
+                    logger.debug(f"[Distillery] Summarization pre-pass failed: {e}")
+
             all_raw_atoms = []
             for i, chunk in enumerate(chunks):
                 chunk_atoms = await _extract_raw_atoms(llm_client, chunk, topic, source_type)
                 if chunk_atoms:
                     all_raw_atoms.extend(chunk_atoms)
                 logger.info(f"[Distillery] Chunk {i+1}/{len(chunks)}: {len(chunk_atoms or [])} atoms")
+
+            # Merge doc-level summary atoms (may capture cross-chunk themes missed per-chunk)
+            if doc_summary_atoms:
+                all_raw_atoms.extend(doc_summary_atoms)
 
             if not all_raw_atoms:
                 logger.info(f"[Distillery] Zero atoms from all {len(chunks)} chunks")
@@ -573,34 +610,36 @@ async def extract_technical_atoms(
                     final_atoms.append(normalized)
             logger.info(f"[Distillery] Fallback 1: recovered {len(final_atoms)} atoms")
 
-        # ─── FALLBACK 2: COMPRESSION-FIRST (guaranteed yield) ───
+        # ─── FALLBACK 2: COMPRESSION-FIRST ───
+        # Quality-gated: only atoms that clear LOW_QUALITY_THRESHOLD are stored.
         if not final_atoms and len(text.strip()) >= 50:
+            from src.utils.atom_scorer import score_atom, LOW_QUALITY_THRESHOLD
             logger.info(f"[Distillery] Pass 4: Zero yield from extraction — activating compression-first distillation")
             try:
                 compressed = await llm_compress_to_claims(text, topic, llm_client)
                 if compressed:
+                    passed = 0
+                    dropped = 0
                     for atom in compressed:
                         normalized = _normalize_single_atom(atom)
-                        if normalized:
-                            normalized["compressed"] = True
-                            final_atoms.append(normalized)
-                    logger.info(f"[Distillery] Compression-first: {len(final_atoms)} claims derived from raw text")
+                        if not normalized:
+                            continue
+                        scoring = score_atom(normalized, source_type)
+                        if scoring["score"] < LOW_QUALITY_THRESHOLD:
+                            dropped += 1
+                            continue
+                        normalized["compressed"] = True
+                        normalized["scoring"] = scoring
+                        final_atoms.append(normalized)
+                        passed += 1
+                    logger.info(
+                        f"[Distillery] Compression-first: {passed} claims passed quality gate"
+                        f" ({dropped} dropped below {LOW_QUALITY_THRESHOLD:.2f})"
+                    )
             except ExtractionError:
                 logger.warning(f"[Distillery] Compression-first LLM call failed — skipping fallback")
             except Exception as e:
                 logger.warning(f"[Distillery] Compression-first failed: {e}")
-                sentences = re.split(r'(?<=[.!?])\s+', text[:500])
-                best = max(sentences, key=len) if sentences else text[:200]
-                if best.strip() and len(best.strip()) >= 15:
-                    best = best.strip()
-                    if not best.endswith(('.', '!', '?')):
-                        best = best.rsplit('.', 1)[0] + '.' if '.' in best else best + '.'
-                    unit = _make_unit(
-                        text=best, confidence=0.2,
-                        atom_type='claim', tags=['compressed', 'fallback', 'emergency'],
-                    )
-                    unit["confidence"] = compute_confidence(unit, source_type)
-                    final_atoms.append(unit)
 
         if final_atoms:
             logger.info(f"[Distillery] Final: {len(final_atoms)} atoms stored for '{topic}'")

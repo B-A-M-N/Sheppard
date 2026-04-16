@@ -5,6 +5,9 @@ Maps LLM/legacy field names to V3 canonical names.
 This is the ONLY place that handles field name transitions.
 All downstream code must use canonical names only.
 """
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Categorical importance/novelty → numeric mapping
 _IMPORTANCE_MAP = {"low": 0.2, "medium": 0.5, "high": 0.85}
@@ -38,16 +41,21 @@ def normalize_atom_schema(atom: dict) -> dict:
         result.pop(legacy_key, None)
 
     # Convert categorical importance/novelty to numeric
+    # NOTE: If LLM doesn't provide these, they remain None — downstream MUST compute them
     imp = result.get("importance")
     if isinstance(imp, str) and imp.lower() in _IMPORTANCE_MAP:
         result["importance"] = _IMPORTANCE_MAP[imp.lower()]
     elif imp is None or not isinstance(imp, (int, float)):
-        result["importance"] = 0.5  # default
+        if imp is not None:
+            logger.debug(f"[normalize] Invalid importance value: {imp!r} → None (downstream must compute)")
+        result["importance"] = None
 
     nov = result.get("novelty")
     if isinstance(nov, str) and nov.lower() in _NOVELTY_MAP:
         result["novelty"] = _NOVELTY_MAP[nov.lower()]
     elif nov is None or not isinstance(nov, (int, float)):
-        result["novelty"] = 0.5  # default
+        if nov is not None:
+            logger.debug(f"[normalize] Invalid novelty value: {nov!r} → None (downstream must compute)")
+        result["novelty"] = None
 
     return result

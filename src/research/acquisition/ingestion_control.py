@@ -57,18 +57,22 @@ LOCK_TTL = 60  # 60 seconds
 # Priority Queue Operations
 # ──────────────────────────────────────────────────────────────
 
-async def push_doc(redis, doc_id: str, priority: float, tier: str = "tier0"):
+async def push_doc(redis, doc_id: str, priority: float, tier: str = "tier0", metadata: Dict[str, Any] = None):
     """Push a document to a tier queue with priority score."""
     queue_key = f"ingest:queue:{tier}"
     await redis.zadd(queue_key, {doc_id: priority})
 
-    # Store metadata
-    await redis.hset(f"{DOC_META_PREFIX}{doc_id}", mapping={
+    # Store metadata (including content if provided)
+    fields = {
         "priority": str(priority),
         "status": "pending",
         "tier": tier,
         "pushed_at": str(time.time()),
-    })
+    }
+    if metadata:
+        for k, v in metadata.items():
+            fields[k] = str(v) if not isinstance(v, str) else v
+    await redis.hset(f"{DOC_META_PREFIX}{doc_id}", mapping=fields)
 
 
 async def pop_doc(redis, tier: str = "tier0") -> Optional[tuple]:
@@ -128,6 +132,7 @@ async def mark_seen(redis, content_hash: str):
     """Add content hash to dedup cache with TTL."""
     await redis.sadd(DEDUP_HASHES, content_hash)
     await redis.expire(DEDUP_HASHES, DEDUP_TTL)
+    logger.debug(f"[Dedup] Marked seen: hash={content_hash[:16]}...")
 
 
 def compute_content_hash(content: str) -> str:
@@ -187,6 +192,9 @@ class NoveltyGate:
     Fast novelty check — decides if content is worth deeper processing.
 
     Uses content hash dedup + optional Chroma embedding similarity.
+
+    IMPORTANT: This is a READ-ONLY evaluator. It does NOT mutate dedup state.
+    Hash insertion (mark_seen) must happen AFTER acceptance, NOT before this check.
     """
 
     def __init__(self, redis_client, chroma_client=None, similarity_threshold: float = 0.9):
@@ -202,18 +210,32 @@ class NoveltyGate:
             (is_novel, novelty_score)
         """
         content = doc.get("content", "")
+
+        logger.info(f"[NoveltyGate] Content length: {len(content)}")
+
         if not content:
+            logger.warning("[NoveltyGate] FAIL: empty content")
             return False, 0.0
 
-        # 1. Hash-based dedup (fastest)
+        # 1. Hash-based dedup (fastest) — READ ONLY, no state mutation
         content_hash = compute_content_hash(content)
-        if await is_duplicate(self.redis, content_hash):
+
+        is_dup = await is_duplicate(self.redis, content_hash)
+        logger.info(f"[NoveltyGate] Duplicate: {is_dup}, hash={content_hash[:16]}...")
+
+        if is_dup:
             return False, 0.0
 
         # 2. Embedding-based novelty (if Chroma available)
         novelty_score = 0.5  # Default medium novelty
         if self.chroma:
-            novelty_score = await self._chroma_novelty(content)
+            try:
+                novelty_score = await self._chroma_novelty(content)
+            except Exception as e:
+                logger.warning(f"[NoveltyGate] Chroma error: {e}")
+                novelty_score = 0.5
+
+        logger.info(f"[NoveltyGate] Score: {novelty_score:.2f}, threshold: {NOVELTY_THRESHOLD}")
 
         return novelty_score >= NOVELTY_THRESHOLD, novelty_score
 
@@ -324,15 +346,19 @@ def _extract_concepts(text: str) -> List[str]:
 
 async def tier0_worker(
     redis,
-    crawl_source: asyncio.Queue,
-    novelty_gate: NoveltyGate,
+    crawl_source: Optional[asyncio.Queue] = None,
+    novelty_gate: Optional[NoveltyGate] = None,
     graph_gap_scorer: Optional[GraphGapScorer] = None,
     novelty_threshold: float = NOVELTY_THRESHOLD,
 ):
     """
     Tier 0 worker — fast surface scan.
 
-    For each crawled document:
+    Reads from TWO sources:
+      1. crawl_source (asyncio.Queue) — live crawler feed
+      2. Redis ingest:queue:tier0 — distillation pipeline push
+
+    For each document:
       1. Compute content hash
       2. Check dedup cache
       3. Run novelty gate
@@ -343,47 +369,74 @@ async def tier0_worker(
     logger.info(f"[Tier0-{worker_id}] Starting")
 
     while True:
+        doc = None
         try:
-            doc = await crawl_source.get()
+            # 1. Try Redis queue first (distillation pipeline pushes here)
+            result = await pop_doc(redis, "tier0")
+            if result:
+                doc_id, priority = result
+                # Fetch doc metadata from Redis hash (includes content if pushed with metadata)
+                meta = await redis.hgetall(f"{DOC_META_PREFIX}{doc_id}")
+                if meta:
+                    doc = {
+                        "id": doc_id,
+                        "url": meta.get("url", ""),
+                        "content": meta.get("content", ""),  # Content stored in hash if pushed with metadata
+                        "source": meta.get("source", ""),
+                        "mission_id": meta.get("mission_id", ""),
+                    }
+
+            # 2. Fallback: try crawl source queue
+            if doc is None and crawl_source and not crawl_source.empty():
+                doc = await crawl_source.get_nowait()
+
         except asyncio.CancelledError:
             break
+
+        if doc is None:
+            # Nothing in either queue — sleep briefly
+            await asyncio.sleep(0.5)
+            continue
 
         try:
             doc_id = doc.get("id", doc.get("url", f"doc_{int(time.time() * 1000)}"))
             content = doc.get("content", "")
 
+            logger.info(f"[Tier0-{worker_id}] DOC: {doc_id}")
+            logger.info(f"[Tier0-{worker_id}] Content length: {len(content)}")
+            if content:
+                logger.info(f"[Tier0-{worker_id}] Content preview: {content[:100]!r}")
+
+            # If no content, skip (distillation pipeline pushes doc_id only, content is in DB)
             if not content:
                 await update_doc_status(redis, doc_id, "skipped", reason="empty_content")
+                logger.warning(f"[Tier0-{worker_id}] Skipped {doc_id[:20]}: empty content")
                 continue
 
-            # 1. Dedup check
-            content_hash = compute_content_hash(content)
-            if await is_duplicate(redis, content_hash):
-                await update_doc_status(redis, doc_id, "skipped", reason="duplicate")
-                continue
-
-            # 2. Mark as seen
-            await mark_seen(redis, content_hash)
-
-            # 3. Novelty gate
+            # 1. Novelty gate (includes dedup check internally — DO NOT check dedup before this)
             is_novel, novelty_score = await novelty_gate.check(doc)
+            logger.info(f"[Tier0-{worker_id}] Novelty: is_novel={is_novel}, score={novelty_score:.2f}")
             if not is_novel:
                 await update_doc_status(redis, doc_id, "skipped", reason="low_novelty", novelty=novelty_score)
                 continue
 
-            # 4. Graph gap scoring (optional, requires CMK)
+            # 2. Mark as seen (AFTER acceptance — this is the state mutation step)
+            content_hash = compute_content_hash(content)
+            await mark_seen(redis, content_hash)
+
+            # 3. Graph gap scoring (optional, requires CMK)
             graph_gap = 0.0
             if graph_gap_scorer:
                 graph_gap = await graph_gap_scorer.score(doc)
 
-            # 5. Compute priority
+            # 4. Compute priority
             priority = compute_priority(doc, novelty_score, graph_gap, novelty_threshold)
 
             if priority < MIN_PRIORITY:
                 await update_doc_status(redis, doc_id, "skipped", reason="low_priority", priority=priority)
                 continue
 
-            # 6. Store metadata and push to Tier 1
+            # 5. Store metadata and push to Tier 1
             await redis.hset(f"{DOC_META_PREFIX}{doc_id}", mapping={
                 "url": doc.get("url", ""),
                 "source": doc.get("source", ""),
@@ -654,15 +707,15 @@ class IngestionControl:
         """
         workers = []
 
-        # Tier 0 workers (fast surface scan)
+        # Tier 0 workers (fast surface scan) — read from Redis primarily
         for _ in range(TIER0_CONCURRENCY):
             w = asyncio.create_task(
                 tier0_worker(
                     self.redis,
-                    crawl_source,
-                    self.novelty_gate,
-                    self.graph_gap_scorer,
-                    self._novelty_threshold[0],
+                    crawl_source=crawl_source,  # Fallback for live crawler feed
+                    novelty_gate=self.novelty_gate,
+                    graph_gap_scorer=self.graph_gap_scorer,
+                    novelty_threshold=self._novelty_threshold[0],
                 )
             )
             workers.append(w)
