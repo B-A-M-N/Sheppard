@@ -141,6 +141,18 @@ async def test_analysis_application_e2e(adapter_real):
             {"global_id": "[A2]", "metadata": {"atom_id": atom_ids[1]}},
         ],
         contradictions=[{"description": "Queue contention vs packet loss"}],
+        section_guidance=[{"title": "Latency", "mode": "adjudicative"}],
+        evidence_graph=type(
+            "Graph",
+            (),
+            {
+                "nodes": {
+                    "n1": type("Node", (), {"node_type": "evidence"})(),
+                    "n2": type("Node", (), {"node_type": "contradiction"})(),
+                },
+                "edges": {"e1": object()},
+            },
+        )(),
     )
 
     await service._persist_application_run(
@@ -158,6 +170,8 @@ async def test_analysis_application_e2e(adapter_real):
     assert payload["problem_type"] == "diagnostic"
     assert payload["atom_count"] == 3
     assert payload["critic_overlooked_atoms"] == ["[A2]"]
+    assert payload["graph_summary"]["guidance_count"] == 1
+    assert payload["graph_summary"]["contradiction_nodes"] == 1
 
     outputs = await adapter.pg.fetch_many(
         "application.application_outputs",
@@ -168,6 +182,7 @@ async def test_analysis_application_e2e(adapter_real):
         "analysis_report",
         "analysis_risk_register",
         "critic_challenge",
+        "analysis_graph_summary",
         "analysis_open_questions",
     ]
 
@@ -178,6 +193,7 @@ async def test_analysis_application_e2e(adapter_real):
     lineage = parse_json(lineage_row["lineage_json"])
     assert lineage["frame"]["goal"] == "Reduce latency spikes"
     assert lineage["critic"]["counter_recommendation"] == "Measure packet drops before shipping the queue change."
+    assert lineage["graph_summary"]["guidance_count"] == 1
 
     evidence_rows = await adapter.pg.fetch_many(
         "application.application_evidence",
@@ -201,6 +217,7 @@ async def test_analysis_application_e2e(adapter_real):
     assert status["successful_application_count"] == 1
     assert status["authority_score"] > 0
     assert status["has_critic_review"] is True
+    assert status["trust_state"] == "contested"
     assert status["last_application_query_id"] == application_query_id
     assert advisory["application_feedback"]["last_application_query_id"] == application_query_id
     assert advisory["application_feedback"]["last_recommendation"] == "Reduce contention at the shared queue."

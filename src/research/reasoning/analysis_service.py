@@ -31,13 +31,64 @@ from src.research.reasoning.analyst import AnalystOutput, AnalystSynthAdapter
 from src.research.reasoning.adversarial_critic import CriticOutput, AdversarialCritic
 from src.research.reasoning.retriever import RetrievalQuery
 from src.research.reasoning.v3_retriever import V3Retriever
+from src.research.reasoning.trust_state import derive_trust_state
 
 logger = logging.getLogger(__name__)
 
 # Atoms to retrieve per query (multiple queries are merged + deduplicated)
 ATOMS_PER_QUERY = 12
-# Maximum total atoms to feed into the Analyst
-MAX_COMBINED_ATOMS = 40
+# Maximum evidence token budget to feed into the Analyst
+MAX_EVIDENCE_TOKENS = 12000
+
+
+def _iter_text_lines(value: Any) -> List[str]:
+    if isinstance(value, str):
+        return [line.strip() for line in value.split("\n") if line.strip()]
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if value is None:
+        return []
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _build_report_trust_inputs(
+    analyst: "AnalystOutput",
+    critic: "CriticOutput",
+    packet: Optional[Any] = None,
+) -> tuple[dict, dict, dict]:
+    """Canonical mapping from analyst+critic+packet → derive_trust_state inputs.
+
+    Single source of truth for how a completed analysis report translates into
+    the three trust-state input dicts.  Both the ephemeral AnalysisReport
+    property and the authority-record persistence path call this function so
+    the maturity classification logic is never duplicated.
+
+    Returns:
+        (status, advisory, reuse) suitable for derive_trust_state().
+    """
+    has_objection = bool(critic.strongest_objection)
+    has_overlooked = bool(getattr(critic, "overlooked_atoms", []))
+    has_contradictions = bool(getattr(packet, "contradictions", None) if packet else False)
+
+    status: dict = {
+        "freshness": "current",
+        "maturity": (
+            "contested"
+            if (has_objection or has_overlooked or has_contradictions)
+            else "synthesized"
+        ),
+        "successful_application_count": 1 if analyst.confidence >= 0.7 else 0,
+    }
+    advisory: dict = {
+        "critic_objections": [critic.strongest_objection] if has_objection else [],
+    }
+    reuse: dict = {
+        "ready_for_application": bool(
+            analyst.recommendation and analyst.confidence >= 0.65
+        ),
+    }
+    return status, advisory, reuse
 
 
 @dataclass
@@ -46,8 +97,14 @@ class AnalysisReport:
     analyst: AnalystOutput
     critic: CriticOutput
     atom_count: int
+    refined_analyst: Optional[AnalystOutput] = None
     mission_filter: Optional[str] = None
     application_query_id: Optional[str] = None
+
+    @property
+    def trust_state(self) -> str:
+        status, advisory, reuse = _build_report_trust_inputs(self.refined_analyst or self.analyst, self.critic)
+        return derive_trust_state(status, advisory, reuse)
 
     def formatted(self) -> str:
         """Human-readable formatted output for display in TUI."""
@@ -57,6 +114,7 @@ class AnalysisReport:
         lines.append("━" * 60)
         lines.append("  ANALYSIS REPORT")
         lines.append("━" * 60)
+        lines.append(f"  TRUST STATE: {self.trust_state.upper()}")
 
         # ── Problem understood ───────────────────────────────────────────────
         lines.append("")
@@ -73,23 +131,23 @@ class AnalysisReport:
 
         # ── Diagnosis ────────────────────────────────────────────────────────
         lines.append("")
-        conf_pct = f"{self.analyst.confidence:.0%}"
+        final_analyst = self.refined_analyst or self.analyst
+        conf_pct = f"{final_analyst.confidence:.0%}"
         lines.append(f"DIAGNOSIS  [{conf_pct} confidence]")
-        lines.append(f"  {self.analyst.diagnosis}")
+        lines.append(f"  {final_analyst.diagnosis}")
 
         # ── Reasoning ────────────────────────────────────────────────────────
-        if self.analyst.reasoning:
+        if final_analyst.reasoning:
             lines.append("")
             lines.append("REASONING")
-            for para in self.analyst.reasoning.split("\n"):
-                if para.strip():
-                    lines.append(f"  {para.strip()}")
+            for para in _iter_text_lines(final_analyst.reasoning):
+                lines.append(f"  {para}")
 
         # ── Alternatives ─────────────────────────────────────────────────────
-        if self.analyst.alternatives:
+        if final_analyst.alternatives:
             lines.append("")
             lines.append("ALTERNATIVES CONSIDERED")
-            for alt in self.analyst.alternatives:
+            for alt in final_analyst.alternatives:
                 likelihood = alt.get("likelihood", "?")
                 explanation = alt.get("explanation", "")
                 why_less = alt.get("why_less_likely", "")
@@ -100,23 +158,29 @@ class AnalysisReport:
         # ── Recommendation ───────────────────────────────────────────────────
         lines.append("")
         lines.append("RECOMMENDATION")
-        lines.append(f"  {self.analyst.recommendation}")
-        if self.analyst.recommendation_rationale:
-            lines.append(f"  Rationale: {self.analyst.recommendation_rationale}")
+        lines.append(f"  {final_analyst.recommendation}")
+        if final_analyst.recommendation_rationale:
+            lines.append(f"  Rationale: {final_analyst.recommendation_rationale}")
 
         # ── Risks ────────────────────────────────────────────────────────────
-        if self.analyst.risks:
+        if final_analyst.risks:
             lines.append("")
             lines.append("FAILURE MODES  (how this breaks)")
-            for risk in self.analyst.risks:
+            for risk in final_analyst.risks:
                 lines.append(f"  • {risk}")
 
         # ── Open questions ───────────────────────────────────────────────────
-        if self.analyst.open_questions:
+        if final_analyst.open_questions:
             lines.append("")
             lines.append("OPEN QUESTIONS  (what would increase confidence)")
-            for q in self.analyst.open_questions:
+            for q in final_analyst.open_questions:
                 lines.append(f"  ? {q}")
+
+        if final_analyst.tensions:
+            lines.append("")
+            lines.append("TENSIONS")
+            for tension in final_analyst.tensions:
+                lines.append(f"  • {tension}")
 
         # ── Adversarial challenge ────────────────────────────────────────────
         lines.append("")
@@ -143,6 +207,12 @@ class AnalysisReport:
         if self.critic.confidence_assessment:
             lines.append("")
             lines.append(f"  Confidence check: {self.critic.confidence_assessment}")
+
+        if final_analyst.revisions_applied:
+            lines.append("")
+            lines.append("REFINEMENTS APPLIED")
+            for revision in final_analyst.revisions_applied:
+                lines.append(f"  • {revision}")
 
         lines.append("")
         lines.append("━" * 60)
@@ -214,17 +284,29 @@ class AnalysisService:
         )
         yield f"Evidence loaded: {len(combined_packet.atoms)} atoms\n"
 
-        yield "Analyst reasoning...\n"
+        yield "Evidence map + analyst reasoning...\n"
         analyst_output = await self.analyst.analyze(combined_packet, frame)
-        yield f"Diagnosis confidence: {analyst_output.confidence:.0%}\n"
+        yield f"Draft confidence: {analyst_output.confidence:.0%}\n"
 
         yield "Adversarial critic reviewing...\n"
         critic_output = await self.critic.critique(analyst_output, combined_packet)
+        yield "Refining analysis with critic feedback...\n"
+        refined_output = await self.analyst.refine(combined_packet, frame, analyst_output, critic_output)
+        preview_report = AnalysisReport(
+            frame=frame,
+            analyst=analyst_output,
+            critic=critic_output,
+            refined_analyst=refined_output,
+            atom_count=len(combined_packet.atoms),
+            mission_filter=mission_filter,
+        )
+        yield f"Trust state: {preview_report.trust_state}\n"
 
         report = AnalysisReport(
             frame=frame,
             analyst=analyst_output,
             critic=critic_output,
+            refined_analyst=refined_output,
             atom_count=len(combined_packet.atoms),
             mission_filter=mission_filter,
         )
@@ -262,6 +344,28 @@ class AnalysisService:
             mission_filter=mission_filter,
             topic_filter=topic_filter,
         )
+        weak_dimensions = self._detect_weak_dimensions(frame, combined_packet)
+        if weak_dimensions:
+            logger.info("[AnalysisService] Coverage gaps detected in dimensions: %s", weak_dimensions)
+            follow_up_queries = self.framer.follow_up_for_dimensions(frame, weak_dimensions)
+            if follow_up_queries:
+                combined_packet = await self._multi_query_retrieve(
+                    frame=ProblemFrame(
+                        raw_statement=frame.raw_statement,
+                        problem=frame.problem,
+                        symptoms=frame.symptoms,
+                        goal=frame.goal,
+                        constraints=frame.constraints,
+                        dimensions=frame.dimensions,
+                        unknowns=frame.unknowns,
+                        domain_hints=frame.domain_hints,
+                        retrieval_queries=follow_up_queries,
+                        problem_type=frame.problem_type,
+                        retrieval_mode=frame.retrieval_mode,
+                    ),
+                    mission_filter=mission_filter,
+                    topic_filter=topic_filter,
+                )
         logger.info("[AnalysisService] Combined evidence: %d atoms", len(combined_packet.atoms))
 
         # 3. Analyst — reason from evidence to a position
@@ -275,15 +379,91 @@ class AnalysisService:
         # 4. Adversarial Critic — challenge the Analyst
         critic_output = await self.critic.critique(analyst_output, combined_packet)
         logger.info("[AnalysisService] Critic complete")
+        refined_output = await self.analyst.refine(combined_packet, frame, analyst_output, critic_output)
+        logger.info("[AnalysisService] Refinement complete")
 
         report = AnalysisReport(
             frame=frame,
             analyst=analyst_output,
             critic=critic_output,
+            refined_analyst=refined_output,
             atom_count=len(combined_packet.atoms),
             mission_filter=mission_filter,
         )
         return report, combined_packet
+
+    async def run_from_working_state(
+        self,
+        user_text: str,
+        working_state: Any, # Avoid circular import of WorkingState
+    ) -> dict:
+        """
+        Escalation path: Run a full analysis grounded in the current working state.
+        Returns a simplified dictionary for chat integration.
+        """
+        logger.info("[AnalysisService] Running escalated analysis from working state")
+        
+        # 1. Frame the problem (optionally use hints from working state)
+        frame = await self.framer.frame(user_text)
+        
+        # Update frame with hints from working state if available
+        candidate_frames = list(
+            dict.fromkeys(
+                (getattr(working_state, "candidate_frames", None) or [])
+                + (
+                    getattr(getattr(working_state, "intent_profile", None), "candidate_frames", None)
+                    or []
+                )
+            )
+        )
+        if candidate_frames:
+            frame.domain_hints = list(dict.fromkeys(frame.domain_hints + candidate_frames))
+            
+        # 2. Retrieval
+        mission_filter = getattr(working_state, "mission_id", None)
+        topic_filter = getattr(working_state, "topic_id", None)
+        
+        combined_packet = await self._multi_query_retrieve(
+            frame=frame,
+            mission_filter=mission_filter,
+            topic_filter=topic_filter,
+        )
+        
+        # 3. Analyst
+        analyst_output = await self.analyst.analyze(combined_packet, frame)
+        
+        # 4. Critic
+        critic_output = await self.critic.critique(analyst_output, combined_packet)
+        refined_output = await self.analyst.refine(combined_packet, frame, analyst_output, critic_output)
+        
+        # 5. Persist the run
+        report = AnalysisReport(
+            frame=frame,
+            analyst=analyst_output,
+            critic=critic_output,
+            refined_analyst=refined_output,
+            atom_count=len(combined_packet.atoms),
+            mission_filter=mission_filter,
+        )
+        
+        await self._persist_application_run(
+            problem_statement=user_text,
+            mission_filter=mission_filter,
+            topic_filter=topic_filter,
+            report=report,
+            packet=combined_packet,
+        )
+        
+        # Return summary for chat
+        return {
+            "diagnosis": refined_output.diagnosis,
+            "recommendation": refined_output.recommendation,
+            "confidence": refined_output.confidence,
+            "objection": critic_output.strongest_objection,
+            "counter_recommendation": critic_output.counter_recommendation,
+            "atom_count": len(combined_packet.atoms),
+            "trust_state": report.trust_state
+        }
 
     async def _persist_application_run(
         self,
@@ -296,6 +476,7 @@ class AnalysisService:
         adapter = getattr(self.assembler, "adapter", None) or getattr(self.retriever, "adapter", None)
         if not adapter:
             return
+        final_analyst = getattr(report, "refined_analyst", None) or report.analyst
 
         application_query_id = f"aq_{uuid.uuid4().hex[:12]}"
         report.application_query_id = application_query_id
@@ -311,8 +492,9 @@ class AnalysisService:
             "topic_filter": topic_filter,
             "atom_count": len(packet.atoms),
             "contradiction_count": len(packet.contradictions),
-            "key_atoms": report.analyst.key_atoms,
+            "key_atoms": final_analyst.key_atoms,
             "critic_overlooked_atoms": report.critic.overlooked_atoms,
+            "graph_summary": self._graph_summary(packet),
         }
 
         try:
@@ -328,28 +510,28 @@ class AnalysisService:
                 "application_query_id": application_query_id,
                 "output_type": "analysis_report",
                 "inline_text": report.formatted(),
-                "confidence": report.analyst.confidence,
+                "confidence": final_analyst.confidence,
                 "metadata_json": {
-                    "diagnosis": report.analyst.diagnosis,
-                    "recommendation": report.analyst.recommendation,
+                    "diagnosis": final_analyst.diagnosis,
+                    "recommendation": final_analyst.recommendation,
                     "critic_objection": report.critic.strongest_objection,
                     "counter_recommendation": report.critic.counter_recommendation,
                 },
             })
-            if report.analyst.risks:
+            if final_analyst.risks:
                 await adapter.store_application_output({
                     "application_query_id": application_query_id,
                     "output_type": "analysis_risk_register",
-                    "inline_text": "\n".join(report.analyst.risks),
-                    "confidence": report.analyst.confidence,
-                    "metadata_json": {"risks": report.analyst.risks},
+                    "inline_text": "\n".join(final_analyst.risks),
+                    "confidence": final_analyst.confidence,
+                    "metadata_json": {"risks": final_analyst.risks},
                 })
             if report.critic.strongest_objection:
                 await adapter.store_application_output({
                     "application_query_id": application_query_id,
                     "output_type": "critic_challenge",
                     "inline_text": report.critic.strongest_objection,
-                    "confidence": report.analyst.confidence,
+                    "confidence": final_analyst.confidence,
                     "metadata_json": {
                         "strongest_objection": report.critic.strongest_objection,
                         "overlooked_reasoning": report.critic.overlooked_reasoning,
@@ -357,13 +539,22 @@ class AnalysisService:
                         "confidence_assessment": report.critic.confidence_assessment,
                     },
                 })
-            if report.analyst.open_questions:
+            graph_summary = self._graph_summary(packet)
+            if graph_summary["node_count"] > 0:
+                await adapter.store_application_output({
+                    "application_query_id": application_query_id,
+                    "output_type": "analysis_graph_summary",
+                    "inline_text": self._format_graph_summary(graph_summary),
+                    "confidence": final_analyst.confidence,
+                    "metadata_json": graph_summary,
+                })
+            if final_analyst.open_questions:
                 await adapter.store_application_output({
                     "application_query_id": application_query_id,
                     "output_type": "analysis_open_questions",
-                    "inline_text": "\n".join(report.analyst.open_questions),
-                    "confidence": report.analyst.confidence,
-                    "metadata_json": {"open_questions": report.analyst.open_questions},
+                    "inline_text": "\n".join(final_analyst.open_questions),
+                    "confidence": final_analyst.confidence,
+                    "metadata_json": {"open_questions": final_analyst.open_questions},
                 })
             await adapter.store_application_lineage(
                 application_query_id,
@@ -377,16 +568,19 @@ class AnalysisService:
                         "retrieval_queries": report.frame.retrieval_queries,
                     },
                     "analyst": {
-                        "diagnosis": report.analyst.diagnosis,
-                        "confidence": report.analyst.confidence,
-                        "recommendation": report.analyst.recommendation,
-                        "key_atoms": report.analyst.key_atoms,
+                        "diagnosis": final_analyst.diagnosis,
+                        "confidence": final_analyst.confidence,
+                        "recommendation": final_analyst.recommendation,
+                        "key_atoms": final_analyst.key_atoms,
+                        "revisions_applied": final_analyst.revisions_applied,
                     },
                     "critic": {
                         "strongest_objection": report.critic.strongest_objection,
                         "counter_recommendation": report.critic.counter_recommendation,
                         "overlooked_atoms": report.critic.overlooked_atoms,
                     },
+                    "graph_summary": graph_summary,
+                    "section_guidance": packet.section_guidance,
                 },
             )
 
@@ -427,6 +621,7 @@ class AnalysisService:
         packet: EvidencePacket,
         evidence_rows: list[dict[str, Any]],
     ) -> None:
+        final_analyst = getattr(report, "refined_analyst", None) or report.analyst
         authority_ids = sorted({
             row["authority_record_id"]
             for row in evidence_rows
@@ -443,7 +638,7 @@ class AnalysisService:
         }
         key_atoms = [
             packet_atoms_by_citation[citation]
-            for citation in (self._normalize_citation(value) for value in report.analyst.key_atoms)
+            for citation in (self._normalize_citation(value) for value in final_analyst.key_atoms)
             if citation in packet_atoms_by_citation
         ]
         overlooked_atoms = [
@@ -463,40 +658,43 @@ class AnalysisService:
 
             advisory["application_feedback"] = {
                 "last_application_query_id": application_query_id,
-                "last_diagnosis": report.analyst.diagnosis,
-                "last_recommendation": report.analyst.recommendation,
-                "recent_risks": report.analyst.risks,
+                "last_diagnosis": final_analyst.diagnosis,
+                "last_recommendation": final_analyst.recommendation,
+                "recent_risks": final_analyst.risks,
                 "critic_objection": report.critic.strongest_objection,
-                "open_questions": report.analyst.open_questions,
+                "open_questions": final_analyst.open_questions,
                 "updated_at": timestamp,
+                "graph_summary": self._graph_summary(packet),
             }
             if key_atoms:
                 advisory["decision_rules"] = self._merge_unique_text(
                     advisory.get("decision_rules", []),
-                    [report.analyst.recommendation_rationale or report.analyst.recommendation],
+                    [final_analyst.recommendation_rationale or final_analyst.recommendation],
                 )
-            if report.analyst.risks:
+            if final_analyst.risks:
                 advisory["risk_register"] = self._merge_unique_text(
                     advisory.get("risk_register", []),
-                    report.analyst.risks,
+                    final_analyst.risks,
                 )
             if report.critic.strongest_objection:
                 advisory["critic_objections"] = self._merge_unique_text(
                     advisory.get("critic_objections", []),
                     [report.critic.strongest_objection],
                 )
+            if packet.section_guidance:
+                advisory["section_guidance"] = packet.section_guidance[:4]
 
             reuse_history = reuse.get("application_history", [])
             reuse_history.append({
                 "application_query_id": application_query_id,
                 "problem_type": report.frame.problem_type,
-                "recommendation": report.analyst.recommendation,
-                "confidence": report.analyst.confidence,
+                "recommendation": final_analyst.recommendation,
+                "confidence": final_analyst.confidence,
                 "timestamp": timestamp,
             })
             reuse["application_history"] = reuse_history[-10:]
             reuse["last_application_query_id"] = application_query_id
-            reuse["last_recommendation"] = report.analyst.recommendation
+            reuse["last_recommendation"] = final_analyst.recommendation
             reuse["key_atom_ids"] = self._merge_unique_text(
                 reuse.get("key_atom_ids", []),
                 [atom.get("metadata", {}).get("atom_id") for atom in key_atoms],
@@ -512,13 +710,19 @@ class AnalysisService:
             status["application_count"] = int(status.get("application_count", 0) or 0) + 1
             status["last_applied_at"] = timestamp
             status["last_application_query_id"] = application_query_id
-            status["latest_analysis_confidence"] = report.analyst.confidence
+            status["latest_analysis_confidence"] = final_analyst.confidence
             status["has_critic_review"] = True
             status.setdefault("freshness", "current")
             prior_authority = float(status.get("authority_score", 0.0) or 0.0)
-            confidence_gain = max(0.0, min(0.12, report.analyst.confidence * 0.08))
+            confidence_gain = max(0.0, min(0.12, final_analyst.confidence * 0.08))
             status["authority_score"] = round(min(1.0, prior_authority + confidence_gain), 4)
             status["successful_application_count"] = int(status.get("successful_application_count", 0) or 0) + 1
+            # Use canonical builder to determine maturity from report signals —
+            # the same logic as AnalysisReport.trust_state (via _build_report_trust_inputs).
+            report_status, _, _ = _build_report_trust_inputs(final_analyst, report.critic, packet)
+            if report_status["maturity"] == "contested":
+                status["maturity"] = "contested"
+            status["trust_state"] = derive_trust_state(status, advisory, reuse)
 
             update_row = {
                 "authority_record_id": authority_record_id,
@@ -576,6 +780,31 @@ class AnalysisService:
             merged.append(value)
         return merged
 
+    @staticmethod
+    def _graph_summary(packet: EvidencePacket) -> dict[str, Any]:
+        graph = getattr(packet, "evidence_graph", None)
+        if not graph:
+            return {"node_count": 0, "edge_count": 0, "contradiction_nodes": 0, "guidance_count": 0}
+        contradiction_nodes = sum(
+            1 for node in graph.nodes.values()
+            if getattr(node, "node_type", None) == "contradiction"
+        )
+        return {
+            "node_count": len(getattr(graph, "nodes", {})),
+            "edge_count": len(getattr(graph, "edges", {})),
+            "contradiction_nodes": contradiction_nodes,
+            "guidance_count": len(getattr(packet, "section_guidance", []) or []),
+        }
+
+    @staticmethod
+    def _format_graph_summary(summary: dict[str, Any]) -> str:
+        return (
+            f"Graph nodes: {summary['node_count']}, "
+            f"edges: {summary['edge_count']}, "
+            f"contradictions: {summary['contradiction_nodes']}, "
+            f"guidance plans: {summary['guidance_count']}"
+        )
+
     async def _multi_query_retrieve(
         self,
         frame: ProblemFrame,
@@ -594,6 +823,7 @@ class AnalysisService:
                 mission_filter=mission_filter,
                 topic_filter=topic_filter,
                 max_results=ATOMS_PER_QUERY,
+                retrieval_mode=frame.retrieval_mode,
             )
             try:
                 ctx = await self.retriever.retrieve(q)
@@ -619,21 +849,27 @@ class AnalysisService:
         # Concurrent retrieval across all queries
         results = await asyncio.gather(*[_retrieve_one(q) for q in queries])
 
-        # Merge: deduplicate by global_id, cap at MAX_COMBINED_ATOMS
         merged: dict[str, dict] = {}
         for batch in results:
             for atom in batch:
                 gid = atom["global_id"]
                 if gid not in merged:
                     merged[gid] = atom
-                if len(merged) >= MAX_COMBINED_ATOMS:
-                    break
+
+        packed_atoms = self._pack_evidence(list(merged.values()), max_tokens=MAX_EVIDENCE_TOKENS)
+        logger.info(
+            "[AnalysisService] evidence_packing atoms_in=%d atoms_out=%d packed_tokens=%d token_budget=%d",
+            len(merged),
+            len(packed_atoms),
+            sum(self._estimate_tokens(atom.get("text", "")) for atom in packed_atoms),
+            MAX_EVIDENCE_TOKENS,
+        )
 
         combined = EvidencePacket(
             topic_name=frame.raw_statement,
             section_title="Combined Analysis Evidence",
             section_objective=frame.goal or frame.raw_statement,
-            atoms=list(merged.values()),
+            atoms=packed_atoms,
         )
 
         # Pull contradictions via the assembler's existing method
@@ -644,12 +880,86 @@ class AnalysisService:
                     contradiction_scope, limit=8
                 )
                 for c in contradictions:
+                    typed = self.retriever._classify_contradiction(
+                        c.get("atom_a_content", ""),
+                        c.get("atom_b_content", ""),
+                    ) if hasattr(self.retriever, "_classify_contradiction") else {}
                     combined.contradictions.append({
                         "description": c.get("description", ""),
                         "claim_a": c.get("atom_a_content", ""),
                         "claim_b": c.get("atom_b_content", ""),
+                        **typed,
                     })
+                logger.info("[AnalysisService] unresolved_contradictions count=%d", len(combined.contradictions))
         except Exception as exc:
             logger.debug("[AnalysisService] Could not retrieve contradictions: %s", exc)
 
         return combined
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        return max(1, len((text or "").split()))
+
+    def _pack_evidence(self, atoms: List[dict], max_tokens: int) -> List[dict]:
+        clusters: dict[str, List[dict]] = {
+            "contradiction": [],
+            "mechanism": [],
+            "tradeoffs": [],
+            "constraints": [],
+            "implementation": [],
+            "other": [],
+        }
+        for atom in atoms:
+            text = (atom.get("text") or "").lower()
+            atype = (atom.get("type") or "").lower()
+            if "contradiction" in atype:
+                clusters["contradiction"].append(atom)
+            elif any(token in text for token in ("because", "causes", "mechanism", "works", "root cause")):
+                clusters["mechanism"].append(atom)
+            elif any(token in text for token in ("tradeoff", "versus", "compare", "better", "worse")):
+                clusters["tradeoffs"].append(atom)
+            elif any(token in text for token in ("constraint", "limit", "bound", "cannot", "must")):
+                clusters["constraints"].append(atom)
+            elif any(token in text for token in ("implement", "deploy", "config", "code", "runtime")):
+                clusters["implementation"].append(atom)
+            else:
+                clusters["other"].append(atom)
+
+        ordered: List[dict] = []
+        cluster_names = ["contradiction", "mechanism", "tradeoffs", "constraints", "implementation", "other"]
+        indices = {name: 0 for name in cluster_names}
+        while True:
+            added = False
+            for name in cluster_names:
+                cluster = clusters[name]
+                idx = indices[name]
+                if idx < len(cluster):
+                    ordered.append(cluster[idx])
+                    indices[name] += 1
+                    added = True
+            if not added:
+                break
+
+        packed: List[dict] = []
+        used_tokens = 0
+        for atom in ordered:
+            atom_tokens = self._estimate_tokens(atom.get("text", ""))
+            if packed and used_tokens + atom_tokens > max_tokens:
+                break
+            packed.append(atom)
+            used_tokens += atom_tokens
+        return packed
+
+    @staticmethod
+    def _detect_weak_dimensions(frame: ProblemFrame, packet: EvidencePacket) -> List[str]:
+        weak: List[str] = []
+        joined = "\n".join(atom.get("text", "") for atom in packet.atoms).lower()
+        for dimension in frame.dimensions:
+            if dimension == "failure_modes" and not packet.contradictions:
+                weak.append(dimension)
+                continue
+            if dimension not in joined:
+                weak.append(dimension)
+        if weak:
+            logger.info("[AnalysisService] follow_up_query_trigger weak_dimensions=%s", ",".join(weak[:3]))
+        return weak[:3]

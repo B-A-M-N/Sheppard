@@ -22,6 +22,8 @@ from src.research.reasoning.ranking import RankingConfig, apply_ranking
 from src.research.derivation.engine import DerivationEngine
 from src.research.reasoning.analytical_operators import run_all_operators
 from src.research.graph.claim_graph import build_evidence_graph
+from src.research.graph.gap_scorer import score_gaps
+from src.research.reasoning.section_planner import EvidenceAwareSectionPlanner
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +49,7 @@ class EvidencePacket:
     derived_claims: List = field(default_factory=list)
     analytical_bundles: List = field(default_factory=list)
     evidence_graph: Any = None
+    section_guidance: List[Dict[str, Any]] = field(default_factory=list)
 
 class EvidenceAssembler:
     def __init__(self, ollama: OllamaClient, memory: MemoryManager, retriever: V3Retriever, adapter=None):
@@ -54,6 +57,7 @@ class EvidenceAssembler:
         self.memory = memory
         self.retriever = retriever
         self.adapter = adapter
+        self.section_planner = EvidenceAwareSectionPlanner()
 
     async def generate_section_plan(self, topic_name: str) -> List[SectionPlan]:
         """Ask the LLM to architect the Master Brief."""
@@ -159,7 +163,7 @@ Output ONLY valid JSON in this format:
         # Opt-in ranking: sort by composite score (desc) with global_id tiebreaker (RANK-01/02/03/04)
         # Default (enable_ranking=False) preserves current global_id sort for backward compatibility.
         if query is not None and getattr(query, 'enable_ranking', False):
-            from research.reasoning.ranking import apply_ranking, RankingConfig
+            from src.research.reasoning.ranking import apply_ranking, RankingConfig
             cfg = query.ranking_config if query.ranking_config is not None else RankingConfig()
             collected = apply_ranking(collected, items_parallel, cfg)
         else:
@@ -194,10 +198,76 @@ Output ONLY valid JSON in this format:
         if hasattr(context, '_profile'):
             packet.retrieval_profile = context._profile
 
-        # Evidence graph: connect atoms, derived claims, bundles, contradictions (Phase 12-C)
+        # Evidence graph: initial build from first retrieval pass (Phase 12-C)
+        initial_graph = build_evidence_graph(
+            items_parallel, packet.derived_claims, packet.analytical_bundles, packet.contradictions
+        )
+
+        # Gap-driven second retrieval pass — fill holes identified by the graph scorer
+        gaps = score_gaps(initial_graph, max_gaps=3)
+        new_items_added = False
+        if gaps:
+            gap_results = await asyncio.gather(
+                *[
+                    self.retriever.retrieve(
+                        RetrievalQuery(text=g.query, mission_filter=mission_id, max_results=5)
+                    )
+                    for g in gaps
+                ],
+                return_exceptions=True,
+            )
+            for result in gap_results:
+                if isinstance(result, Exception):
+                    logger.debug(f"[Assembler] gap retrieval failed: {result}")
+                    continue
+                for item in result.all_items:
+                    if not item.metadata or not item.metadata.get("atom_id"):
+                        continue
+                    aid = item.metadata["atom_id"]
+                    if aid not in seen_ids:
+                        seen_ids.add(aid)
+                        atom_dict = {
+                            "global_id": f"[A{len(seen_ids)}]",
+                            "text": item.content,
+                            "type": item.item_type,
+                            "metadata": {"source": item.source},
+                        }
+                        items_parallel.append(item)
+                        packet.atoms.append(atom_dict)
+                        packet.atom_ids_used.append(aid)
+                        new_items_added = True
+
+            if new_items_added:
+                # Rerun derivation and operators over the augmented atom set
+                packet.derived_claims = DerivationEngine().run(items_parallel)
+                packet.analytical_bundles = run_all_operators(items_parallel)
+                logger.debug(
+                    f"[Assembler] gap pass added atoms; "
+                    f"total={len(items_parallel)}, gaps={len(gaps)}"
+                )
+
+        # Final evidence graph — incorporates any gap-filled atoms
         packet.evidence_graph = build_evidence_graph(
             items_parallel, packet.derived_claims, packet.analytical_bundles, packet.contradictions
         )
+
+        packet.section_guidance = [
+            {
+                "title": plan.title,
+                "purpose": plan.purpose,
+                "mode": plan.mode.value,
+                "evidence_budget": plan.evidence_budget,
+                "required_atom_ids": list(plan.required_atom_ids),
+                "allowed_derived_claim_ids": list(plan.allowed_derived_claim_ids),
+                "contradiction_obligation": plan.contradiction_obligation,
+                "contradiction_atom_ids": list(plan.contradiction_atom_ids or []),
+                "target_length_range": list(plan.target_length_range),
+                "refusal_required": plan.refusal_required,
+                "forbidden_extrapolations": list(plan.forbidden_extrapolations),
+                "order": plan.order,
+            }
+            for plan in self.section_planner.plan(packet.evidence_graph, packet)
+        ]
 
     async def _get_unresolved_contradictions(self, mission_id: str, limit: int = 5) -> List[Dict]:
         """V3-native contradiction retrieval via direct PG adapter query.
@@ -242,7 +312,7 @@ Output ONLY valid JSON in this format:
         Falls back to sequential per-section retrieval on batch failure.
         Returns dict keyed by section.order -> EvidencePacket.
         """
-        from utils.structured_logger import async_span_ctx
+        from src.utils.structured_logger import async_span_ctx
         async with async_span_ctx("retrieval", mission_id):
             return await self._assemble_all_sections_impl(mission_id, topic_name, sections)
 

@@ -226,6 +226,10 @@ _REPAIR_PROMPT = """Convert the following text into a single factual, self-conta
 
 Rules:
 - Preserve the original meaning exactly — do NOT add new facts
+- You must preserve all qualifiers, caveats, version bounds, environment-specific conditions,
+  negative conditions, and comparative wording.
+- Do not generalize a bounded claim into a universal one.
+- If the original is awkward but semantically precise, preserve precision over readability.
 - Remove fragments and incomplete thoughts
 - Remove meta-references ("this paper", "we show", "according to")
 - Make it standalone: understandable without any external context
@@ -341,10 +345,18 @@ async def repair_atom(
     # Return repaired atom, preserving original metadata but marking it
     return {
         "type": atom.get("type", "claim"),
-        "content": repaired_content,
+        "content": content,
+        "text": content,
+        "normalized_text": repaired_content,
         "confidence": atom.get("confidence", 0.5) * 0.85,  # Penalty for repaired atoms
         "repaired": True,
         "original": content,
+        "repair_notes_json": {
+            "mode": "overlay",
+            "reason": ",".join(diagnoses),
+            "original_text": content,
+            "normalized_text": repaired_content,
+        },
     }
 
 

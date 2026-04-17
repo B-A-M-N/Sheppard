@@ -159,10 +159,14 @@ async def test_contradiction_search_returns_bound_atom_ids():
 
     assert len(items) == 1
     assert items[0].item_type == "contradiction"
-    assert items[0].metadata == {
+    assert {
+        key: items[0].metadata[key]
+        for key in ("contradiction_set_id", "atom_a_id", "atom_b_id")
+    } == {
         "contradiction_set_id": "contra-1",
         "atom_a_id": "atom-a",
         "atom_b_id": "atom-b",
     }
+    assert items[0].metadata["type"] == "direct"
     assert "Method A is best." in items[0].content
     assert "Method B is best." in items[0].content

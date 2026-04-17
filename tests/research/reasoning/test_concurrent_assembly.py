@@ -6,7 +6,7 @@ Created: Phase 12-02, Plan 01 (scaffolding for Plan 02 implementation).
 import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from research.reasoning.assembler import (
+from src.research.reasoning.assembler import (
     EvidenceAssembler, EvidencePacket, SectionPlan, RETRIEVAL_CONCURRENCY_LIMIT
 )
 
@@ -152,7 +152,7 @@ class TestTimingInstrumentation:
         mock_context.all_items = []
         assembler.retriever.retrieve = AsyncMock(return_value=mock_context)
         section = SectionPlan(order=1, title="Test", purpose="test", target_evidence_roles=["definitions"])
-        with patch("research.reasoning.assembler.logger") as mock_logger:
+        with patch("src.research.reasoning.assembler.logger") as mock_logger:
             await assembler.build_evidence_packet("m1", "Topic", section)
             debug_calls = [str(c) for c in mock_logger.debug.call_args_list]
             assert any("retrieval:" in c.lower() or "ms" in c.lower() for c in debug_calls), \

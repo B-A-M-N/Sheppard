@@ -7,8 +7,8 @@ Requirements: RANK-01, RANK-02, RANK-03, RANK-04
 """
 
 import pytest
-from research.reasoning.ranking import RankingConfig, compute_composite_score, apply_ranking
-from research.reasoning.retriever import RetrievedItem
+from src.research.reasoning.ranking import RankingConfig, compute_composite_score, apply_ranking
+from src.research.reasoning.retriever import RetrievedItem
 
 
 # ──────────────────────────────────────────────────────────────
@@ -49,6 +49,7 @@ def test_default_weights_sum_to_one():
         + cfg.weight_recency
         + cfg.weight_tech_density
         + cfg.weight_project_proximity
+        + cfg.weight_technical_specificity
     )
     assert abs(total - 1.0) < 1e-9, f"Weights sum to {total}, expected 1.0"
 
@@ -62,7 +63,7 @@ def test_default_weight_trust():
 
 
 def test_default_weight_recency():
-    assert RankingConfig().weight_recency == 0.10
+    assert RankingConfig().weight_recency == 0.06
 
 
 def test_default_weight_tech_density():
@@ -70,7 +71,11 @@ def test_default_weight_tech_density():
 
 
 def test_default_weight_project_proximity():
-    assert RankingConfig().weight_project_proximity == 0.20
+    assert RankingConfig().weight_project_proximity == 0.19
+
+
+def test_default_weight_technical_specificity():
+    assert RankingConfig().weight_technical_specificity == 0.05
 
 
 # ──────────────────────────────────────────────────────────────

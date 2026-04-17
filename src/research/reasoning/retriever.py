@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 from src.research.reasoning.ranking import RankingConfig
+from src.research.reasoning.problem_frame import RetrievalMode
 
 logger = logging.getLogger(__name__)
 
@@ -63,12 +64,14 @@ class RetrievedItem:
         Weights tuned to prioritize project-linked, high-trust, recent items.
         """
         recency_factor = max(0.2, 1.0 - (self.recency_days / 365))
+        technical_specificity = max(0.0, min(1.0, self.tech_density or 0.0))
         return (
             self.relevance_score * 0.35
             + self.trust_score * 0.20
-            + recency_factor * 0.10
+            + recency_factor * 0.06
             + self.tech_density * 0.15
-            + self.project_proximity * 0.20
+            + self.project_proximity * 0.19
+            + technical_specificity * 0.05
         )
 
 
@@ -94,6 +97,7 @@ class RetrievalQuery:
     # Ranking controls (RANK-04)
     enable_ranking: bool = False                    # default preserves current global_id sort
     ranking_config: Optional[RankingConfig] = None  # None → use RankingConfig() defaults
+    retrieval_mode: str = RetrievalMode.MIXED.value
 
 
 @dataclass
@@ -104,6 +108,10 @@ class RoleBasedContext:
     contradictions: List[RetrievedItem] = field(default_factory=list)
     project_artifacts: List[RetrievedItem] = field(default_factory=list)
     unresolved: List[RetrievedItem] = field(default_factory=list)
+    # Lifecycle trust state derived from the evidence set.
+    # One of: forming | synthesized | contested | stale | reusable
+    # Set by V3Retriever after re-ranking; defaults to "forming".
+    aggregate_trust_state: str = "forming"
 
     @property
     def all_items(self) -> List[RetrievedItem]:
@@ -123,4 +131,3 @@ class RoleBasedContext:
 # ──────────────────────────────────────────────────────────────
 # Main retriever class
 # ──────────────────────────────────────────────────────────────
-

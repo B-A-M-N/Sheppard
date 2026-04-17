@@ -8,11 +8,22 @@ Uses:
 """
 
 import logging
+from enum import Enum
 from typing import List, Dict, Any, Optional
 
 from .types import CMKAtom
 
 logger = logging.getLogger(__name__)
+
+
+class ContradictionType(str, Enum):
+    DIRECT = "direct"
+    QUALIFIED = "qualified"
+    SCOPE_MISMATCH = "scope_mismatch"
+    DEGREE_MISMATCH = "degree_mismatch"
+    TEMPORAL_MISMATCH = "temporal_mismatch"
+    TERMINOLOGY_MISMATCH = "terminology_mismatch"
+    NO_CONTRADICTION = "no_contradiction"
 
 
 # Contradiction signal patterns
@@ -79,7 +90,7 @@ class ContradictionDetector:
                             "atom_a": atom.id,
                             "atom_b": other.id,
                             "description": _describe_conflict(atom.content, other.content),
-                            "type": "explicit",
+                            **_typed_conflict(atom.content, other.content, default_type=ContradictionType.DIRECT.value),
                         })
 
         # Check embedding-based contradictions
@@ -106,11 +117,12 @@ class ContradictionDetector:
 
                 # Check for contradiction patterns
                 if _has_polarity_conflict(atom_a.content, atom_b.content):
+                    typed = _typed_conflict(atom_a.content, atom_b.content)
                     contradictions.append({
                         "atom_a": atom_a.id,
                         "atom_b": atom_b.id,
                         "description": _describe_conflict(atom_a.content, atom_b.content),
-                        "type": "semantic",
+                        **typed,
                         "similarity": sim,
                     })
 
@@ -186,3 +198,44 @@ def _describe_conflict(text_a: str, text_b: str) -> str:
     b_preview = text_b[:100] + "..." if len(text_b) > 100 else text_b
 
     return f'"{a_preview}" vs "{b_preview}"'
+
+
+def _typed_conflict(text_a: str, text_b: str, default_type: str = ContradictionType.DIRECT.value) -> Dict[str, Any]:
+    joined = f"{text_a} {text_b}".lower()
+    contradiction_type = default_type
+    why = "The claims appear incompatible."
+    can_both_be_true = False
+    resolution_hint = "Check the scope and qualifiers."
+    if any(token in joined for token in ("version", "before", "after", "current", "previous")):
+        contradiction_type = ContradictionType.TEMPORAL_MISMATCH.value
+        why = "The disagreement appears tied to different time periods or versions."
+        can_both_be_true = True
+        resolution_hint = "Align the version or time window."
+    elif any(token in joined for token in ("environment", "linux", "windows", "staging", "production")):
+        contradiction_type = ContradictionType.SCOPE_MISMATCH.value
+        why = "The claims apply to different environments or scopes."
+        can_both_be_true = True
+        resolution_hint = "Separate the environments or scopes before adjudicating."
+    elif any(token in joined for token in ("usually", "sometimes", "often", "rarely", "always", "never")):
+        contradiction_type = ContradictionType.QUALIFIED.value
+        why = "Qualifiers differ across the two claims."
+        can_both_be_true = True
+        resolution_hint = "Preserve qualifiers and compare exact bounds."
+    elif any(token in joined for token in ("higher", "lower", "faster", "slower", "more", "less")):
+        contradiction_type = ContradictionType.DEGREE_MISMATCH.value
+        why = "The claims disagree on degree rather than absolute truth."
+        can_both_be_true = True
+        resolution_hint = "Check the baseline, metric, and magnitude."
+    elif any(token in joined for token in ("called", "definition", "means", "term")):
+        contradiction_type = ContradictionType.TERMINOLOGY_MISMATCH.value
+        why = "The disagreement may be terminological."
+        can_both_be_true = True
+        resolution_hint = "Normalize terminology first."
+    return {
+        "type": contradiction_type,
+        "why": why,
+        "claim_a_scope": text_a,
+        "claim_b_scope": text_b,
+        "can_both_be_true": can_both_be_true,
+        "resolution_hint": resolution_hint,
+    }

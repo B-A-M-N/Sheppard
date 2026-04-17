@@ -24,10 +24,12 @@ from collections import Counter
 # ─────────────────────────────────────────────
 
 WEIGHTS = {
-    "clarity": 0.40,         # Up from 0.30 — structure matters most
-    "factual_density": 0.30, # Up from 0.25 — information content
-    "citation_likelihood": 0.10,  # DOWN from 0.25 — too punitive for non-technical text
-    "redundancy_penalty": 0.20,
+    "clarity": 0.22,
+    "factual_density": 0.18,
+    "technical_specificity": 0.20,
+    "qualifier_quality": 0.15,
+    "scope_specificity": 0.15,
+    "evidence_traceability": 0.10,
 }
 
 ACCEPTANCE_THRESHOLD = 0.50  # DOWN from 0.65 — realistic threshold for varied text
@@ -228,6 +230,41 @@ def citation_likelihood(content: str) -> float:
     return min(score, 1.0)
 
 
+def technical_specificity(content: str) -> float:
+    score = 0.0
+    if re.search(r'\b(v\d+(?:\.\d+)*)\b', content, re.IGNORECASE):
+        score += 0.2
+    if re.search(r'\b(api|protocol|kernel|latency|throughput|runtime|allocator|index|cache|model|dataset)\b', content, re.IGNORECASE):
+        score += 0.35
+    if re.search(r'\b(docker|kubernetes|postgres|redis|pytorch|tensorflow|cuda|linux|windows)\b', content, re.IGNORECASE):
+        score += 0.25
+    if re.search(r'\d', content):
+        score += 0.2
+    return min(score, 1.0)
+
+
+def qualifier_quality(content: str) -> float:
+    qualifiers = re.findall(r'\b(only|unless|except|when|if|under|without|with|typically|generally|often|rarely|may|can|must|should|not|never|always)\b', content, re.IGNORECASE)
+    if not qualifiers:
+        return 0.4
+    return min(1.0, 0.5 + (0.08 * len(qualifiers)))
+
+
+def scope_specificity(content: str) -> float:
+    score = 0.0
+    if re.search(r'\b(on|in|for|during|before|after|between|within)\b', content, re.IGNORECASE):
+        score += 0.35
+    if re.search(r'\b(prod|production|staging|test|linux|windows|macos|browser|server|client|database)\b', content, re.IGNORECASE):
+        score += 0.35
+    if re.search(r'\b(version|release|build|epoch|quarter|year|today|current|previous)\b', content, re.IGNORECASE):
+        score += 0.30
+    return min(score, 1.0)
+
+
+def evidence_traceability(content: str) -> float:
+    return min(1.0, max(citation_likelihood(content), 0.35 if re.search(r'\b(because|therefore|due to|caused by|measured|observed)\b', content, re.IGNORECASE) else 0.0))
+
+
 # ─────────────────────────────────────────────
 # REDUNDANCY PENALTY
 # ─────────────────────────────────────────────
@@ -298,17 +335,29 @@ def score_atom(
     """
     clarity = clarity_score(content)
     density = factual_density(content)
-    citation = citation_likelihood(content)
+    specificity = technical_specificity(content)
+    qualifiers = qualifier_quality(content)
+    scope = scope_specificity(content)
+    traceability = evidence_traceability(content)
     redundancy = redundancy_score(content, seen_signatures)
 
     composite = (
         clarity * WEIGHTS["clarity"]
         + density * WEIGHTS["factual_density"]
-        + citation * WEIGHTS["citation_likelihood"]
-        + redundancy * WEIGHTS["redundancy_penalty"]
+        + specificity * WEIGHTS["technical_specificity"]
+        + qualifiers * WEIGHTS["qualifier_quality"]
+        + scope * WEIGHTS["scope_specificity"]
+        + traceability * WEIGHTS["evidence_traceability"]
     )
 
-    if composite >= ACCEPTANCE_THRESHOLD:
+    vacuous = len(content.split()) < 5 or not re.search(r'[A-Za-z]', content)
+    fluff = bool(re.search(r'\b(great|amazing|interesting|important)\b', content, re.IGNORECASE)) and density < 0.3
+    no_claim = not _has_verb(content)
+    duplicate = redundancy < 0.1
+
+    if vacuous or fluff or duplicate or no_claim:
+        verdict = "reject"
+    elif composite >= ACCEPTANCE_THRESHOLD:
         verdict = "accept"
     elif composite >= LOW_QUALITY_THRESHOLD:
         verdict = "repair"
@@ -319,7 +368,10 @@ def score_atom(
         "score": round(composite, 3),
         "clarity": round(clarity, 3),
         "factual_density": round(density, 3),
-        "citation_likelihood": round(citation, 3),
+        "technical_specificity": round(specificity, 3),
+        "qualifier_quality": round(qualifiers, 3),
+        "scope_specificity": round(scope, 3),
+        "evidence_traceability": round(traceability, 3),
         "redundancy": round(redundancy, 3),
         "verdict": verdict,
     }

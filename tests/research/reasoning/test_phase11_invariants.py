@@ -1,9 +1,5 @@
 """Phase 11.1: Unit tests for V3 truth contract invariants."""
 
-import sys
-import os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'src')))
-
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from src.research.reasoning.assembler import EvidenceAssembler, EvidencePacket, SectionPlan
@@ -123,7 +119,7 @@ async def test_synthesis_service_propagates_mission_id():
     mock_archivist = MagicMock(spec=ArchivistSynthAdapter)
     mock_archivist.write_section = AsyncMock(return_value="This section provides evidence [A1].")
 
-    with patch('research.reasoning.synthesis_service.ArchivistSynthAdapter', return_value=mock_archivist):
+    with patch('src.research.reasoning.synthesis_service.ArchivistSynthAdapter', return_value=mock_archivist):
         service = SynthesisService(
             ollama=mock_ollama,
             memory=None,
@@ -203,7 +199,7 @@ def test_grounding_validator_logic():
 # --- Invariant 6: Determinism ---
 
 def test_model_router_synthesis_config():
-    from llm.model_router import ModelRouter, TaskType
+    from src.llm.model_router import ModelRouter, TaskType
     router = ModelRouter()
     synth_cfg = router.get(TaskType.SYNTHESIS)
     assert synth_cfg.temperature == 0.0
@@ -269,7 +265,7 @@ async def test_insufficient_evidence_skips_synthesis():
     mock_assembler.build_evidence_packet = AsyncMock(return_value=mock_packet)
     mock_assembler.assemble_all_sections = AsyncMock(return_value={1: mock_packet})
 
-    with patch('research.reasoning.synthesis_service.ArchivistSynthAdapter') as MockArchivist:
+    with patch('src.research.reasoning.synthesis_service.ArchivistSynthAdapter') as MockArchivist:
         mock_archivist = MagicMock()
         MockArchivist.return_value = mock_archivist
         service = SynthesisService(

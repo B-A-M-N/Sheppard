@@ -104,6 +104,18 @@ async def test_persist_application_run_records_query_output_and_evidence():
             {"global_id": "[A2]", "metadata": {"atom_id": "atom-2"}},
         ],
         contradictions=[{"description": "conflict"}],
+        section_guidance=[{"title": "Latency", "mode": "adjudicative"}],
+        evidence_graph=type(
+            "Graph",
+            (),
+            {
+                "nodes": {
+                    "1": type("Node", (), {"node_type": "evidence"})(),
+                    "2": type("Node", (), {"node_type": "contradiction"})(),
+                },
+                "edges": {"e1": object()},
+            },
+        )(),
     )
 
     await service._persist_application_run(
@@ -123,6 +135,7 @@ async def test_persist_application_run_records_query_output_and_evidence():
         "analysis_report",
         "analysis_risk_register",
         "critic_challenge",
+        "analysis_graph_summary",
         "analysis_open_questions",
     ]
     assert len(adapter.evidence) == 1
@@ -131,6 +144,7 @@ async def test_persist_application_run_records_query_output_and_evidence():
     assert adapter.lineage[0][0] == report.application_query_id
     assert adapter.lineage[0][1]["frame"]["problem_type"] == "diagnostic"
     assert adapter.lineage[0][1]["critic"]["counter_recommendation"] == "Measure drops first."
+    assert adapter.lineage[0][1]["graph_summary"]["contradiction_nodes"] == 1
     assert len(adapter.authority_updates) == 1
     authority_update = adapter.authority_updates[0]
     assert authority_update["authority_record_id"] == "auth-1"
@@ -142,9 +156,11 @@ async def test_persist_application_run_records_query_output_and_evidence():
     assert authority_update["status_json"]["successful_application_count"] == 1
     assert authority_update["status_json"]["authority_score"] > 0.4
     assert authority_update["status_json"]["has_critic_review"] is True
+    assert authority_update["status_json"]["trust_state"] == "contested"
     assert authority_update["advisory_layer_json"]["application_feedback"]["last_application_query_id"] == report.application_query_id
     assert authority_update["advisory_layer_json"]["risk_register"] == ["Could increase tail latency during bursts."]
     assert authority_update["advisory_layer_json"]["critic_objections"] == ["Could also be packet loss."]
+    assert authority_update["advisory_layer_json"]["section_guidance"] == [{"title": "Latency", "mode": "adjudicative"}]
     assert authority_update["reuse_json"]["last_application_query_id"] == report.application_query_id
     assert authority_update["reuse_json"]["key_atom_ids"] == ["atom-1"]
     assert authority_update["reuse_json"]["critic_overlooked_atom_ids"] == ["atom-2"]

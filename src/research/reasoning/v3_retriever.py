@@ -7,8 +7,10 @@ corpus.chunks via the StorageAdapter.
 """
 
 import asyncio
+from enum import Enum
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
@@ -19,6 +21,7 @@ from .retriever import (
     RetrievedItem,
 )
 from src.core.memory.cmk.runtime import CMKRuntime
+from src.research.reasoning.trust_state import derive_trust_state
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +44,12 @@ class V3Retriever:
     def __init__(self, adapter, cmk_runtime: Optional[CMKRuntime] = None):
         self.adapter = adapter
         self.cmk_runtime = cmk_runtime
+
+    _RECENCY_BY_MODE = {
+        "temporal": (0.14, True),
+        "canonical": (0.02, False),
+        "mixed": (0.06, False),
+    }
 
     async def retrieve(self, query: RetrievalQuery) -> RoleBasedContext:
         """
@@ -187,12 +196,35 @@ class V3Retriever:
         except Exception as e:
             logger.debug(f"[V3Retriever] Structural stage failed: {e}")
 
+        try:
+            canonical_support_items = await self._canonical_support_lane(where, query.max_results // 3)
+            if canonical_support_items:
+                seen_ids = {
+                    (item.metadata or {}).get("atom_id")
+                    for item in items
+                }
+                for support_item in canonical_support_items:
+                    support_id = (support_item.metadata or {}).get("atom_id")
+                    if support_id and support_id not in seen_ids:
+                        items.append(support_item)
+                        seen_ids.add(support_id)
+        except Exception as e:
+            logger.debug(f"[V3Retriever] Canonical support stage failed: {e}")
+
         # Stage 4: Re-rank by composite score — relevance (semantic closeness) ×
         # trust × recency decay.  Ensures high-trust, recent atoms surface first
         # regardless of which retrieval lane found them.
-        items = self._rerank(items, query.max_results)
-        authority_items = self._rerank(authority_items, 3)
-        project_artifacts = self._rerank(project_artifacts, query.max_project_artifacts)
+        self._link_context_signals(items, authority_items, contradiction_items, project_artifacts, query.text)
+        items = self._rerank(items, query.max_results, retrieval_mode=query.retrieval_mode)
+        items = self._diversify_by_age(items, query.max_results, query.retrieval_mode)
+        authority_items = self._rerank(authority_items, 3, retrieval_mode=query.retrieval_mode)
+        project_artifacts = self._rerank(project_artifacts, query.max_project_artifacts, retrieval_mode=query.retrieval_mode)
+        logger.info(
+            "[V3Retriever] retrieval_mode=%s canonical_support_contribution=%d contradiction_count=%d",
+            query.retrieval_mode,
+            sum(1 for item in items if (item.metadata or {}).get("canonical_support_lane")),
+            len(contradiction_items),
+        )
 
         # Assemble into role-based context
         ctx = RoleBasedContext()
@@ -201,6 +233,7 @@ class V3Retriever:
         ctx.evidence = items
         ctx.project_artifacts = project_artifacts
         ctx.unresolved = unresolved_items
+        ctx.aggregate_trust_state = self._aggregate_trust_state(items)
 
         # Attach profiling data if enabled
         if PROFILE_RETRIEVAL:
@@ -213,12 +246,12 @@ class V3Retriever:
                 "total_ms": total_ms
             }
 
-        # For now, definitions, contradictions, project_artifacts, unresolved remain empty
-        # They can be populated in later refinements
+        # Context slots are populated from multi-stage retrieval lanes (semantic, authority, contradiction)
+        # to ensure downstream assemblers have specific evidence buckets.
 
         # CMK Integration: activate retrieved atoms in working memory
         if hasattr(self, 'cmk_runtime') and self.cmk_runtime:
-            V3Retriever.activate_cmk(items, self.cmk_runtime)
+            await V3Retriever.activate_cmk(items, self.cmk_runtime)
 
         return ctx
 
@@ -364,14 +397,23 @@ class V3Retriever:
                         seen_ids.add(s_id)
 
             # Stage 4: Re-rank
-            items = self._rerank(items, limits[i])
+            self._link_context_signals(
+                items,
+                authority_items,
+                contradiction_items,
+                project_artifacts,
+                queries[i].text,
+            )
+            items = self._rerank(items, limits[i], retrieval_mode=queries[i].retrieval_mode)
+            items = self._diversify_by_age(items, limits[i], queries[i].retrieval_mode)
 
             ctx = RoleBasedContext()
-            ctx.definitions = self._rerank(authority_items, 3)
+            ctx.definitions = self._rerank(authority_items, 3, retrieval_mode=queries[i].retrieval_mode)
             ctx.contradictions = contradiction_items
             ctx.evidence = items
-            ctx.project_artifacts = self._rerank(project_artifacts, queries[i].max_project_artifacts)
+            ctx.project_artifacts = self._rerank(project_artifacts, queries[i].max_project_artifacts, retrieval_mode=queries[i].retrieval_mode)
             ctx.unresolved = self._build_unresolved_items(contradiction_items, queries[i].max_unresolved)
+            ctx.aggregate_trust_state = self._aggregate_trust_state(items)
 
             if PROFILE_RETRIEVAL:
                 total_ms = (t_end - t_start) * 1000 if t_start and t_end else 0.0
@@ -421,7 +463,7 @@ class V3Retriever:
                 tech_density=0.7,
                 citation_key=meta.get("authority_record_id"),
                 concept_name=meta.get("maturity"),
-                metadata=meta or {},
+                metadata={**(meta or {}), "authority_state": meta.get("maturity") or "synthesized"},
             )
             items.append(item)
 
@@ -464,6 +506,7 @@ class V3Retriever:
         for row in rows:
             summary = row["summary"] or "Unresolved contradiction"
             content = f"{summary}: {row['atom_a_statement']} VS {row['atom_b_statement']}"
+            contradiction_meta = self._classify_contradiction(row["atom_a_statement"], row["atom_b_statement"])
             items.append(
                 RetrievedItem(
                     content=content,
@@ -481,6 +524,7 @@ class V3Retriever:
                         "contradiction_set_id": row["contradiction_set_id"],
                         "atom_a_id": row["atom_a_id"],
                         "atom_b_id": row["atom_b_id"],
+                        **contradiction_meta,
                     },
                 )
             )
@@ -546,9 +590,22 @@ class V3Retriever:
                         "authority_record_id": row["authority_record_id"],
                         "maturity": row["maturity"],
                         "artifact_type": row["artifact_type"],
+                        "authority_state": row["maturity"] or "synthesized",
                     },
                 )
             )
+        return items
+
+    async def _canonical_support_lane(self, where: dict, limit: int) -> List[RetrievedItem]:
+        if limit <= 0:
+            return []
+        items = await self._structural_traversal(where, limit)
+        for item in items:
+            meta = item.metadata or {}
+            meta["canonical_support_lane"] = True
+            meta["authority_state"] = "canonical" if meta.get("is_core_atom") else meta.get("authority_state", "multi_source_supported")
+            item.metadata = meta
+            item.recency_days = min(item.recency_days, 3650)
         return items
 
     def _build_unresolved_items(self, contradiction_items: List[RetrievedItem], limit: int) -> List[RetrievedItem]:
@@ -575,6 +632,102 @@ class V3Retriever:
                 )
             )
         return items
+
+    def _link_context_signals(
+        self,
+        items: List[RetrievedItem],
+        authority_items: List[RetrievedItem],
+        contradiction_items: List[RetrievedItem],
+        project_artifacts: List[RetrievedItem],
+        query_text: str,
+    ) -> None:
+        query_tokens = self._tokenize(query_text)
+        authority_ids = {
+            (item.metadata or {}).get("authority_record_id")
+            for item in authority_items
+            if (item.metadata or {}).get("authority_record_id")
+        }
+        artifact_authority_ids = {
+            (item.metadata or {}).get("authority_record_id")
+            for item in project_artifacts
+            if (item.metadata or {}).get("authority_record_id")
+        }
+        contradiction_atom_ids = set()
+        for contradiction in contradiction_items:
+            meta = contradiction.metadata or {}
+            contradiction_atom_ids.update(
+                atom_id for atom_id in (meta.get("atom_a_id"), meta.get("atom_b_id")) if atom_id
+            )
+
+        for item in items:
+            meta = item.metadata or {}
+            authority_id = meta.get("authority_record_id")
+            atom_id = meta.get("atom_id")
+            if authority_id and authority_id in authority_ids:
+                meta["authority_aligned"] = True
+            if authority_id and authority_id in artifact_authority_ids:
+                meta["artifact_aligned"] = True
+                item.project_proximity = max(item.project_proximity or 0.0, 0.85)
+            if atom_id and atom_id in contradiction_atom_ids:
+                meta["contradiction_bound"] = True
+            overlap = self._query_overlap(query_tokens, item.content)
+            meta["query_overlap"] = overlap
+            item.metadata = meta
+
+    @staticmethod
+    def _tokenize(text: str) -> set[str]:
+        return {token for token in re.findall(r"[a-z0-9]+", (text or "").lower()) if len(token) > 2}
+
+    def _query_overlap(self, query_tokens: set[str], content: str) -> float:
+        if not query_tokens:
+            return 0.0
+        content_tokens = self._tokenize(content)
+        if not content_tokens:
+            return 0.0
+        return len(query_tokens & content_tokens) / len(query_tokens)
+
+    @staticmethod
+    def _classify_contradiction(claim_a: str, claim_b: str) -> dict:
+        a = (claim_a or "").lower()
+        b = (claim_b or "").lower()
+        mismatch_type = "direct"
+        why = "Claims oppose each other on the same apparent topic."
+        can_both_be_true = False
+        resolution_hint = "Inspect the differing assumptions and evidence."
+        if any(token in a + " " + b for token in ("version", "release", "before", "after", "current", "previous")):
+            mismatch_type = "temporal_mismatch"
+            why = "The claims appear to describe different times or versions."
+            can_both_be_true = True
+            resolution_hint = "Different versions or time windows may reconcile the claims."
+        elif any(token in a + " " + b for token in ("environment", "linux", "windows", "staging", "production")):
+            mismatch_type = "scope_mismatch"
+            why = "The claims appear to apply to different environments or scopes."
+            can_both_be_true = True
+            resolution_hint = "Different environments or deployment scopes may reconcile the claims."
+        elif any(token in a + " " + b for token in ("usually", "sometimes", "often", "rarely", "always", "never")):
+            mismatch_type = "qualified"
+            why = "One or both claims are qualified rather than universally asserted."
+            can_both_be_true = True
+            resolution_hint = "Check qualifiers and boundary conditions."
+        elif any(token in a + " " + b for token in ("more", "less", "higher", "lower", "faster", "slower")):
+            mismatch_type = "degree_mismatch"
+            why = "The claims disagree on degree rather than strict truth value."
+            can_both_be_true = True
+            resolution_hint = "Different baselines or measurement methods may explain the mismatch."
+        elif any(token in a + " " + b for token in ("called", "term", "definition", "means")):
+            mismatch_type = "terminology_mismatch"
+            why = "The disagreement appears terminological."
+            can_both_be_true = True
+            resolution_hint = "Normalize terminology before treating this as a direct conflict."
+
+        return {
+            "type": mismatch_type,
+            "why": why,
+            "claim_a_scope": claim_a,
+            "claim_b_scope": claim_b,
+            "can_both_be_true": can_both_be_true,
+            "resolution_hint": resolution_hint,
+        }
 
 
     async def _structural_traversal(self, where: dict, limit: int) -> List[RetrievedItem]:
@@ -670,29 +823,141 @@ class V3Retriever:
 
         return items
 
-    def _rerank(self, items: List[RetrievedItem], limit: int) -> List[RetrievedItem]:
-        """Stage 4: Composite re-ranking.
+    # Trust-state lifecycle deltas applied on top of the base composite score.
+    # Positive = boost, negative = penalty.  Caps at ±0.15 in practice.
+    _TRUST_STATE_DELTA: Dict[str, float] = {
+        "reusable":    0.08,
+        "synthesized": 0.04,
+        "forming":     0.00,
+        "contested":  -0.08,
+        "stale":      -0.12,
+    }
 
-        Score = relevance × 0.60 + trust × 0.25 + recency_factor × 0.15
-        recency_factor decays from 1.0 (today) toward 0.0 over ~1 year.
+    def _item_trust_state(self, item: RetrievedItem) -> str:
+        """Derive the lifecycle trust state for a single RetrievedItem."""
+        meta = item.metadata or {}
+        days = item.recency_days if item.recency_days is not None else 9999
+        status = {
+            "freshness": "stale" if days > 365 else "fresh",
+            "maturity": meta.get("maturity") or (
+                "contested" if meta.get("contradiction_bound") else ""
+            ),
+            "contradiction_count": 1 if meta.get("contradiction_bound") else 0,
+            "successful_application_count": 1 if meta.get("artifact_aligned") else 0,
+        }
+        advisory = {
+            "major_contradictions": bool(meta.get("contradiction_bound")),
+        }
+        reuse = {
+            "ready_for_application": bool(
+                meta.get("authority_aligned") or meta.get("artifact_aligned")
+            ),
+        }
+        return derive_trust_state(status, advisory, reuse)
+
+    def _rerank(self, items: List[RetrievedItem], limit: int, retrieval_mode: str = "mixed") -> List[RetrievedItem]:
+        """Stage 4: Composite re-ranking with trust-state lifecycle adjustment.
+
+        Base score = relevance × 0.54 + trust × 0.22 + recency × 0.14
+                     + authority_bonus + project_bonus + overlap_bonus
+        Trust-state delta applied on top (see _TRUST_STATE_DELTA).
+        Each item's derived trust state is stamped into its metadata so
+        downstream consumers (assembler, synthesis) can read it without
+        re-deriving it.
         """
+        # Pre-pass: stamp trust_state on every item's metadata
+        for item in items:
+            ts = self._item_trust_state(item)
+            if isinstance(item.metadata, dict):
+                item.metadata["trust_state"] = ts
+            else:
+                item.metadata = {"trust_state": ts}
+
+        recency_weight, stale_penalty_enabled = self._RECENCY_BY_MODE.get(retrieval_mode or "mixed", (0.06, False))
+
         def _score(item: RetrievedItem) -> float:
             relevance = max(0.0, min(1.0, item.relevance_score or 0.5))
             trust     = max(0.0, min(1.0, item.trust_score or 0.5))
             days      = item.recency_days if item.recency_days is not None else 9999
-            recency   = 1.0 / (1.0 + days / 365.0)
             metadata = item.metadata or {}
+            authority_state = str(metadata.get("authority_state") or metadata.get("maturity") or "").lower()
+            effective_days = days
+            if retrieval_mode == "canonical" and authority_state in {"canonical", "high_confidence", "multi_source_supported", "synthesized"}:
+                effective_days = min(days, 365)
+            recency = 1.0 / (1.0 + effective_days / 365.0)
             authority_bonus = 0.0
             if metadata.get("is_core_atom"):
                 authority_bonus += 0.10
             if metadata.get("authority_record_id"):
                 authority_bonus += 0.06
+            if metadata.get("authority_aligned"):
+                authority_bonus += 0.05
             if metadata.get("exact_match"):
                 authority_bonus += 0.08
+            if metadata.get("artifact_aligned"):
+                authority_bonus += 0.05
+            if metadata.get("contradiction_bound"):
+                authority_bonus += 0.04
+            if metadata.get("canonical_support_lane"):
+                authority_bonus += 0.08
+            overlap_bonus = max(0.0, min(0.08, float(metadata.get("query_overlap", 0.0) or 0.0) * 0.12))
             project_bonus = max(0.0, min(0.15, item.project_proximity or 0.0))
-            return relevance * 0.54 + trust * 0.22 + recency * 0.14 + authority_bonus + project_bonus
+            ts_delta = self._TRUST_STATE_DELTA.get(metadata.get("trust_state", "forming"), 0.0)
+            stale_penalty = -0.08 if stale_penalty_enabled and days > 365 else 0.0
+            return (
+                relevance * 0.54
+                + trust * 0.22
+                + recency * recency_weight
+                + authority_bonus
+                + project_bonus
+                + overlap_bonus
+                + ts_delta
+                + stale_penalty
+            )
 
         return sorted(items, key=_score, reverse=True)[:limit]
+
+    def _diversify_by_age(self, items: List[RetrievedItem], limit: int, retrieval_mode: str) -> List[RetrievedItem]:
+        if retrieval_mode == "temporal" or not items:
+            return items[:limit]
+        recent = [item for item in items if (item.recency_days or 9999) <= 30]
+        mid = [item for item in items if 30 < (item.recency_days or 9999) <= 365]
+        older = [item for item in items if (item.recency_days or 9999) > 365]
+        recent_quota = max(1, round(limit * 0.30))
+        mid_quota = max(1, round(limit * 0.40))
+        older_quota = max(1, limit - recent_quota - mid_quota)
+        selected = recent[:recent_quota] + mid[:mid_quota] + older[:older_quota]
+        if len(selected) < limit:
+            seen = {id(item) for item in selected}
+            for item in items:
+                if id(item) in seen:
+                    continue
+                selected.append(item)
+                if len(selected) >= limit:
+                    break
+        return selected[:limit]
+
+    def _aggregate_trust_state(self, items: List[RetrievedItem]) -> str:
+        """Collapse per-item trust states into a single collection-level state.
+
+        Priority (worst-wins for negative, best-wins for positive):
+          contested > stale > forming > synthesized > reusable
+        If *any* item is contested the whole set is contested (unresolved
+        contradiction). If all are reusable/synthesized the set is elevated.
+        """
+        if not items:
+            return "forming"
+        states = {
+            (item.metadata or {}).get("trust_state", "forming")
+            for item in items
+        }
+        for worst in ("contested", "stale"):
+            if worst in states:
+                return worst
+        for best in ("reusable", "synthesized"):
+            if best in states:
+                return best
+        return "forming"
 
     def _days_since(self, date_str: Optional[str]) -> int:
         """Calculate days since a timestamp string, or return large default."""
@@ -815,27 +1080,19 @@ class V3Retriever:
         return items
 
     @staticmethod
-    def activate_cmk(atoms: List[RetrievedItem], cmk_runtime: Optional[CMKRuntime]):
+    async def activate_cmk(atoms: List[RetrievedItem], cmk_runtime: Optional[CMKRuntime]):
         """
         Activate retrieved atoms in CMK working memory.
         Call this after retrieval to boost working memory activation.
+        Must be awaited — runs as a proper coroutine inside the existing event loop.
         """
         if not cmk_runtime or not atoms:
             return
 
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            return
-
-        async def _activate():
-            for item in atoms:
+        for item in atoms:
+            try:
                 atom_id = item.metadata.get("atom_id") if hasattr(item, 'metadata') and isinstance(item.metadata, dict) else None
                 if atom_id:
                     await cmk_runtime.activate_atom(atom_id, amount=0.1)
-
-        try:
-            loop.run_until_complete(_activate())
-        except Exception:
-            pass
+            except Exception:
+                pass

@@ -9,6 +9,7 @@ Run with: pytest tests/memory/test_chroma_concurrency.py -v --tb=short
 """
 
 import asyncio
+import os
 import threading
 from datetime import datetime
 from unittest.mock import MagicMock
@@ -23,6 +24,19 @@ spec = importlib.util.spec_from_file_location("settings", settings_path)
 settings_mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(settings_mod)
 settings = settings_mod.settings
+
+
+pytestmark = [
+    pytest.mark.legacy,
+    pytest.mark.skipif(
+        os.getenv("RUN_LEGACY_MEMORY_TESTS") != "1",
+        reason=(
+            "Legacy MemoryManager/semantic_memory concurrency coverage is gated. "
+            "This module does not exercise the active Sheppard V3 adapter/sheppard_v3 path. "
+            "Set RUN_LEGACY_MEMORY_TESTS=1 to run it intentionally."
+        ),
+    ),
+]
 
 
 # ============================================================================

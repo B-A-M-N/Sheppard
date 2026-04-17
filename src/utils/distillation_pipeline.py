@@ -112,6 +112,30 @@ from src.utils.normalize_atom_schema import normalize_atom_schema
 logger = logging.getLogger(__name__)
 
 
+def semantic_preservation_check(original_atom, repaired_atom) -> dict:
+    original_text = normalize_atom_schema(original_atom).get("text", "").strip()
+    repaired_text = repaired_atom.get("normalized_text", "").strip() or normalize_atom_schema(repaired_atom).get("text", "").strip()
+    original_lower = original_text.lower()
+    repaired_lower = repaired_text.lower()
+    qualifier_terms = {"if", "when", "unless", "except", "only", "under", "without", "with", "not", "never", "always", "may", "can", "must", "should"}
+    scope_terms = {"linux", "windows", "staging", "production", "version", "release", "api", "runtime", "kernel", "browser", "server", "client"}
+    original_qualifiers = {term for term in qualifier_terms if term in original_lower}
+    repaired_qualifiers = {term for term in qualifier_terms if term in repaired_lower}
+    original_scope = {term for term in scope_terms if term in original_lower}
+    repaired_scope = {term for term in scope_terms if term in repaired_lower}
+    original_claim_tokens = {token for token in re.findall(r"[a-z0-9]+", original_lower) if len(token) > 3}
+    repaired_claim_tokens = {token for token in re.findall(r"[a-z0-9]+", repaired_lower) if len(token) > 3}
+    overlap = len(original_claim_tokens & repaired_claim_tokens) / max(1, len(original_claim_tokens))
+    drift_score = round(max(0.0, 1.0 - overlap), 3)
+    return {
+        "core_claim_preserved": overlap >= 0.75,
+        "qualifiers_preserved": original_qualifiers.issubset(repaired_qualifiers),
+        "scope_preserved": original_scope.issubset(repaired_scope),
+        "negation_preserved": ((" not " in f" {original_lower} ") == (" not " in f" {repaired_lower} ")) and (("never" in original_lower) == ("never" in repaired_lower)),
+        "drift_score": drift_score,
+    }
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Compression-first distillation
 # ──────────────────────────────────────────────────────────────────────
@@ -357,6 +381,7 @@ ATOMS TO REVIEW:
     result = []
     applied_fixes = 0
     dropped = 0
+    semantic_guard_rejected = 0
     seen_content = set()
 
     def _content_key(text: str) -> str:
@@ -379,20 +404,49 @@ ATOMS TO REVIEW:
         elif fix and isinstance(fix, str) and len(fix) >= 30:
             orig = atoms[index - 1] if 0 < index <= len(atoms) else {}
             fixed_content = fix.strip()
-            key = _content_key(fixed_content)
+            repaired = _make_unit(
+                text=normalize_atom_schema(orig).get('text', ''),
+                confidence=float(orig.get('confidence', 0.5)),
+                atom_type=str(orig.get('type', 'claim')),
+            )
+            repaired["normalized_text"] = fixed_content
+            repaired["repair_notes_json"] = {
+                "mode": "overlay",
+                "reason": item.get("reason", ""),
+                "original_text": normalize_atom_schema(orig).get("text", ""),
+                "normalized_text": fixed_content,
+            }
+            check = semantic_preservation_check(orig, repaired)
+            if not (
+                check["core_claim_preserved"]
+                and check["qualifiers_preserved"]
+                and check["scope_preserved"]
+                and check["negation_preserved"]
+                and check["drift_score"] <= 0.15
+            ):
+                semantic_guard_rejected += 1
+                content = normalize_atom_schema(orig).get('text', '')
+                key = _content_key(content)
+                if key not in seen_content:
+                    seen_content.add(key)
+                    result.append(orig)
+                continue
+            key = _content_key(normalize_atom_schema(orig).get('text', ''))
             if key not in seen_content:
                 seen_content.add(key)
-                result.append(_make_unit(
-                    text=fixed_content,
-                    confidence=float(orig.get('confidence', 0.5)),
-                    atom_type=str(orig.get('type', 'claim')),
-                ))
+                result.append(repaired)
                 applied_fixes += 1
         elif valid is False and 0 < index <= len(atoms):
             dropped += 1
 
     if applied_fixes:
         logger.info(f"[Distillery] Pass 3: Applied {applied_fixes} repairs, dropped {dropped} atoms")
+    logger.info(
+        "[Distillery] semantic_guard accepted=%d rejected=%d dropped=%d",
+        applied_fixes,
+        semantic_guard_rejected,
+        dropped,
+    )
 
     if not result:
         logger.warning("[Distillery] Pass 3: No valid atoms after critique, keeping originals")

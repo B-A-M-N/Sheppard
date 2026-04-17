@@ -35,6 +35,17 @@ from src.research.acquisition.ingestion_control import push_doc, compute_content
 # Canonical filter reasons matching DB CHECK constraint:
 # 'too_short', 'low_quality', 'duplicate', 'semantic_drift', 'no_atoms'
 _CANONICAL_REASONS = {"too_short", "low_quality", "duplicate", "semantic_drift", "no_atoms"}
+_LOW_SIGNAL_ATOM_PATTERNS = (
+    "federal government website",
+    "official website",
+    "encrypted and transmitted securely",
+    "end in .gov",
+    "end in .mil",
+    "site is secure",
+    "https:// ensures",
+    "search the dictionary",
+    "provides definitions",
+)
 
 
 def _normalize_filter_reason(human_reason: str) -> str:
@@ -62,6 +73,26 @@ def _normalize_filter_reason(human_reason: str) -> str:
         return human_reason
 
     return "low_quality"  # Safe default
+
+
+def _is_low_signal_atom(atom_dict: Dict[str, Any], mission_title: str) -> bool:
+    text = (atom_dict.get("text") or atom_dict.get("content") or "").strip()
+    if not text:
+        return True
+    lowered = text.lower()
+    if any(pattern in lowered for pattern in _LOW_SIGNAL_ATOM_PATTERNS):
+        return True
+
+    mission_tokens = {token for token in re.findall(r"[a-z0-9]+", mission_title.lower()) if len(token) > 2}
+    text_tokens = {token for token in re.findall(r"[a-z0-9]+", lowered) if len(token) > 2}
+    concept_tokens = {
+        token for token in re.findall(r"[a-z0-9]+", str(atom_dict.get("concept", "")).lower())
+        if len(token) > 2
+    }
+    # Generic or very short mission titles are too noisy to use as a hard lexical gate.
+    if len(mission_tokens) >= 3 and not (mission_tokens & text_tokens) and not (concept_tokens & text_tokens):
+        return True
+    return False
 
 from src.utils.console import console
 from src.utils.json_validator import JSONValidator, extract_technical_atoms, _extract_entities_semantic
@@ -143,7 +174,8 @@ class DistillationPipeline:
                 if exists:
                     logger.info(f"[Idempotency] SKIP {source_id}: found in Redis cache")
                     return True
-            except Exception:
+            except Exception as e:
+                logger.debug(f"[Idempotency] Redis cache check failed: {e}")
                 pass
 
         # Authoritative: Postgres state check
@@ -180,6 +212,7 @@ class DistillationPipeline:
                 where={"mission_id": mission_id, "status": "fetched"},
                 limit=15  # Increased from 5 — LLM calls are the limiter, not batch size
             )
+            logger.info(f"[Distillery] Fetched {len(sources) if sources else 0} sources for mission {mission_id}")
             if not sources:
                 console.print(f"[yellow][Distillery][/yellow] No 'fetched' sources found for mission {mission_id[:8]} — skipping distillation")
                 return
@@ -302,6 +335,7 @@ class DistillationPipeline:
                     return 0
 
                 source_id = s.get("source_id", "unknown")
+                console.print(f"[dim][Distillery] Worker started for {source_id}[/dim]")
 
                 # Idempotency check: skip if already extracted
                 content_hash = s.get("content_hash")
@@ -310,6 +344,7 @@ class DistillationPipeline:
 
                 # Check metadata for HTTP error status (403, 404, etc.) before processing
                 metadata = s.get("metadata_json")
+                console.print(f"[dim][Distillery] Source {source_id} metadata: {metadata}[/dim]")
                 if isinstance(metadata, str):
                     try:
                         import json as _json
@@ -328,19 +363,25 @@ class DistillationPipeline:
 
                 # Get the content
                 text_ref = s.get("canonical_text_ref")
+                console.print(f"[dim][Distillery] Source {source_id} text_ref: {text_ref}[/dim]")
                 if not text_ref:
+                    console.print(f"[dim][Distillery] Source {source_id} aborted: no text_ref[/dim]")
                     await transition_source_status(self.adapter, source_id, "error", current_status="fetched")
                     return 0
 
                 ref = await self.adapter.get_text_ref(text_ref)
+                console.print(f"[dim][Distillery] Source {source_id} ref object: {bool(ref)} (has text: {bool(ref.get('inline_text') if ref else False)})[/dim]")
                 if not ref or not ref.get("inline_text"):
+                    console.print(f"[dim][Distillery] Source {source_id} aborted: ref or inline_text missing[/dim]")
                     await transition_source_status(self.adapter, source_id, "error", current_status="fetched")
                     return 0
 
                 content = ref["inline_text"]
+                console.print(f"[dim][Distillery] Source {source_id} content: {len(content)} chars. CMK: {bool(self.cmk_runtime)}, Redis: {bool(self.ingest_redis)}[/dim]")
 
                 # ── CMK Integration: Push to ingestion control Tier 0 ──
                 if self.cmk_runtime and self.ingest_redis:
+                    console.print(f"[dim][Distillery] Source {source_id} Redirecting to CMK...[/dim]")
                     try:
                         doc_id = source_id
                         chash = compute_content_hash(content)
@@ -360,13 +401,18 @@ class DistillationPipeline:
                     except Exception:
                         pass  # Fall through to direct processing
 
+                console.print(f"[dim][Distillery] Source {source_id} Proceeding to quality gates...[/dim]")
+
                 # ── GATE 0b: Source quality classification ──
                 # Run before LLM extraction so we skip low-value sources cheaply.
                 # Scores: academic=0.85, standard=0.55, skip=0.10
                 _QUALITY_SCORE_MAP = {"academic": 0.85, "standard": 0.55, "skip": 0.10}
                 content_for_classification = content[:4000]
                 source_type = classify_source_quality(s.get('url', ''), content_for_classification)
+                logger.info(f"[Distillery] Source {source_id} quality: {source_type}")
                 quality_score = _QUALITY_SCORE_MAP.get(source_type, 0.55)
+                
+                logger.info(f"[Pipeline] Source {source_id} quality classification: {source_type} (score={quality_score})")
 
                 # Write quality_score + trust_score back to corpus.sources so they're queryable
                 await self.adapter.pg.update_row("corpus.sources", "source_id", {
@@ -374,8 +420,10 @@ class DistillationPipeline:
                     "quality_score": quality_score,
                     "trust_score": quality_score,  # same signal for now; can diverge later
                 })
+                console.print(f"[dim][Distillery] Source {source_id} quality score written: {quality_score}[/dim]")
 
                 if source_type == "skip":
+                    logger.info(f"[Pipeline] Skipping source {source_id}: quality classification 'skip'")
                     await transition_source_status(self.adapter, source_id, "filtered_out", current_status="fetched")
                     await self.adapter.pg.update_row("corpus.sources", "source_id", {
                         "source_id": source_id,
@@ -386,7 +434,9 @@ class DistillationPipeline:
                 # ── GATE 0a: Heuristic pre-filter ──
                 from src.utils.embedding_distiller import gate_0a_heuristic
                 verdict, reason = gate_0a_heuristic(content, ref.get("raw_html", ""))
+                console.print(f"[dim][Distillery] Source {source_id} Gate 0a verdict: {verdict} (reason: {reason})[/dim]")
                 if verdict == "SKIP":
+                    logger.info(f"[Pipeline] Skipping source {source_id}: gate_0a verdict 'SKIP'")
                     await transition_source_status(self.adapter, source_id, "filtered_out", current_status="fetched")
                     canonical_reason = _normalize_filter_reason(reason)
                     await self.adapter.pg.update_row("corpus.sources", "source_id", {
@@ -397,22 +447,26 @@ class DistillationPipeline:
 
                 # Fetch chunks for evidence binding
                 chunks = await self.adapter.list_chunks_for_source(source_id)
+                console.print(f"[dim][Distillery] Source {source_id} chunks: {len(chunks) if chunks else 0}[/dim]")
                 if not chunks:
                     await transition_source_status(self.adapter, source_id, "error", current_status="fetched")
                     return 0
 
                 chunk_infos = [(chunk['chunk_id'], chunk.get('inline_text', '')) for chunk in chunks]
 
+                console.print(f"[dim][Distillery] Source {source_id} calling extract_technical_atoms...[/dim]")
                 try:
                     atoms_data = await extract_technical_atoms(
                         self.ollama, content, mission_id,
                         source_url=s.get('url', '')
                     )
+                    console.print(f"[dim][Distillery] Source {source_id} extraction returned {len(atoms_data)} atoms[/dim]")
 
                     # Transition fetched -> extracted before processing atoms
                     await transition_source_status(self.adapter, source_id, "extracted", current_status="fetched")
 
                     atoms_this_source = 0
+                    mission_title = mission_row.get("title", "") if isinstance(mission_row, dict) else ""
 
                     for atom_dict in atoms_data:
                         if not isinstance(atom_dict, dict):
@@ -420,9 +474,13 @@ class DistillationPipeline:
 
                         normalized = normalize_atom_schema(atom_dict)
                         content_value = normalized.get('text', '')
+                        logger.info(f"[Distillery] Processing atom: {content_value[:50]}...")
                         if not content_value or not isinstance(content_value, str):
+                            logger.info(f"[Distillery] Atom skipped: no content")
                             continue
-
+                        if _is_low_signal_atom(normalized, mission_title):
+                            logger.info(f"[Distillery] Atom skipped: low-signal content for mission '{mission_title}'")
+                            continue
                         atom_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{mission_id}:{source_id}:{content_value[:200]}"))
                         profile_id = mission_row.get("domain_profile_id") if isinstance(mission_row, dict) else f"profile_{mission_id[:8]}"
 
@@ -483,6 +541,7 @@ class DistillationPipeline:
 
                         atom_row = atom.to_pg_row()
                         await self.adapter.store_atom_with_evidence(atom_row, evidence_rows)
+                        logger.info(f"[Distillery] Atom {atom_id} persisted with {len(evidence_rows)} evidence rows")
 
                         # Entity / concept tagging — populate knowledge.atom_entities
                         raw_concept = atom_dict.get('concept', '').strip()
@@ -554,13 +613,17 @@ class DistillationPipeline:
                     return 0
 
         # Run all sources in parallel with bounded concurrency
+        console.print(f"[dim][Distillery] Running {len(sources)} worker tasks...[/dim]")
         results = await asyncio.gather(*[_process_single(s) for s in sources], return_exceptions=True)
+        logger.info(f"[Distillery] Gather complete with {len(results)} results")
 
-        # Log any exceptions from gather
+        # Log and raise any exceptions from gather to avoid silent failures
         for i, r in enumerate(results):
             if isinstance(r, Exception):
                 logger.error(f"[Distillery] Parallel worker exception for source {i}: {r}")
                 error_count[0] += 1
+                # In test or debug mode, we want to know exactly what failed
+                raise r
 
         console.print(f"[bold green][Refinery][/bold green] Batch complete. Smelted technical atoms: [white]{self._total_atoms}[/white]")
 
@@ -662,15 +725,10 @@ class DistillationPipeline:
 
         # Store in mission frontier snapshot for retrieval at mission completion
         try:
-            existing = await self.adapter.pg.fetch_many(
-                "mission.mission_frontier_snapshots",
-                where={"mission_id": mission_id},
-                limit=1,
-            )
+            existing_snapshot = await self.adapter.get_latest_frontier_checkpoint(mission_id) if self.adapter else None
             existing_candidates = []
-            if existing:
-                snap = existing[0]
-                existing_candidates = snap.get("frontier_json", {}).get("emergent_topics", [])
+            if existing_snapshot:
+                existing_candidates = existing_snapshot.get("emergent_topics", [])
 
             # Merge: add new candidates, update counts for existing ones
             existing_by_concept = {c["concept"]: c for c in existing_candidates}
@@ -685,10 +743,7 @@ class DistillationPipeline:
 
             merged = sorted(existing_by_concept.values(), key=lambda c: c["atom_count"], reverse=True)
 
-            await self.adapter.pg.insert_row("mission.mission_frontier_snapshots", {
-                "mission_id": mission_id,
-                "frontier_json": {"emergent_topics": merged},
-            })
+            await self.adapter.checkpoint_frontier(mission_id, {"emergent_topics": merged})
         except Exception as e:
             logger.warning("[Distillery] Failed to record emergent topics: %s", e)
 
@@ -702,15 +757,11 @@ class DistillationPipeline:
         Caller (system.py) is responsible for creating the actual missions via learn().
         """
         try:
-            snapshots = await self.adapter.pg.fetch_many(
-                "mission.mission_frontier_snapshots",
-                where={"mission_id": mission_id},
-                limit=1,
-            )
-            if not snapshots:
+            snapshot = await self.adapter.get_latest_frontier_checkpoint(mission_id)
+            if not snapshot:
                 return []
 
-            candidates = snapshots[0].get("frontier_json", {}).get("emergent_topics", [])
+            candidates = snapshot.get("emergent_topics", [])
             if not candidates:
                 return []
 
@@ -956,14 +1007,14 @@ class DistillationPipeline:
             return {"answer": "CMK not available", "supporting": [], "contradicting": [], "confidence": 0.0}
 
         # Step 1: Retrieve relevant beliefs
-        relevant = await self.cmk_runtime.query(query, top_k=5)
+        relevant = await self.cmk_runtime.query(query)
 
         # Step 2: Expand via graph
         expanded = set()
         if self.cmk_runtime.belief_graph:
             for belief_id in [b.get("id") for b in relevant.get("beliefs", [])]:
                 expanded.add(belief_id)
-                neighbors = self.cmk_runtime.belief_graph.get_neighbors(belief_id, depth=2) if hasattr(self.cmk_runtime.belief_graph, 'get_neighbors') else []
+                neighbors = self.cmk_runtime.belief_graph.get_neighbors(belief_id) if hasattr(self.cmk_runtime.belief_graph, 'get_neighbors') else []
                 expanded.update(neighbors)
 
         # Step 3: Aggregate evidence
@@ -1006,36 +1057,6 @@ class DistillationPipeline:
             "contradicting_beliefs": contradicting,
             "confidence": max([b["confidence"] for b in supporting], default=0.0),
         }
-
-    @staticmethod
-    def activate_retrieved_atoms_cmk(atoms: list, cmk_runtime) -> list:
-        """
-        Activate retrieved atoms in CMK working memory.
-
-        Call this after retrieval to boost working memory activation.
-        Returns the same atoms list (with activation side-effect).
-        """
-        if not cmk_runtime:
-            return atoms
-
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            return atoms
-
-        async def _activate():
-            for atom_data in atoms:
-                atom_id = atom_data.get("atom_id") if isinstance(atom_data, dict) else getattr(atom_data, "atom_id", None)
-                if atom_id:
-                    await cmk_runtime.activate_atom(atom_id, amount=0.1)
-
-        try:
-            loop.run_until_complete(_activate())
-        except Exception:
-            pass
-
-        return atoms
 
     async def consolidate_atoms(self, mission_id: str):
         """The Forgetting Curve: Merges redundant atoms into Golden Atoms."""

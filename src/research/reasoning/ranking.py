@@ -35,9 +35,10 @@ class RankingConfig:
     """
     weight_relevance: float = 0.35
     weight_trust: float = 0.20
-    weight_recency: float = 0.10
+    weight_recency: float = 0.06
     weight_tech_density: float = 0.15
-    weight_project_proximity: float = 0.20
+    weight_project_proximity: float = 0.19
+    weight_technical_specificity: float = 0.05
     recency_halflife_days: int = 365
 
 
@@ -45,7 +46,7 @@ class RankingConfig:
 # Scoring
 # ──────────────────────────────────────────────────────────────
 
-def compute_composite_score(item: "RetrievedItem", cfg: RankingConfig) -> float:
+def compute_composite_score(item: "RetrievedItem", cfg: RankingConfig, recency_weight: float | None = None) -> float:
     """
     Compute a composite relevance score for a single RetrievedItem using
     caller-supplied weight configuration.
@@ -56,12 +57,14 @@ def compute_composite_score(item: "RetrievedItem", cfg: RankingConfig) -> float:
     Does NOT mutate item.
     """
     recency_factor = max(0.2, 1.0 - (item.recency_days / cfg.recency_halflife_days))
+    technical_specificity = max(0.0, min(1.0, getattr(item, "tech_density", 0.5) or 0.0))
     return (
         item.relevance_score      * cfg.weight_relevance
         + item.trust_score        * cfg.weight_trust
-        + recency_factor          * cfg.weight_recency
+        + recency_factor          * (cfg.weight_recency if recency_weight is None else recency_weight)
         + item.tech_density       * cfg.weight_tech_density
         + item.project_proximity  * cfg.weight_project_proximity
+        + technical_specificity   * cfg.weight_technical_specificity
     )
 
 

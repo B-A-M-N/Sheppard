@@ -24,17 +24,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 # Ensure src is in path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'src')))
 
-from research.condensation.pipeline import DistillationPipeline, CondensationPriority
-from research.reasoning.v3_retriever import V3Retriever
-from research.reasoning.assembler import EvidenceAssembler, EvidencePacket, SectionPlan
-from research.reasoning.synthesis_service import SynthesisService
-from research.reasoning.retriever import RetrievalQuery, RetrievedItem
-from llm.models import ChatResponse
-from llm.client import OllamaClient
-from memory.storage_adapter import SheppardStorageAdapter
-from memory.adapters.postgres import PostgresStoreImpl
-from memory.adapters.redis import RedisStoresImpl
-from memory.adapters.chroma import ChromaSemanticStoreImpl
+from src.research.condensation.pipeline import DistillationPipeline, CondensationPriority
+from src.research.reasoning.v3_retriever import V3Retriever
+from src.research.reasoning.assembler import EvidenceAssembler, EvidencePacket, SectionPlan
+from src.research.reasoning.synthesis_service import SynthesisService
+from src.research.reasoning.retriever import RetrievalQuery, RetrievedItem
+from src.llm.models import ChatResponse
+from src.llm.client import OllamaClient
+from src.memory.storage_adapter import SheppardStorageAdapter
+from src.memory.adapters.postgres import PostgresStoreImpl
+from src.memory.adapters.redis import RedisStoresImpl
+from src.memory.adapters.chroma import ChromaSemanticStoreImpl
 
 # --- HELPERS ---
 
@@ -162,7 +162,7 @@ async def test_condensation_pipeline_full_flow():
          patch('src.utils.distillation_pipeline._embed_source_quality_check', AsyncMock(return_value=(0.1, 0.9, False))), \
          patch('src.utils.distillation_pipeline._embed_atom_dedup', AsyncMock(side_effect=lambda atoms, *args, **kwargs: atoms)), \
          patch('src.utils.distillation_pipeline._check_semantic_drift', AsyncMock(return_value=(0.9, False))), \
-         patch('research.condensation.pipeline.extract_technical_atoms', AsyncMock(return_value=[
+         patch('src.research.condensation.pipeline.extract_technical_atoms', AsyncMock(return_value=[
             {"type": "claim", "content": "Technical content for testing", "concept": "testing", "confidence": 0.9}
          ])) as mock_extract:
         
@@ -249,7 +249,7 @@ async def test_condensation_db_backed_storage(adapter_real, high_quality_technic
 
     atom_text = "Vector databases store embedding representations for semantic retrieval"
     # Exhaustively patch extraction entry points
-    with patch('research.condensation.pipeline.extract_technical_atoms', AsyncMock(return_value=[
+    with patch('src.research.condensation.pipeline.extract_technical_atoms', AsyncMock(return_value=[
             {"type": "claim", "content": atom_text, "concept": "postgres", "confidence": 0.99}
          ])), \
          patch('src.utils.source_classifier.classify_source_quality', return_value="standard"), \

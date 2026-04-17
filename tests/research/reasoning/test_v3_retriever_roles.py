@@ -118,6 +118,56 @@ def test_rerank_prefers_exact_and_authority_bound_items():
     assert [item.content for item in ranked] == ["exact authority", "baseline"]
 
 
+def test_link_context_signals_marks_authority_artifact_and_contradiction_bindings():
+    retriever = V3Retriever(FakeAdapter())
+    item = RetrievedItem(
+        content="feature flags conflict in rollout policy",
+        source="pg",
+        strategy="semantic",
+        relevance_score=0.7,
+        trust_score=0.7,
+        recency_days=3,
+        metadata={"atom_id": "atom-2", "authority_record_id": "auth-1"},
+    )
+    authority_items = [
+        RetrievedItem(
+            content="authority summary",
+            source="authority",
+            strategy="authority",
+            metadata={"authority_record_id": "auth-1"},
+        )
+    ]
+    contradiction_items = [
+        RetrievedItem(
+            content="conflict",
+            source="contradiction",
+            strategy="contradiction",
+            metadata={"atom_a_id": "atom-2", "atom_b_id": "atom-9"},
+        )
+    ]
+    project_artifacts = [
+        RetrievedItem(
+            content="artifact",
+            source="artifact",
+            strategy="project",
+            metadata={"authority_record_id": "auth-1"},
+        )
+    ]
+
+    retriever._link_context_signals(
+        [item],
+        authority_items,
+        contradiction_items,
+        project_artifacts,
+        "feature flags rollout policy",
+    )
+
+    assert item.metadata["authority_aligned"] is True
+    assert item.metadata["artifact_aligned"] is True
+    assert item.metadata["contradiction_bound"] is True
+    assert item.metadata["query_overlap"] > 0
+
+
 @pytest.mark.asyncio
 async def test_retrieve_populates_project_artifacts_and_unresolved_slots():
     retriever = V3Retriever(FakeAdapter())

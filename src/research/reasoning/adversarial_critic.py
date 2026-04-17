@@ -64,8 +64,11 @@ Your task: produce the strongest possible challenge to the Analyst's position.
 Output JSON with exactly this schema:
 {{
   "strongest_objection": "The single most powerful argument against the Analyst's diagnosis or recommendation — with citations",
+  "overclaims": ["claims the analyst made too broadly or without enough support"],
   "overlooked_atoms": ["Global IDs of atoms the Analyst underweighted or ignored that change the picture"],
   "overlooked_reasoning": "Why those atoms matter and what they imply",
+  "hidden_assumptions": ["assumptions the analyst relied on but did not defend"],
+  "required_revisions": ["concrete revision actions the analyst must apply"],
   "contradiction_verdict": "Did the Analyst handle the flagged contradictions correctly? If not, what was missed?",
   "counter_recommendation": "An alternative recommendation if the evidence supports a different path — null if the Analyst's recommendation is defensible",
   "counter_rationale": "Why the counter-recommendation is better supported — null if no counter",
@@ -79,8 +82,11 @@ Be specific. Vague objections are useless. If you cannot find a strong objection
 @dataclass
 class CriticOutput:
     strongest_objection: str
+    overclaims: List[str] = field(default_factory=list)
     overlooked_atoms: List[str] = field(default_factory=list)
     overlooked_reasoning: str = ""
+    hidden_assumptions: List[str] = field(default_factory=list)
+    required_revisions: List[str] = field(default_factory=list)
     contradiction_verdict: str = ""
     counter_recommendation: Optional[str] = None
     counter_rationale: Optional[str] = None
@@ -112,7 +118,7 @@ class AdversarialCritic:
         lines = ["FLAGGED CONTRADICTIONS:"]
         for c in packet.contradictions:
             lines.append(
-                f"  {c.get('description', '')}: "
+                f"  [{c.get('type', 'direct')}] {c.get('description', '')}: "
                 f"A='{c.get('claim_a', '')}' vs B='{c.get('claim_b', '')}'"
             )
         return "\n".join(lines)
@@ -143,13 +149,17 @@ class AdversarialCritic:
             )
             match = re.search(r'\{.*\}', raw, re.DOTALL)
             if not match:
+                logger.warning("[Critic] parse_failure reason=no_json")
                 raise ValueError("No JSON in critic response")
             data = json.loads(match.group(0))
 
             return CriticOutput(
                 strongest_objection=data.get("strongest_objection", "No significant objection found."),
+                overclaims=data.get("overclaims", []),
                 overlooked_atoms=data.get("overlooked_atoms", []),
                 overlooked_reasoning=data.get("overlooked_reasoning", ""),
+                hidden_assumptions=data.get("hidden_assumptions", []),
+                required_revisions=data.get("required_revisions", []),
                 contradiction_verdict=data.get("contradiction_verdict", ""),
                 counter_recommendation=data.get("counter_recommendation"),
                 counter_rationale=data.get("counter_rationale"),
@@ -159,6 +169,7 @@ class AdversarialCritic:
 
         except Exception as exc:
             logger.error("[Critic] Critique failed: %s", exc)
+            logger.warning("[Critic] fallback_invoked")
             return CriticOutput(
                 strongest_objection="Adversarial review could not be completed.",
                 synthesis="Review the evidence and Analyst output manually.",
