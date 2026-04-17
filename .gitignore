@@ -26,6 +26,9 @@ dump.rdb
 # Claude worktrees
 .claude/worktrees/
 .claude/settings.local.json
+.codex/
+.qwen/
+fuckingemini.md
 
 # Planning docs (local tracking only)
 .planning/
