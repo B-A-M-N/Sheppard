@@ -3,7 +3,7 @@ Data models for LLM interactions.
 """
 
 from typing import Optional, List, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 class ChatMessage(BaseModel):
     """Model representing a chat message."""
@@ -12,7 +12,7 @@ class ChatMessage(BaseModel):
     content: str = Field(..., description="Content of the message")
     images: Optional[List[str]] = Field(None, description="Optional list of base64 encoded images")
     
-    class Config:
+    model_config = ConfigDict(
         json_schema_extra = {
             "example": {
                 "role": "user",
@@ -20,6 +20,7 @@ class ChatMessage(BaseModel):
                 "images": None
             }
         }
+    )
 
 class ChatResponse(BaseModel):
     """Model representing a chat response."""
@@ -32,7 +33,7 @@ class ChatResponse(BaseModel):
         description="Additional response metadata"
     )
     
-    class Config:
+    model_config = ConfigDict(
         json_schema_extra = {
             "example": {
                 "content": "Neural networks are...",
@@ -44,3 +45,4 @@ class ChatResponse(BaseModel):
                 }
             }
         }
+    )

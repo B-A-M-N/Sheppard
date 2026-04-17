@@ -7,6 +7,7 @@ and mounts all API + WebSocket routes.
 
 import logging
 import sys
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -29,24 +30,36 @@ logger = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).parent / "static"
 
 
+async def _initialize_system_background(app: FastAPI) -> None:
+    """Initialize the full backend stack without blocking ASGI startup."""
+    logger.info("[Web] Initializing Sheppard system in background...")
+    success, error = await system_manager.initialize()
+    app.state.system_init_error = error
+    if not success:
+        logger.error("[Web] System init failed: %s", error)
+        return
+
+    chat_app = ChatApp()
+    await chat_app.initialize(system_manager=system_manager)
+    app.state.chat_app = chat_app
+    logger.info("[Web] System ready.")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize system on startup, clean up on shutdown."""
     log_broadcaster.install()
-    logger.info("[Web] Initializing Sheppard system...")
-    success, error = await system_manager.initialize()
-    if not success:
-        logger.error("[Web] System init failed: %s", error)
-        # Still serve — endpoints will return 503
-    else:
-        chat_app = ChatApp()
-        await chat_app.initialize(system_manager=system_manager)
-        app.state.chat_app = chat_app
-        logger.info("[Web] System ready.")
+    app.state.chat_app = None
+    app.state.system_init_error = None
+    app.state.system_init_task = asyncio.create_task(_initialize_system_background(app))
+    logger.info("[Web] Startup task scheduled; serving while backend initializes")
 
     yield
 
     logger.info("[Web] Shutting down...")
+    init_task = getattr(app.state, "system_init_task", None)
+    if init_task and not init_task.done():
+        init_task.cancel()
     await system_manager.cleanup()
 
 
@@ -90,4 +103,19 @@ async def index():
 @app.get("/health")
 async def health():
     status = system_manager.status()
-    return {"ok": status.get("initialized", False), "missions": len(status.get("missions", {}))}
+    total_missions = len(status.get("missions", {}))
+    total_atoms = None
+    if getattr(system_manager, "adapter", None) and getattr(system_manager.adapter, "pg", None):
+        try:
+            async with system_manager.adapter.pg.pool.acquire() as conn:
+                total_missions = await conn.fetchval("SELECT COUNT(*) FROM mission.research_missions")
+                total_atoms = await conn.fetchval("SELECT COUNT(*) FROM knowledge.knowledge_atoms")
+        except Exception:
+            pass
+    return {
+        "ok": status.get("initialized", False),
+        "missions": total_missions,
+        "runtime_missions": len(status.get("missions", {})),
+        "atoms": total_atoms,
+        "startup": status.get("startup", {}),
+    }

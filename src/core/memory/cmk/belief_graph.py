@@ -516,6 +516,97 @@ class BeliefGraph:
 
     # ── Persistence ──
 
+    async def load_from_db(self) -> int:
+        """Load persisted belief nodes and edges into memory."""
+        if self.pg_pool is None:
+            return 0
+
+        def _parse_embedding(value):
+            if value is None:
+                return None
+            if isinstance(value, str):
+                try:
+                    return json.loads(value)
+                except Exception:
+                    return None
+            try:
+                return list(value)
+            except TypeError:
+                return None
+
+        try:
+            async with self.pg_pool.acquire() as conn:
+                node_rows = await conn.fetch(
+                    """
+                    SELECT id, canonical_id, claim, domain, authority_score,
+                           stability_score, contradiction_pressure, revision_count,
+                           embedding, created_at, updated_at
+                    FROM belief_nodes
+                    """
+                )
+                edge_rows = await conn.fetch(
+                    """
+                    SELECT id, from_node, to_node, relation_type, strength,
+                           evidence_atom_ids, reason, created_at
+                    FROM belief_edges
+                    """
+                )
+        except Exception as e:
+            err = str(e).lower()
+            if "does not exist" in err or "undefinedtable" in err or "relation" in err:
+                logger.debug(f"[BeliefGraph] Load skipped — table missing: {e}")
+                return 0
+            raise
+
+        self._nodes = {}
+        self._edges = {}
+        self._outgoing = {}
+        self._incoming = {}
+
+        for row in node_rows:
+            node = BeliefNode(
+                id=str(row["id"]),
+                claim=row["claim"],
+                domain=row["domain"] or "",
+                authority_score=float(row["authority_score"] or 0.0),
+                stability_score=float(row["stability_score"] or 0.0),
+                contradiction_pressure=float(row["contradiction_pressure"] or 0.0),
+                revision_count=int(row["revision_count"] or 0),
+                embedding=_parse_embedding(row["embedding"]),
+                canonical_id=str(row["canonical_id"]) if row["canonical_id"] is not None else None,
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            )
+            self._nodes[node.id] = node
+            self._outgoing[node.id] = []
+            self._incoming[node.id] = []
+
+        for row in edge_rows:
+            from_node = str(row["from_node"])
+            to_node = str(row["to_node"])
+            if from_node not in self._nodes or to_node not in self._nodes:
+                continue
+
+            edge = BeliefEdge(
+                id=str(row["id"]),
+                from_node=from_node,
+                to_node=to_node,
+                relation_type=row["relation_type"],
+                strength=float(row["strength"] or 0.0),
+                evidence_atom_ids=list(row["evidence_atom_ids"] or []),
+                reason=row["reason"] or "",
+                created_at=row["created_at"],
+            )
+            self._edges[edge.id] = edge
+            self._outgoing[from_node].append(edge.id)
+            self._incoming[to_node].append(edge.id)
+            self._nodes[from_node].neighbor_count = len(self._outgoing[from_node])
+            self._nodes[from_node].edge_types.add(edge.relation_type)
+            self._nodes[to_node].neighbor_count = len(self._incoming[to_node])
+            self._nodes[to_node].edge_types.add(edge.relation_type)
+
+        return len(self._nodes)
+
     async def _persist_node(self, node: BeliefNode):
         """Persist a node to Postgres."""
         if not self.pg_pool:

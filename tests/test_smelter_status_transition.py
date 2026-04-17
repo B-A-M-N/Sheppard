@@ -8,14 +8,10 @@ Verifies that DistillationPipeline correctly updates source status:
 This closes the soft acceptance bug identified in Phase 09.
 """
 import pytest
-import sys
-import os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
-
 import asyncio
 from unittest.mock import patch, MagicMock, AsyncMock
 
-from research.condensation.pipeline import DistillationPipeline
+from src.research.condensation.pipeline import DistillationPipeline
 
 # Gate 0a requires at least 50 words; use this in all tests that need real content
 _LONG_CONTENT = (
@@ -71,7 +67,7 @@ async def test_condensed_when_atoms_stored():
 
     pipeline = DistillationPipeline(mock_ollama, None, mock_budget, adapter=mock_adapter)
 
-    with patch('research.condensation.pipeline.extract_technical_atoms', AsyncMock(return_value=[
+    with patch('src.research.condensation.pipeline.extract_technical_atoms', AsyncMock(return_value=[
         {"type": "claim", "content": "atom", "confidence": 0.9}
     ])):
         await pipeline.run("m1", MagicMock())
@@ -112,7 +108,7 @@ async def test_rejected_when_zero_atoms():
 
     pipeline = DistillationPipeline(mock_ollama, None, mock_budget, adapter=mock_adapter)
 
-    with patch('research.condensation.pipeline.extract_technical_atoms', AsyncMock(return_value=[])):
+    with patch('src.research.condensation.pipeline.extract_technical_atoms', AsyncMock(return_value=[])):
         await pipeline.run("m1", MagicMock())
 
     execute_calls = mock_conn.execute.call_args_list

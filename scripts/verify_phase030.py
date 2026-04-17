@@ -83,10 +83,11 @@ all_pass &= check(
     "memory_integration.py does not import MemoryManager at top level"
 )
 
-print("\n" + "="*60)
-if all_pass:
-    print("PHASE 03.0 VERIFICATION: PASS")
-    sys.exit(0)
-else:
-    print("PHASE 03.0 VERIFICATION: FAIL")
-    sys.exit(1)
+if __name__ == "__main__":
+    print("\n" + "="*60)
+    if all_pass:
+        print("PHASE 03.0 VERIFICATION: PASS")
+        sys.exit(0)
+    else:
+        print("PHASE 03.0 VERIFICATION: FAIL")
+        sys.exit(1)

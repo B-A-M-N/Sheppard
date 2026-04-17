@@ -16,7 +16,7 @@
 - ✅ `src/research/reasoning/assembler.py` — modified: added `derived_claims` to EvidencePacket, calls `DerivationEngine().run(items_parallel)`
 - ✅ `tests/research/derivation/test_engine.py` — 18 tests (all passing)
 - ✅ `tests/retrieval/test_validator_derived.py` — 7 tests for derived claim validation (all passing)
-- ✅ All 57 tests pass (18 derivation + 24 ranking + 8 phase-11 invariants + 7 validator, zero regressions)
+- ✅ 398 tests collected in the current suite
 
 ## Analysis & Rationale: Validation and Core Engine Complete
 
@@ -55,9 +55,10 @@ The validator already performs full dual-atom validation against derived claims 
 | 12-F | — | ✅ CONTEXT.md | ⬜ Planned | Adversarial Critic |
 
 ## Shipped in v1.2
-- **Derived Claim Engine**: Deterministic, non-LLM transformations (delta, percent_change) integrated into `EvidencePacket`.
-- **Dual Validator**: Extended `validate_response_grounding` to verify multi-citation numeric claims via recomputation.
+- **Derived Claim Engine**: Deterministic, non-LLM transformations (delta, percent_change, rank, ratio, chronology, support/conflict rollups) integrated into `EvidencePacket`.
+- **Dual Validator**: Extended `validate_response_grounding` in `src/retrieval/validator.py` to verify multi-citation numeric and comparative claims via recomputation.
 - **V3 Authority Core**: Initial implementation of `AuthorityStore` and `DomainAuthorityRecord` for technical authority tracking.
+- **DB-backed Integration**: Restored live PostgreSQL path for V3 missions with automatic service startup and nullable application evidence bindings.
 
 ## Post-v1.2 Stabilization
 - **Live DB-backed integration path restored**: `SystemManager.initialize()` now auto-starts local PostgreSQL when the configured V3 DSN targets localhost and the service is down.
@@ -68,7 +69,7 @@ The validator already performs full dual-atom validation against derived claims 
 ## Spec Authority (12-A)
 
 - Derived claims: deterministic, LLM-free, pure functions, SKIP on failure
-- 3 rules only: delta, percent_change, rank
+- 7 rules: delta, percent_change, rank, ratio, chronology, simple_support_rollup, simple_conflict_rollup
 - Ephemeral on EvidencePacket (not persisted to Postgres)
 - No new citation types — writer cites atoms only
 - SHA-256 claim ID from sorted atom IDs for determinism
@@ -81,9 +82,9 @@ The validator already performs full dual-atom validation against derived claims 
 | src/research/derivation/engine.py | ✅ Created |
 | src/research/derivation/__init__.py | ✅ Created |
 | src/research/reasoning/assembler.py | ✅ Modified | 12-A integration done |
-| src/retrieval/validator.py | ⬜ Pending | 12-A + 12-B extension needed |
+| src/retrieval/validator.py | ✅ Modified | 12-A + 12-B extension complete |
 | tests/research/derivation/test_engine.py | ✅ Created | 18 tests passing |
-| tests/retrieval/test_validator_derived.py | ⬜ Pending | 12-B tests needed |
+| tests/retrieval/test_validator_derived.py | ✅ Created | 7 tests passing |
 
 ## Git State
 

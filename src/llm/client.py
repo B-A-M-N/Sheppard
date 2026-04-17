@@ -247,6 +247,7 @@ class OllamaClient:
                 sock_read=settings.REQUEST_TIMEOUT
             )
             connector = aiohttp.TCPConnector(force_close=True)
+            saw_content = False
             async with aiohttp.ClientSession(base_url=config.api_host, timeout=timeout, connector=connector) as session:
                 async with session.post("/api/chat", json=payload) as response:
                     if response.status != 200:
@@ -257,10 +258,16 @@ class OllamaClient:
                             try:
                                 chunk = json.loads(line)
                                 if 'message' in chunk and 'content' in chunk['message']:
+                                    saw_content = True
                                     yield chunk['message']['content']
                             except: continue
+            if not saw_content:
+                raise ServiceUnavailableError(
+                    f"chat_stream returned no content from {config.api_host} for model {model}"
+                )
         except Exception as e:
             logger.error(f"Chat stream failed on {config.api_host}: {e}")
+            raise
 
     async def cleanup(self) -> None:
         for host, session in self.sessions.items():

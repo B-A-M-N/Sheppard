@@ -53,6 +53,8 @@ async def list_missions():
 
     # Pull atom counts per mission in one query
     atom_counts: dict[str, int] = {}
+    source_counts: dict[str, int] = {}
+    byte_counts: dict[str, int] = {}
     try:
         async with pg.pool.acquire() as conn:
             count_rows = await conn.fetch(
@@ -64,8 +66,22 @@ async def list_missions():
             )
             for r in count_rows:
                 atom_counts[r["topic_id"]] = r["cnt"]
+
+            source_rows = await conn.fetch(
+                """
+                SELECT s.mission_id,
+                       COUNT(*) AS source_count,
+                       COALESCE(SUM(tr.byte_size), 0) AS bytes_ingested
+                FROM corpus.sources s
+                LEFT JOIN corpus.text_refs tr ON tr.blob_id = s.canonical_text_ref
+                GROUP BY s.mission_id
+                """
+            )
+            for r in source_rows:
+                source_counts[r["mission_id"]] = r["source_count"]
+                byte_counts[r["mission_id"]] = r["bytes_ingested"]
     except Exception as e:
-        logger.warning("[missions] atom count query failed: %s", e)
+        logger.warning("[missions] aggregate count query failed: %s", e)
 
     missions = []
     for row in rows:
@@ -79,8 +95,8 @@ async def list_missions():
             "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
             "completed_at": row["completed_at"].isoformat() if row.get("completed_at") else None,
             "atom_count": _num(atom_counts.get(mid), 0),
-            "source_count": _num(row.get("source_count"), 0),
-            "bytes_ingested": _num(row.get("bytes_ingested"), 0),
+            "source_count": _num(source_counts.get(mid), row.get("source_count", 0)),
+            "bytes_ingested": _num(byte_counts.get(mid), row.get("bytes_ingested", 0)),
             "budget_bytes": _num(row.get("budget_bytes"), 0),
             "crawling": live_info.get("crawling", False),
             "usage": live_info.get("usage", "0.0%"),
@@ -101,6 +117,19 @@ async def get_mission(mission_id: str):
         async with pg.pool.acquire() as conn:
             atom_count = await conn.fetchval(
                 "SELECT COUNT(*) FROM knowledge.knowledge_atoms WHERE topic_id = $1",
+                mission_id,
+            )
+            source_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM corpus.sources WHERE mission_id = $1",
+                mission_id,
+            )
+            bytes_ingested = await conn.fetchval(
+                """
+                SELECT COALESCE(SUM(tr.byte_size), 0)
+                FROM corpus.sources s
+                LEFT JOIN corpus.text_refs tr ON tr.blob_id = s.canonical_text_ref
+                WHERE s.mission_id = $1
+                """,
                 mission_id,
             )
 
@@ -127,8 +156,8 @@ async def get_mission(mission_id: str):
                 "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
                 "completed_at": row["completed_at"].isoformat() if row.get("completed_at") else None,
                 "atom_count": _num(atom_count),
-                "source_count": _num(row.get("source_count"), 0),
-                "bytes_ingested": _num(row.get("bytes_ingested"), 0),
+                "source_count": _num(source_count, row.get("source_count", 0)),
+                "bytes_ingested": _num(bytes_ingested, row.get("bytes_ingested", 0)),
                 "budget_bytes": _num(row.get("budget_bytes"), 0),
             },
             "events": [

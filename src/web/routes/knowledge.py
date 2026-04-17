@@ -8,11 +8,13 @@ GET /api/knowledge/stats          — overall knowledge base stats
 """
 
 import logging
+import json
 
 from fastapi import APIRouter, Query, HTTPException
 from fastapi.responses import JSONResponse
 
 from src.core.system import system_manager
+from src.research.reasoning.trust_state import derive_trust_state
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -40,6 +42,26 @@ _NOISE_PATTERNS: list[str] = [f"%{frag}%" for frag in [
 ]]
 
 
+def _json_dict(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def _authority_trust_state(status_value, advisory_value=None, reuse_value=None) -> str:
+    return derive_trust_state(
+        _json_dict(status_value),
+        _json_dict(advisory_value),
+        _json_dict(reuse_value),
+    )
+
+
 @router.get("/knowledge/stats")
 async def knowledge_stats():
     """High-level numbers: total atoms, missions, concepts, sources."""
@@ -58,6 +80,25 @@ async def knowledge_stats():
             active = await conn.fetchval(
                 "SELECT COUNT(*) FROM mission.research_missions WHERE status='active'"
             )
+            trust_rows = await conn.fetch(
+                """
+                SELECT status_json, advisory_layer_json, reuse_json
+                FROM authority.authority_records
+                """
+            )
+        trust_states = {
+            "forming": 0,
+            "synthesized": 0,
+            "contested": 0,
+            "stale": 0,
+            "reusable": 0,
+        }
+        for row in trust_rows:
+            trust_states[_authority_trust_state(
+                row.get("status_json"),
+                row.get("advisory_layer_json"),
+                row.get("reuse_json"),
+            )] += 1
         return JSONResponse({
             "total_atoms": total_atoms,
             "total_missions": total_missions,
@@ -65,6 +106,7 @@ async def knowledge_stats():
             "active_missions": active,
             "total_concepts": total_concepts,
             "total_sources": total_sources,
+            "trust_states": trust_states,
         })
     except Exception as e:
         logger.error("[knowledge/stats] %s", e)
@@ -126,11 +168,13 @@ async def knowledge_graph(mission_id: str = Query(None)):
 
                 if topic_id not in nodes:
                     m = mission_map.get(topic_id, {})
+                    trust_row = m.get("status_json") if isinstance(m, dict) else None
                     nodes[topic_id] = {
                         "id": topic_id,
                         "label": m.get("title", topic_id[:8]),
                         "type": "mission",
                         "status": m.get("status", "unknown"),
+                        "trust_state": m.get("trust_state", "forming"),
                     }
 
                 cid = f"concept:{concept}"
@@ -149,7 +193,10 @@ async def knowledge_graph(mission_id: str = Query(None)):
                            MAX(m.status) as status,
                            SUM(ka_count.cnt) as total_atoms,
                            COUNT(DISTINCT m.mission_id) as run_count,
-                           MAX(ka_count.avg_conf) as avg_conf
+                           MAX(ka_count.avg_conf) as avg_conf,
+                           MAX(ar.status_json) as status_json,
+                           MAX(ar.advisory_layer_json) as advisory_layer_json,
+                           MAX(ar.reuse_json) as reuse_json
                     FROM mission.research_missions m
                     JOIN (
                         SELECT topic_id,
@@ -158,6 +205,7 @@ async def knowledge_graph(mission_id: str = Query(None)):
                         FROM knowledge.knowledge_atoms
                         GROUP BY topic_id
                     ) ka_count ON ka_count.topic_id = m.mission_id
+                    LEFT JOIN authority.authority_records ar ON ar.topic_id = m.mission_id
                     GROUP BY LOWER(TRIM(m.title))
                     ORDER BY total_atoms DESC
                     LIMIT 60
@@ -176,6 +224,11 @@ async def knowledge_graph(mission_id: str = Query(None)):
                     "weight": int(r["total_atoms"]),
                     "run_count": int(r["run_count"]),
                     "avg_conf": round(float(r["avg_conf"] or 0), 2),
+                    "trust_state": _authority_trust_state(
+                        r.get("status_json"),
+                        r.get("advisory_layer_json"),
+                        r.get("reuse_json"),
+                    ),
                 }
 
         return JSONResponse({
@@ -235,10 +288,14 @@ async def list_atoms(
                     f"""
                     SELECT ka.atom_id, ka.statement, ka.atom_type, ka.confidence,
                            ka.importance, ka.created_at, ka.topic_id,
-                           m.title as mission_title
+                           m.title as mission_title,
+                           ar.status_json,
+                           ar.advisory_layer_json,
+                           ar.reuse_json
                     FROM knowledge.knowledge_atoms ka
                     JOIN knowledge.atom_entities ae ON ae.atom_id = ka.atom_id
                     JOIN mission.research_missions m ON m.mission_id = ka.topic_id
+                    LEFT JOIN authority.authority_records ar ON ar.topic_id = ka.topic_id
                     WHERE {where}
                       AND ae.entity_name ILIKE ${p}
                       AND ae.entity_type = 'concept'
@@ -263,9 +320,13 @@ async def list_atoms(
                     f"""
                     SELECT ka.atom_id, ka.statement, ka.atom_type, ka.confidence,
                            ka.importance, ka.created_at, ka.topic_id,
-                           m.title as mission_title
+                           m.title as mission_title,
+                           ar.status_json,
+                           ar.advisory_layer_json,
+                           ar.reuse_json
                     FROM knowledge.knowledge_atoms ka
                     JOIN mission.research_missions m ON m.mission_id = ka.topic_id
+                    LEFT JOIN authority.authority_records ar ON ar.topic_id = ka.topic_id
                     WHERE {where}
                     ORDER BY {sort_col}
                     LIMIT ${p} OFFSET ${p+1}
@@ -292,6 +353,11 @@ async def list_atoms(
                     "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
                     "mission_title": r.get("mission_title", ""),
                     "topic_id": r["topic_id"],
+                    "trust_state": _authority_trust_state(
+                        r.get("status_json"),
+                        r.get("advisory_layer_json"),
+                        r.get("reuse_json"),
+                    ),
                 }
                 for r in rows
             ],

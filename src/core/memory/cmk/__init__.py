@@ -76,6 +76,16 @@ from .config import CMKConfig
 from .store import CMKStore
 from .runtime import CMKRuntime
 from .integration import CMKIntegration
+from .working_state import (
+    WorkingState,
+    ActiveConcept,
+    ActiveContradiction,
+    SoftHypothesis,
+)
+from .state_store import WorkingStateStore
+from .escalation_policy import EscalationPolicy, EscalationDecision
+from .session_runtime import CognitiveSessionRuntime, SessionResult
+from .chat_bridge import CMKChatBridge
 
 __all__ = [
     # v1 Pipeline
@@ -133,6 +143,16 @@ __all__ = [
     "CMKStore",
     "CMKRuntime",
     "CMKIntegration",
+    "WorkingState",
+    "ActiveConcept",
+    "ActiveContradiction",
+    "SoftHypothesis",
+    "WorkingStateStore",
+    "EscalationPolicy",
+    "EscalationDecision",
+    "CognitiveSessionRuntime",
+    "SessionResult",
+    "CMKChatBridge",
 
     # Activation + Authority + Consolidation
     "ActivationMemory",

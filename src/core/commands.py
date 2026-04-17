@@ -37,6 +37,7 @@ class CommandHandler:
             
             handlers = {
                 '/help': self._handle_help, '/h': self._handle_help,
+                '/health': self._handle_health,
                 '/learn': self._handle_learn,
                 '/knowledge': self._handle_knowledge, '/kb': self._handle_knowledge,
                 '/stop': self._handle_stop,
@@ -331,9 +332,14 @@ class CommandHandler:
         table.add_column("Topic", style="cyan")
         table.add_column("State", style="yellow")
         table.add_column("Raw Data", style="green")
-        
+        table.add_column("Frontier", style="magenta")
+
         for tid, info in missions.items():
-            table.add_row(tid, info['name'], "Running" if info['crawling'] else "Idle", f"{info['raw_mb']} MB")
+            frontier = info.get('frontier_state', {})
+            frontier_label = frontier.get("failure_reason") or (
+                f"respawns={frontier.get('respawn_count', 0)}" if frontier else "—"
+            )
+            table.add_row(tid, info['name'], "Running" if info['crawling'] else "Idle", f"{info['raw_mb']} MB", frontier_label)
         
         self.console.print(table)
 
@@ -443,6 +449,7 @@ class CommandHandler:
     async def _handle_help(self, *args) -> None:
         table = Table(title="V2 Commands")
         table.add_column("Command"); table.add_column("Usage")
+        table.add_row("/health", "Show web/system startup health")
         table.add_row("/learn", "Start background mission")
         table.add_row("/knowledge", "View all stored topics and material")
         table.add_row("/query", "Query the knowledge stack")
@@ -452,6 +459,36 @@ class CommandHandler:
         table.add_row("/status", "Full system dashboard")
         table.add_row("/settings", "Modify configuration")
         self.console.print(table)
+
+    async def _handle_health(self, *args, _tui=None) -> None:
+        health = system_manager.status()
+        startup = health.get("startup", {})
+        total_missions = len(health.get("missions", {}))
+        total_atoms = None
+        if getattr(system_manager, "adapter", None) and getattr(system_manager.adapter, "pg", None):
+            try:
+                async with system_manager.adapter.pg.pool.acquire() as conn:
+                    total_missions = await conn.fetchval("SELECT COUNT(*) FROM mission.research_missions")
+                    total_atoms = await conn.fetchval("SELECT COUNT(*) FROM knowledge.knowledge_atoms")
+            except Exception:
+                pass
+        lines = [
+            "═══ Health ═══",
+            f"ok: {health.get('initialized', False)}",
+            f"startup stage: {startup.get('stage', 'unknown')}",
+            f"missions: {total_missions}",
+            f"runtime missions: {len(health.get('missions', {}))}",
+        ]
+        if total_atoms is not None:
+            lines.append(f"atoms: {total_atoms}")
+        if startup.get("last_error"):
+            lines.append(f"last error: {startup['last_error']}")
+
+        text = "\n".join(lines)
+        if _tui:
+            _tui.append_chat(text, prefix="", flush=True)
+        else:
+            self.console.print(text)
 
     async def handle_command_with_tui(self, input_text: str, tui) -> None:
         """
@@ -473,6 +510,7 @@ class CommandHandler:
                 '/a':       self._handle_analyze,
                 '/knowledge': self._handle_knowledge,
                 '/kb':        self._handle_knowledge,
+                '/health':    self._handle_health,
             }
 
             if command in tui_handlers:

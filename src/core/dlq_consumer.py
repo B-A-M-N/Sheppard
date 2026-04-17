@@ -73,13 +73,13 @@ class DLQConsumer:
                 url = payload.get("url", "")
                 mission_id = payload.get("mission_id", "")
                 if url and mission_id:
-                    await self.redis.rpush("queue:scraping", json.dumps({
+                    await self.redis.enqueue_job("queue:scraping", {
                         "url": url,
                         "mission_id": mission_id,
                         "topic_id": payload.get("topic_id", mission_id),
                         "url_hash": payload.get("url_hash", ""),
                         "retry_count": retry_count + 1,
-                    }))
+                    })
                     await self.pg.update_row(
                         "audit.dead_letter_queue", "id",
                         {"id": entry_id, "status": "retrying", "retry_count": retry_count + 1},

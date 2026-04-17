@@ -89,16 +89,25 @@ COMMENT ON TABLE audit.pipeline_metrics IS
 
 -- Enforce valid states at the database level.
 -- Python enforces transitions; Postgres enforces validity.
-ALTER TABLE corpus.sources
-    DROP CONSTRAINT IF EXISTS chk_source_status;
-
-ALTER TABLE corpus.sources
-    ADD CONSTRAINT chk_source_status
-    CHECK (status IN (
-        'discovered', 'fetched', 'extracted', 'condensed',
-        'indexed', 'filtered_out', 'rejected', 'error',
-        'retrying', 'dead_letter'
-    ));
+-- Wrapped in a DO block so the ALTER TABLE is skipped (no lock acquired)
+-- when the constraint already exists — avoids lock contention on busy tables.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.table_constraints
+        WHERE constraint_name = 'chk_source_status'
+          AND table_schema = 'corpus'
+          AND table_name = 'sources'
+    ) THEN
+        ALTER TABLE corpus.sources
+            ADD CONSTRAINT chk_source_status
+            CHECK (status IN (
+                'discovered', 'fetched', 'extracted', 'condensed',
+                'indexed', 'filtered_out', 'rejected', 'error',
+                'retrying', 'dead_letter'
+            ));
+    END IF;
+END $$;
 
 -- ────────────────────────────────────────────────────────────
 -- 5. Verification

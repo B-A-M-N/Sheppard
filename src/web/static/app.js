@@ -25,6 +25,10 @@ const state = {
     filter: '',
     paused: false,
   },
+  health: {
+    ok: false,
+    startup: { stage: 'initializing', last_error: null },
+  },
   stats: {},
   missions: [],
 };
@@ -34,6 +38,10 @@ let chatWs = null;
 let analyzeWs = null;
 let logsWs = null;
 let logsReconnectTimer = null;
+
+function wsBase() {
+  return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
+}
 
 // ── Tab switching ──────────────────────────────────────────
 function switchTab(name) {
@@ -57,32 +65,52 @@ async function api(path, opts = {}) {
 // ── Status bar ─────────────────────────────────────────────
 async function refreshStatus() {
   try {
-    const [missionsData, stats] = await Promise.all([
-      api('/missions'),
-      api('/knowledge/stats'),
-    ]);
+    const health = await fetch('/health').then(async (res) => {
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      return res.json();
+    });
+    state.health = health;
 
-    state.missions = missionsData.missions || [];
-    state.stats = stats;
-
-    const active = state.missions.filter(m => m.crawling).length;
     const dot = document.getElementById('status-dot');
     const statusText = document.getElementById('status-text');
 
-    if (active > 0) {
-      dot.className = 'stat-dot active';
-      statusText.textContent = `${active} active`;
-    } else {
+    if (!health.ok) {
       dot.className = 'stat-dot idle';
-      statusText.textContent = 'idle';
+      statusText.textContent = `starting: ${health.startup?.stage || 'initializing'}`;
+    } else {
+      const [missionsData, stats] = await Promise.all([
+        api('/missions'),
+        api('/knowledge/stats'),
+      ]);
+      state.missions = missionsData.missions || [];
+      state.stats = stats;
+
+      const active = state.missions.filter(m => m.crawling).length;
+      if (active > 0) {
+        dot.className = 'stat-dot active';
+        statusText.textContent = `${active} active`;
+      } else {
+        dot.className = 'stat-dot idle';
+        statusText.textContent = 'idle';
+      }
+
+      document.getElementById('status-atoms').textContent = `${stats.total_atoms.toLocaleString()} atoms`;
+      document.getElementById('status-missions').textContent = `${stats.total_missions.toLocaleString()} missions`;
+      const trust = stats.trust_states || {};
+      const contested = trust.contested || 0;
+      const reusable = trust.reusable || 0;
+      document.getElementById('status-trust').textContent = `${reusable} reusable / ${contested} contested`;
+
+      renderMissionFilters();
+      return;
     }
-
-    document.getElementById('status-atoms').textContent = `${stats.total_atoms.toLocaleString()} atoms`;
-    document.getElementById('status-missions').textContent = `${stats.total_missions.toLocaleString()} missions`;
-
-    renderMissionFilters();
+    document.getElementById('status-atoms').textContent = `${Number(health.atoms || 0).toLocaleString()} atoms`;
+    document.getElementById('status-missions').textContent = `${Number(health.missions || 0).toLocaleString()} missions`;
+    document.getElementById('status-trust').textContent = 'startup in progress';
   } catch (e) {
     console.error('Status refresh failed:', e);
+    const statusText = document.getElementById('status-text');
+    if (statusText) statusText.textContent = 'startup status unavailable';
   }
 }
 
@@ -124,35 +152,66 @@ function initChat() {
 
 function connectChatWs() {
   if (chatWs && chatWs.readyState <= 1) return;
-  chatWs = new WebSocket(`ws://${location.host}/api/ws/chat`);
+  chatWs = new WebSocket(`${wsBase()}/api/ws/chat`);
   chatWs.onclose = () => setTimeout(connectChatWs, 2000);
   chatWs.onerror = () => chatWs.close();
 }
 
 function connectAnalyzeWs() {
   if (analyzeWs && analyzeWs.readyState <= 1) return;
-  analyzeWs = new WebSocket(`ws://${location.host}/api/ws/analyze`);
+  analyzeWs = new WebSocket(`${wsBase()}/api/ws/analyze`);
   analyzeWs.onclose = () => setTimeout(connectAnalyzeWs, 2000);
   analyzeWs.onerror = () => analyzeWs.close();
+}
+
+async function waitForSocketOpen(getSocket, reconnectFn, timeoutMs = 4000) {
+  let ws = getSocket();
+  if (ws && ws.readyState === WebSocket.OPEN) return ws;
+
+  reconnectFn();
+  ws = getSocket();
+  if (ws && ws.readyState === WebSocket.OPEN) return ws;
+  if (!ws) return null;
+
+  return await new Promise((resolve) => {
+    let done = false;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      ws.removeEventListener('open', onOpen);
+      ws.removeEventListener('error', onFail);
+      ws.removeEventListener('close', onFail);
+      resolve(value);
+    };
+    const onOpen = () => finish(ws);
+    const onFail = () => finish(null);
+    const timer = setTimeout(() => finish(null), timeoutMs);
+
+    ws.addEventListener('open', onOpen);
+    ws.addEventListener('error', onFail);
+    ws.addEventListener('close', onFail);
+  });
 }
 
 /**
  * Shared streaming helper. Sends messages over chatWs and streams tokens
  * into bubble. Updates state.chatHistory with the final assistant response.
  */
-function _streamChat(messages, bubble) {
-  const ws = chatWs;
+async function _streamChat(messages, bubble) {
+  const ws = await waitForSocketOpen(() => chatWs, connectChatWs);
   if (!ws || ws.readyState !== 1) {
-    bubble.textContent = '[Not connected — retrying...]';
+    bubble.textContent = '[Chat socket not connected]';
     bubble.classList.remove('streaming');
     document.getElementById('send-btn').disabled = false;
     return;
   }
-  ws.send(JSON.stringify({ messages }));
   let buffer = '';
   const handler = (evt) => {
     const msg = JSON.parse(evt.data);
-    if (msg.type === 'token') {
+    if (msg.type === 'start') {
+      return;
+    } else if (msg.type === 'token') {
       buffer += msg.text;
       bubble.textContent = buffer;
       scrollChatToBottom();
@@ -169,6 +228,7 @@ function _streamChat(messages, bubble) {
     }
   };
   ws.addEventListener('message', handler);
+  ws.send(JSON.stringify({ messages }));
 }
 
 function sendMessage() {
@@ -187,42 +247,47 @@ function sendMessage() {
   }
 
   if (state.chatMode === 'analyze') {
-    runAnalyze(text);
+    void runAnalyze(text);
   } else {
     runChat(text);
   }
 }
 
 function runChat(text) {
+  if (!state.health.ok) {
+    appendMessage('system', `Backend still starting: ${state.health.startup?.stage || 'initializing'}`);
+    return;
+  }
   state.chatHistory.push({ role: 'user', content: text });
   const bubble = appendMessage('assistant', '');
   bubble.classList.add('streaming');
   document.getElementById('send-btn').disabled = true;
-  _streamChat(state.chatHistory, bubble);
+  void _streamChat(state.chatHistory, bubble);
 }
 
-function runAnalyze(text) {
+async function runAnalyze(text) {
+  if (!state.health.ok) {
+    appendMessage('system', `Backend still starting: ${state.health.startup?.stage || 'initializing'}`);
+    return;
+  }
   const bubble = appendMessage('assistant', 'Analyzing...\n');
   bubble.classList.add('streaming');
   document.getElementById('send-btn').disabled = true;
 
-  const ws = analyzeWs;
+  const ws = await waitForSocketOpen(() => analyzeWs, connectAnalyzeWs);
   if (!ws || ws.readyState !== 1) {
-    bubble.textContent = '[Not connected — retrying...]';
+    bubble.textContent = '[Analyze socket not connected]';
     bubble.classList.remove('streaming');
     document.getElementById('send-btn').disabled = false;
     return;
   }
 
-  ws.send(JSON.stringify({
-    problem: text,
-    mission_filter: state.selectedMissionFilter,
-  }));
-
   let buffer = '';
   const handler = (evt) => {
     const msg = JSON.parse(evt.data);
-    if (msg.type === 'chunk') {
+    if (msg.type === 'start') {
+      return;
+    } else if (msg.type === 'chunk') {
       buffer += msg.text;
       bubble.textContent = buffer;
       scrollChatToBottom();
@@ -238,6 +303,10 @@ function runAnalyze(text) {
     }
   };
   ws.addEventListener('message', handler);
+  ws.send(JSON.stringify({
+    problem: text,
+    mission_filter: state.selectedMissionFilter,
+  }));
 }
 
 async function runCommand(text) {
@@ -248,6 +317,10 @@ async function runCommand(text) {
   switch (cmd) {
     case '/help': case '/h':
       showHelp();
+      break;
+
+    case '/health':
+      await cmdHealth();
       break;
 
     case '/learn':
@@ -271,7 +344,7 @@ async function runCommand(text) {
     case '/analyze': case '/a':
       // Route through the analyze WebSocket
       if (!args.length) { appendMessage('system', 'Usage: /analyze <problem statement>'); break; }
-      runAnalyze(args.join(' '));
+      void runAnalyze(args.join(' '));
       break;
 
     case '/status':
@@ -304,6 +377,7 @@ function showHelp() {
           ['/stop &lt;mission_id&gt;',  'Cancel an active mission'],
           ['/analyze &lt;problem&gt;',  'Reason from knowledge toward a recommendation'],
           ['/query &lt;text&gt;',       'Search the knowledge base'],
+          ['/health',                  'Show startup and backend health'],
           ['/missions',                 'Switch to missions tab'],
           ['/knowledge',                'Switch to knowledge tab'],
           ['/status',                   'Show system status'],
@@ -367,12 +441,39 @@ async function cmdStatus() {
   }
 }
 
+async function cmdHealth() {
+  const bubble = appendMessage('system', '');
+  try {
+    const health = await fetch('/health').then(async (res) => {
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      return res.json();
+    });
+    const startup = health.startup || {};
+    bubble.innerHTML = `
+      <div style="font-family:var(--font); font-size:12px; line-height:1.8">
+        <div><span class="grey">OK:</span> <span class="crimson">${String(health.ok)}</span></div>
+        <div><span class="grey">Startup:</span> ${esc(startup.stage || 'unknown')}</div>
+        <div><span class="grey">Missions:</span> ${Number(health.missions || 0).toLocaleString()}</div>
+        <div><span class="grey">Runtime missions:</span> ${Number(health.runtime_missions || 0).toLocaleString()}</div>
+        ${health.atoms != null ? `<div><span class="grey">Atoms:</span> ${Number(health.atoms || 0).toLocaleString()}</div>` : ''}
+        ${startup.last_error ? `<div><span class="grey">Last error:</span> ${esc(startup.last_error)}</div>` : ''}
+      </div>
+    `;
+  } catch (e) {
+    bubble.textContent = `Health error: ${e.message}`;
+  }
+}
+
 function cmdQuery(text) {
+  if (!state.health.ok) {
+    appendMessage('system', `Backend still starting: ${state.health.startup?.stage || 'initializing'}`);
+    return;
+  }
   state.chatHistory.push({ role: 'user', content: `Tell me what you know about: ${text}` });
   const bubble = appendMessage('assistant', '');
   bubble.classList.add('streaming');
   document.getElementById('send-btn').disabled = true;
-  _streamChat(state.chatHistory, bubble);
+  void _streamChat(state.chatHistory, bubble);
 }
 
 function appendMessage(role, content) {
@@ -731,7 +832,16 @@ async function renderGraph() {
   );
 
   // Color and size
-  const color = d => d.type === 'mission' ? '#dc143c' : '#444488';
+  const color = d => {
+    if (d.type !== 'mission') return '#444488';
+    switch (d.trust_state) {
+      case 'reusable': return '#2ecc71';
+      case 'contested': return '#f1c40f';
+      case 'stale': return '#888888';
+      case 'synthesized': return '#dc143c';
+      default: return '#884444';
+    }
+  };
   const maxWeight = Math.max(...graphData.nodes.map(d => d.weight || 1), 1);
   const radius = d => {
     const w = d.weight || 1;
@@ -766,7 +876,7 @@ async function renderGraph() {
   node.append('circle')
     .attr('r', radius)
     .attr('fill', color)
-    .attr('stroke', d => d.type === 'mission' ? '#ff2a52' : '#666688')
+    .attr('stroke', d => d.type === 'mission' ? '#fffb' : '#666688')
     .attr('stroke-width', 1.5);
 
   node.append('text')
@@ -786,6 +896,7 @@ async function renderGraph() {
         if (d.avg_conf) lines.push(`avg confidence: ${(d.avg_conf * 100).toFixed(0)}%`);
         if (d.run_count > 1) lines.push(`${d.run_count} runs`);
         lines.push(`status: ${d.status}`);
+        if (d.trust_state) lines.push(`trust: ${d.trust_state}`);
       } else {
         lines.push(`${(d.weight || 0)} atoms`);
       }
@@ -890,6 +1001,7 @@ function renderAtomTable(atoms) {
       <span class="atom-text">${esc(a.statement || '')}</span>
       <div class="atom-meta">
         <span class="atom-conf">conf ${conf}</span>
+        <span class="atom-conf">${esc(a.trust_state || 'forming')}</span>
         <span class="atom-mission">${esc(a.mission_title || '')}</span>
       </div>
     `;
@@ -955,7 +1067,7 @@ function initLogs() {
 
 function connectLogsWs() {
   if (logsWs && logsWs.readyState <= 1) return;
-  logsWs = new WebSocket(`ws://${location.host}/api/ws/logs`);
+  logsWs = new WebSocket(`${wsBase()}/api/ws/logs`);
 
   logsWs.onopen = () => {
     updateLogsStatus('connected');

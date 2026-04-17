@@ -31,7 +31,7 @@ class ConsolidationEngine:
         Returns summary dict with counts.
         """
         # 1. Fetch all active atoms for this mission
-        atoms = await self.pg.fetch_many(
+        atoms = await self.pg.pg.fetch_many(
             "knowledge.knowledge_atoms",
             where={"mission_id": mission_id},
             limit=500,
@@ -79,7 +79,7 @@ class ConsolidationEngine:
                 all_source_ids.update(source_ids)
 
             # Update representative: mark as golden, set source_ids
-            await self.pg.update_row(
+            await self.pg.pg.update_row(
                 "knowledge.knowledge_atoms", "atom_id",
                 {
                     "atom_id": rep_id,
@@ -104,7 +104,7 @@ class ConsolidationEngine:
             # Mark other atoms as obsolete
             for atom in cluster_atoms:
                 if atom["atom_id"] != rep_id:
-                    await self.pg.update_row(
+                    await self.pg.pg.update_row(
                         "knowledge.knowledge_atoms", "atom_id",
                         {
                             "atom_id": atom["atom_id"],
@@ -140,7 +140,7 @@ class ConsolidationEngine:
         from src.utils.embedding_gates import _cluster_by_similarity
 
         # 1. Fetch non-obsolete atoms
-        atoms = await self.pg.fetch_many(
+        atoms = await self.pg.pg.fetch_many(
             "knowledge.knowledge_atoms",
             where={"mission_id": mission_id},
             limit=500,
@@ -193,7 +193,7 @@ class ConsolidationEngine:
                     winner, loser = atom_b, atom_a
 
                 # Mark loser as obsolete
-                await self.pg.update_row(
+                await self.pg.pg.update_row(
                     "knowledge.knowledge_atoms", "atom_id",
                     {
                         "atom_id": loser["atom_id"],
@@ -206,7 +206,8 @@ class ConsolidationEngine:
 
                 # Record contradiction using V3 schema
                 contradiction_set_id = f"contra-{uuid.uuid4().hex[:12]}"
-                await self.pg.insert_row("knowledge.contradiction_sets", {
+                await self.pg.pg.insert_row(
+"knowledge.contradiction_sets", {
                     "contradiction_set_id": contradiction_set_id,
                     "topic_id": winner.get("topic_id", ""),
                     "summary": f"Contradiction: '{winner['statement'][:100]}' vs '{loser['statement'][:100]}'. Resolved: {reason}",
@@ -219,12 +220,14 @@ class ConsolidationEngine:
                         "reason": reason,
                     }),
                 })
-                await self.pg.insert_row("knowledge.contradiction_members", {
+                await self.pg.pg.insert_row(
+"knowledge.contradiction_members", {
                     "contradiction_set_id": contradiction_set_id,
                     "atom_id": winner["atom_id"],
                     "position_label": "accepted",
                 })
-                await self.pg.insert_row("knowledge.contradiction_members", {
+                await self.pg.pg.insert_row(
+"knowledge.contradiction_members", {
                     "contradiction_set_id": contradiction_set_id,
                     "atom_id": loser["atom_id"],
                     "position_label": "rejected",

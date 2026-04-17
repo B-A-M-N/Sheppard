@@ -1,10 +1,10 @@
 """
-core/system.py — Integrated Sheppard V2 System Orchestrator
+core/system.py — Integrated Sheppard V3 System Orchestrator
 
-Wires together all legacy and V2 subsystems:
+Wires together the active Sheppard V3 subsystems:
   - Acquisition (Firecrawl crawler + budget monitor)
   - Condensation (multi-level distillation pipeline)
-  - Memory (ChromaDB + Postgres V2 Schema)
+  - Memory (ChromaDB + Postgres V3 storage)
   - Reasoning (hybrid multi-stage retriever)
   - LLM (Ollama client + model router)
 """
@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 class SystemManager:
     """
     Unified system manager for Sheppard.
-    Orchestrates legacy research tasks and V2 accretive learning missions.
+    Orchestrates V3 research tasks and accretive learning missions.
     """
 
     def __init__(self):
@@ -84,195 +84,241 @@ class SystemManager:
         self._vampire_tasks: List[asyncio.Task] = []
         self._condensation_tasks: Set[asyncio.Task] = set()
         self._initialized = False
+        self._init_lock = asyncio.Lock()
+        self._startup_stage = "idle"
+        self._last_init_error: Optional[str] = None
 
     async def initialize(self) -> Tuple[bool, Optional[str]]:
         """Boot all subsystems. Returns (success, error_message)."""
-        if self._initialized:
-            return True, None
+        async with self._init_lock:
+            if self._initialized:
+                return True, None
 
-        try:
-            logger.info("[System] Initializing Sheppard Infrastructure...")
-
-            # 0a. Ensure external research services are running (SearXNG, Playwright, Firecrawl)
-            from src.research.service_watchdog import ensure_research_stack
-            await ensure_research_stack()
-
-            # 0. Boot V3 Triad Adapters
-            from src.config.database import DatabaseConfig
-            pg_dsn = os.getenv("SHEPPARD_POSTGRES_URL", DatabaseConfig.DB_URLS.get("sheppard_v3"))
-            await self._ensure_local_postgres_ready(pg_dsn)
-            
-            self.pg_pool = await asyncpg.create_pool(
-                pg_dsn,
-                min_size=2, max_size=10
-            )
-            self.redis_client = redis.Redis.from_url("redis://localhost:6379", decode_responses=False)
-            self.chroma_client = chromadb.PersistentClient(path=settings.CHROMADB_PERSIST_DIRECTORY)
-
-            pg_store = PostgresStoreImpl(self.pg_pool)
-            redis_store = RedisStoresImpl(self.redis_client)
-            chroma_store = ChromaSemanticStoreImpl(self.chroma_client)
-
-            self.adapter = SheppardStorageAdapter(
-                pg=pg_store,
-                redis_runtime=redis_store,
-                redis_cache=redis_store,
-                redis_queue=redis_store,
-                chroma=chroma_store
-            )
-
-            # 1. LLM Client
-            self.ollama = OllamaClient(model_router=self.model_router)
-            await self.ollama.initialize()
-
-            # 2. Budget monitor
-            self.budget = BudgetMonitor(
-                config=BudgetConfig(),
-                condensation_callback=self._condensation_callback,
-            )
-
-            # 3. CMK — Cognitive Memory Kernel (optional, falls back gracefully)
             try:
-                from src.core.memory.cmk.runtime import CMKRuntime
-                from src.core.memory.cmk.config import CMKConfig
+                self._last_init_error = None
+                self._set_startup_stage("initializing infrastructure")
+                logger.info("[System] Initializing Sheppard Infrastructure...")
 
-                cmk_config = CMKConfig.from_env()
-                cmk_config.embedding.host = settings.OLLAMA_API_HOST
-                cmk_config.embedding.model = "nomic-embed-text"
+                # 0. Boot local dependencies first so later initializers do not stall on dead ports.
+                self._set_startup_stage("starting local redis")
+                await self._ensure_local_redis_ready("redis://localhost:6379")
 
-                self.cmk_runtime = CMKRuntime(config=cmk_config)
-                logger.info("[System] CMK Runtime initialized")
-            except Exception as cmk_err:
-                logger.debug(f"[System] CMK Runtime not available: {cmk_err}")
-                self.cmk_runtime = None
+                self._set_startup_stage("starting local ollama")
+                await self._ensure_local_ollama_ready(settings.ollama_api_base)
+                await self._warn_unreachable_ollama_routes()
 
-            # 3.5 Ingestion Control — multi-tier digestion pipeline
-            async_redis = None
-            try:
-                from src.core.memory.cmk.runtime import CMKRuntime
-                from src.core.memory.cmk.config import CMKConfig
+                # 0a. Ensure external research services are running (SearXNG, Playwright, Firecrawl)
+                self._set_startup_stage("starting research stack")
+                from src.research.service_watchdog import ensure_research_stack
+                await ensure_research_stack()
 
-                # Create async Redis client for ingestion control
-                async_redis = redis.from_url("redis://localhost:6379", decode_responses=True)
+                # 1. Boot V3 Triad Adapters
+                self._set_startup_stage("connecting storage backends")
+                from src.config.database import DatabaseConfig
+                pg_dsn = os.getenv("SHEPPARD_POSTGRES_URL", DatabaseConfig.DB_URLS.get("sheppard_v3"))
+                await self._ensure_local_postgres_ready(pg_dsn)
 
-                self.ingestion_control = IngestionControl(
-                    redis=async_redis,
+                self.pg_pool = await asyncpg.create_pool(
+                    pg_dsn,
+                    min_size=2, max_size=10
+                )
+                self.redis_client = redis.Redis.from_url("redis://localhost:6379", decode_responses=False)
+                self.chroma_client = chromadb.PersistentClient(path=settings.CHROMADB_PERSIST_DIRECTORY)
+
+                pg_store = PostgresStoreImpl(self.pg_pool)
+                redis_store = RedisStoresImpl(self.redis_client)
+                chroma_store = ChromaSemanticStoreImpl(self.chroma_client)
+
+                self.adapter = SheppardStorageAdapter(
+                    pg=pg_store,
+                    redis_runtime=redis_store,
+                    redis_cache=redis_store,
+                    redis_queue=redis_store,
+                    chroma=chroma_store
+                )
+
+                # 2. LLM Client
+                self._set_startup_stage("initializing ollama client")
+                self.ollama = OllamaClient(model_router=self.model_router)
+                await self.ollama.initialize()
+
+                # 3. Budget monitor
+                self._set_startup_stage("initializing budget monitor")
+                self.budget = BudgetMonitor(
+                    config=BudgetConfig(),
+                    condensation_callback=self._condensation_callback,
+                )
+
+                # 4. CMK — Cognitive Memory Kernel (optional, falls back gracefully)
+                self._set_startup_stage("initializing cmk runtime")
+                try:
+                    from src.core.memory.cmk.runtime import CMKRuntime
+                    from src.core.memory.cmk.config import CMKConfig
+
+                    cmk_config = CMKConfig.from_env()
+                    cmk_config.embedding.host = settings.OLLAMA_API_HOST
+                    cmk_config.embedding.model = "nomic-embed-text"
+
+                    self.cmk_runtime = CMKRuntime(
+                        config=cmk_config,
+                        redis_client=self.redis_client,
+                        pg_pool=self.pg_pool,
+                    )
+                    try:
+                        await self.cmk_runtime.load_concepts()
+                    except Exception as cmk_load_err:
+                        logger.warning(f"[System] CMK concept load failed during startup: {cmk_load_err}")
+                    try:
+                        await self.cmk_runtime.belief_graph.load_from_db()
+                    except Exception as belief_load_err:
+                        logger.warning(f"[System] CMK belief graph load failed during startup: {belief_load_err}")
+                    logger.info("[System] CMK Runtime initialized")
+                except Exception as cmk_err:
+                    logger.debug(f"[System] CMK Runtime not available: {cmk_err}")
+                    self.cmk_runtime = None
+
+                # 4.5 Ingestion Control — multi-tier digestion pipeline
+                self._set_startup_stage("initializing ingestion workers")
+                async_redis = None
+                try:
+                    async_redis = redis.from_url("redis://localhost:6379", decode_responses=True)
+
+                    self.ingestion_control = IngestionControl(
+                        redis=async_redis,
+                        cmk_runtime=self.cmk_runtime,
+                        chroma_client=self.chroma_client,
+                    )
+
+                    # Create crawl source queue (crawlers push here)
+                    self._crawl_source = asyncio.Queue(maxsize=5000)
+
+                    # Start workers with hooks into existing pipeline
+                    self._ingestion_workers = self.ingestion_control.start_workers(
+                        crawl_source=self._crawl_source,
+                        distill_fn=self._distill_doc,
+                        fetch_doc_fn=self._fetch_doc,
+                        store_atoms_fn=self._store_atoms,
+                    )
+                    logger.info("[System] Ingestion Control workers started")
+                except Exception as ic_err:
+                    logger.debug(f"[System] Ingestion Control not available: {ic_err}")
+                    self.ingestion_control = None
+                    self._crawl_source = asyncio.Queue(maxsize=5000)
+
+                # 5. Condensation pipeline (V3-only, memory=None)
+                self._set_startup_stage("initializing condensation pipeline")
+                self.condenser = DistillationPipeline(
+                    ollama=self.ollama,
+                    memory=None,  # MemoryManager removed
+                    budget=self.budget,
+                    adapter=self.adapter,
                     cmk_runtime=self.cmk_runtime,
-                    chroma_client=self.chroma_client,
+                    ingest_redis=async_redis,
                 )
 
-                # Create crawl source queue (crawlers push here)
-                self._crawl_source = asyncio.Queue(maxsize=5000)
+                # 5.1 CMK Chat Bridge — cross-document reasoning layer
+                self._set_startup_stage("initializing chat bridge")
+                try:
+                    from src.core.memory.cmk.chat_bridge import CMKChatBridge
 
-                # Start workers with hooks into existing pipeline
-                self._ingestion_workers = self.ingestion_control.start_workers(
-                    crawl_source=self._crawl_source,
-                    distill_fn=self._distill_doc,
-                    fetch_doc_fn=self._fetch_doc,
-                    store_atoms_fn=self._store_atoms,
+                    self.chat_bridge = CMKChatBridge(
+                        redis_client=async_redis,
+                        pg_pool=self.pg_pool,
+                        ollama_host=settings.OLLAMA_API_HOST,
+                        distillation_pipeline=self.condenser,
+                    )
+                except Exception as bridge_err:
+                    logger.debug(f"[System] CMK Chat Bridge not available: {bridge_err}")
+                    self.chat_bridge = None
+
+                # 5.5 Auto-apply pending migrations (never ask user to run SQL manually)
+                self._set_startup_stage("applying migrations")
+                await self._apply_pending_migrations()
+
+                # 6. Crawler
+                self._set_startup_stage("initializing crawler")
+                self.crawler = FirecrawlLocalClient(
+                    config=CrawlerConfig(),
+                    on_bytes_crawled=self.budget.record_bytes,
+                    academic_only=True,
+                    enqueue_fn=self.adapter.enqueue_job,
                 )
-                logger.info("[System] Ingestion Control workers started")
-            except Exception as ic_err:
-                logger.debug(f"[System] Ingestion Control not available: {ic_err}")
-                self.ingestion_control = None
-                self._crawl_source = asyncio.Queue(maxsize=5000)
+                await self.crawler.initialize()
 
-            # 4. Condensation pipeline (V3-only, memory=None)
-            self.condenser = DistillationPipeline(
-                ollama=self.ollama,
-                memory=None,  # MemoryManager removed
-                budget=self.budget,
-                adapter=self.adapter,
-                cmk_runtime=self.cmk_runtime,
-                ingest_redis=async_redis,
-            )
-
-            # 4.1 CMK Chat Bridge — cross-document reasoning layer
-            try:
-                from src.core.memory.cmk.chat_bridge import CMKChatBridge
-
-                self.chat_bridge = CMKChatBridge(
-                    redis_client=async_redis,
-                    pg_pool=self.adapter.pg,
-                    ollama_host=settings.OLLAMA_API_HOST,
-                    distillation_pipeline=self.condenser,
+                # 7. Retriever (V3 only)
+                self._set_startup_stage("initializing retrieval")
+                self.retriever = V3Retriever(
+                    adapter=self.adapter,
+                    cmk_runtime=self.cmk_runtime,
                 )
-                await self.chat_bridge.initialize()
-                logger.info("[System] CMK Chat Bridge initialized with cross-document reasoning")
-            except Exception as bridge_err:
-                logger.debug(f"[System] CMK Chat Bridge not available: {bridge_err}")
-                self.chat_bridge = None
 
-            # 4.5 Auto-apply pending migrations (never ask user to run SQL manually)
-            await self._apply_pending_migrations()
+                # 8. Synthesis and analysis
+                self._set_startup_stage("initializing reasoning services")
+                assembler = EvidenceAssembler(
+                    ollama=self.ollama,
+                    memory=None,
+                    retriever=self.retriever,
+                    adapter=self.adapter
+                )
+                self.synthesis_service = SynthesisService(
+                    ollama=self.ollama,
+                    memory=None,
+                    assembler=assembler,
+                    adapter=self.adapter
+                )
 
-            # 5. Crawler
-            self.crawler = FirecrawlLocalClient(
-                config=CrawlerConfig(),
-                on_bytes_crawled=self.budget.record_bytes,
-                academic_only=True,
-            )
-            await self.crawler.initialize()
+                from src.research.reasoning.analysis_service import AnalysisService
+                self.analysis_service = AnalysisService(
+                    ollama=self.ollama,
+                    retriever=self.retriever,
+                    assembler=assembler,
+                )
 
-            # 6. Retriever (V3 only)
-            self.retriever = V3Retriever(
-                adapter=self.adapter,
-                cmk_runtime=self.cmk_runtime,
-            )
+                if self.chat_bridge:
+                    try:
+                        self.chat_bridge.attach_runtime_dependencies(
+                            retriever=self.retriever,
+                            analysis_service=self.analysis_service,
+                        )
+                        await self.chat_bridge.initialize()
+                        logger.info("[System] CMK Chat Bridge initialized with cross-document reasoning")
+                    except Exception as bridge_err:
+                        logger.debug(f"[System] CMK Chat Bridge initialization failed: {bridge_err}")
+                        self.chat_bridge = None
 
-            # 7. Synthesis pipeline (V3 truth contract)
-            assembler = EvidenceAssembler(
-                ollama=self.ollama,
-                memory=None,
-                retriever=self.retriever,
-                adapter=self.adapter
-            )
-            self.synthesis_service = SynthesisService(
-                ollama=self.ollama,
-                memory=None,
-                assembler=assembler,
-                adapter=self.adapter
-            )
+                # 9. Research system (V3 deep research)
+                self._set_startup_stage("initializing research system")
+                self.research_system = ResearchSystem(
+                    chroma_store=self.adapter.chroma,
+                    ollama_client=self.ollama,
+                    memory_manager=None  # V2 memory deprecated; intermediate storage disabled
+                )
+                await self.research_system.initialize()
 
-            # 7b. Analysis service (reasoning layer — Analyst + Adversarial Critic)
-            from src.research.reasoning.analysis_service import AnalysisService
-            self.analysis_service = AnalysisService(
-                ollama=self.ollama,
-                retriever=self.retriever,
-                assembler=assembler,
-            )
+                # 10. Start background tasks
+                self._set_startup_stage("starting background workers")
+                self._monitor_task = asyncio.create_task(self.budget.run_monitor_loop())
 
-            # 7. Research system (V3 deep research)
-            self.research_system = ResearchSystem(
-                chroma_store=self.adapter.chroma,
-                ollama_client=self.ollama,
-                memory_manager=None  # V2 memory deprecated; intermediate storage disabled
-            )
-            await self.research_system.initialize()
+                from src.core.dlq_consumer import DLQConsumer
+                self.dlq_consumer = DLQConsumer(self.adapter.pg, self.adapter.redis_runtime)
+                self._dlq_task = asyncio.create_task(self.dlq_consumer.run())
 
-            # 8. Start background tasks
-            self._monitor_task = asyncio.create_task(self.budget.run_monitor_loop())
+                num_vampires = int(os.environ.get("NUM_VAMPIRES", "8"))
+                num_vampires = max(1, min(num_vampires, 32))
+                logger.info(f"[System] Launching {num_vampires} vampire workers")
+                for i in range(num_vampires):
+                    self._vampire_tasks.append(asyncio.create_task(self._vampire_loop(i)))
 
-            # FIRE-04: Start DLQ consumer
-            from src.core.dlq_consumer import DLQConsumer
-            self.dlq_consumer = DLQConsumer(self.adapter.pg, self.adapter.redis_runtime)
-            self._dlq_task = asyncio.create_task(self.dlq_consumer.run())
-            
-            # 8. Unleash Local Vampires
-            # INFRA-01: Configurable vampire count with clamped range
-            num_vampires = int(os.environ.get("NUM_VAMPIRES", "8"))
-            num_vampires = max(1, min(num_vampires, 32))  # Clamp 1-32
-            logger.info(f"[System] Launching {num_vampires} vampire workers")
-            for i in range(num_vampires):
-                self._vampire_tasks.append(asyncio.create_task(self._vampire_loop(i)))
+                self._initialized = True
+                self._set_startup_stage("ready")
+                logger.info("[System] Sheppard V2 ready")
+                return True, None
 
-            self._initialized = True
-            logger.info("[System] Sheppard V2 ready")
-            return True, None
-
-        except Exception as e:
-            logger.error(f"[System] Initialization failed: {e}", exc_info=True)
-            return False, str(e)
+            except Exception as e:
+                self._last_init_error = str(e)
+                self._set_startup_stage("failed")
+                logger.error(f"[System] Initialization failed: {e}", exc_info=True)
+                return False, str(e)
 
     async def learn(
         self,
@@ -335,35 +381,30 @@ class SystemManager:
         topic_filter: Optional[str] = None,
         max_results: int = 12
     ) -> str:
-        """Run hybrid retrieval with cross-document reasoning."""
+        """Run canonical V3 retrieval, then optionally append CMK reasoning overlays."""
         self._check_initialized()
-
-        # Try CMK reasoning path first (belief graph expansion)
-        if self.chat_bridge:
-            try:
-                result = await self.chat_bridge.query_with_cmk(
-                    user_query=text,
-                    topic_filter=topic_filter,
-                    mission_filter=project_filter,
-                    use_reasoning=True,
-                )
-                pack = result.get("evidence_pack")
-                if pack and not pack.is_empty:
-                    from src.core.memory.cmk.prompt_contract import _format_evidence_context
-                    return _format_evidence_context(pack)
-            except Exception as e:
-                logger.debug(f"[System] CMK query failed, falling back to retriever: {e}")
 
         # Fallback: direct retriever
         q = RetrievalQuery(
             text=text,
             project_filter=project_filter,
-            mission_filter=project_filter,
+            mission_filter=None,
             topic_filter=topic_filter,
             max_results=max_results
         )
         ctx = await self.retriever.retrieve(q)
-        return self.retriever.build_context_block(ctx, project_name=project_filter)
+        context_block = self.retriever.build_context_block(ctx, project_name=project_filter)
+
+        if self.chat_bridge:
+            try:
+                reasoning_context = await self.chat_bridge.extract_reasoning_overlay(text)
+                reasoning_block = self.chat_bridge.format_reasoning_overlay(reasoning_context)
+                if reasoning_block:
+                    return f"{context_block}\n\n{reasoning_block}" if context_block else reasoning_block
+            except Exception as e:
+                logger.debug(f"[System] CMK reasoning overlay failed: {e}")
+
+        return context_block
 
     async def analyze(
         self,
@@ -410,6 +451,7 @@ class SystemManager:
         self,
         messages: List[dict],
         project_context: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
         """Conversational turn with self-extending response loop."""
         self._check_initialized()
@@ -418,12 +460,42 @@ class SystemManager:
 
         # ── PASS 1: Initial response ──
         context_block = ""
-        if user_msg:
+        analysis_brief = ""
+        working_brief = ""
+
+        # 1. Cognitive Session Update
+        if self.chat_bridge and user_msg:
+            try:
+                # Derive session_id if missing
+                if not session_id:
+                    from hashlib import md5
+                    session_id = md5(f"{project_context or 'global'}:{user_msg[:50]}".encode()).hexdigest()
+
+                session_result = await self.chat_bridge.process_session_turn(
+                    user_query=user_msg,
+                    session_id=session_id,
+                    mission_id=project_context,
+                )
+                working_brief = session_result.working_brief or ""
+                analysis_brief = session_result.analysis_brief or ""
+            except Exception as e:
+                logger.debug(f"[System] Cognitive session update failed: {e}")
+
+        # 2. Canonical retrieval for the ordinary chat path
+        if user_msg and not analysis_brief:
             context_block = await self.query(text=user_msg, project_filter=project_context, max_results=30)
 
-        system_prompt = self._build_system_prompt(context_block, project_context)
+        # 3. Prompt Construction
+        system_prompt = self._build_system_prompt(
+            context=context_block, 
+            project=project_context,
+            working_brief=self._compose_session_guidance(
+                working_brief=working_brief,
+                analysis_brief=analysis_brief,
+            ),
+        )
 
-        # Buffer the initial response for reflection
+        # 4. Stream response
         initial_response = ""
         async for token in self.ollama.chat_stream(
             model=self.model_router.get_model_name(TaskType.CHAT),
@@ -551,17 +623,34 @@ class SystemManager:
         budget_statuses = self.budget.all_statuses() if self.budget else {}
         return {
             "initialized": self._initialized,
+            "startup": {
+                "stage": self._startup_stage,
+                "last_error": self._last_init_error,
+            },
             "missions": {
                 tid: {
                     "name": b.topic_name,
                     "usage": f"{b.usage_ratio:.1%}",
                     "raw_mb": f"{b.raw_bytes / 1024**2:.1f}",
                     "crawling": tid in self._crawl_tasks and not self._crawl_tasks[tid].done(),
-                    "scout_queue_size": self.crawler.queue_size if tid in self._crawl_tasks else 0
+                    "scout_queue_size": self.crawler.queue_size if tid in self._crawl_tasks else 0,
+                    "frontier_state": self._frontier_state(tid),
                 }
                 for tid, b in budget_statuses.items()
             },
             "models": self.model_router.summary(),
+        }
+
+    def _frontier_state(self, mission_id: str) -> dict:
+        frontier = self.active_frontiers.get(mission_id)
+        if not frontier:
+            return {}
+        return {
+            "respawn_count": frontier.respawn_count,
+            "noop_respawn_count": frontier.noop_respawn_count,
+            "consecutive_zero_yield": frontier.consecutive_zero_yield,
+            "failed": frontier.failed,
+            "failure_reason": frontier.failure_reason,
         }
 
     async def cleanup(self) -> None:
@@ -613,7 +702,8 @@ class SystemManager:
             if hasattr(self.ingestion_control, 'redis') and self.ingestion_control.redis:
                 try:
                     await self.ingestion_control.redis.aclose()
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"[System] Ingestion control redis close failed: {e}")
                     pass
 
         # Stop DLQ consumer
@@ -648,11 +738,13 @@ class SystemManager:
                 # Check if this migration has already been applied
                 # by looking for a key table/column it creates
                 migration_name = migration_file.replace('.sql', '')
+                self._set_startup_stage(f"applying migration {migration_name}")
                 check_query = self._migration_check_query(migration_name)
                 if check_query:
                     try:
                         exists = await conn.fetchval(check_query)
                         if exists:
+                            logger.info("[Migrations] Skipping %s (already applied)", migration_file)
                             continue  # Already applied
                     except Exception:
                         pass  # Table doesn't exist yet — apply migration
@@ -662,7 +754,7 @@ class SystemManager:
                 try:
                     with open(migration_path, 'r') as f:
                         sql = f.read()
-                    await conn.execute(sql)
+                    await self._execute_migration(conn, migration_name, sql)
                     logger.info(f"[Migrations] Applied {migration_file}")
                 except Exception as e:
                     # If it fails, check if it's just a missing table that the migration itself creates
@@ -670,14 +762,113 @@ class SystemManager:
                     if 'already exists' in err_str or 'does not exist' in err_str:
                         logger.warning(f"[Migrations] {migration_file}: partially applied or already exists — continuing")
                     else:
-                        logger.warning(f"[Migrations] Skipping {migration_file}: {e}")
+                        raise RuntimeError(f"Migration failed in {migration_file}: {e}") from e
+
+    async def _execute_migration(self, conn, migration_name: str, sql: str) -> None:
+        """
+        Execute a migration with conservative timeouts so audit/constraint work
+        cannot block the entire application startup indefinitely.
+        """
+        timeout_ms = self._migration_timeout_ms(migration_name)
+        lock_timeout_ms = min(timeout_ms, 5000)
+        async with conn.transaction():
+            await conn.execute(f"SET LOCAL lock_timeout = '{lock_timeout_ms}ms'")
+            await conn.execute(f"SET LOCAL statement_timeout = '{timeout_ms}ms'")
+            await conn.execute(sql)
+
+    def _migration_timeout_ms(self, migration_name: str) -> int:
+        """
+        Bound startup time spent in migrations. Heavy schema-validation passes can
+        be retried on later launches; they should not make the app unusable.
+        """
+        defaults = {
+            "phase_14_pipeline_integrity": 15000,
+            "phase_18_cmk": 15000,
+            "phase_19_cognitive_architecture": 20000,
+        }
+        return defaults.get(migration_name, 10000)
 
     def _migration_check_query(self, migration_name: str) -> str | None:
         """Return a query that returns True if migration already applied."""
         checks = {
             'phase_13_pipeline_audit': "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='audit' AND table_name='pipeline_runs')",
-            'phase_14_pipeline_integrity': "SELECT EXISTS (SELECT 1 FROM information_schema.schemas WHERE schema_name='audit') AND EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='audit' AND table_name='embedding_registry')",
+            'phase_14_pipeline_integrity': """
+                SELECT EXISTS (
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema='audit' AND table_name='embedding_registry'
+                ) AND EXISTS (
+                    SELECT 1 FROM information_schema.table_constraints
+                    WHERE constraint_name='chk_source_status'
+                      AND table_schema='corpus'
+                      AND table_name='sources'
+                )
+            """,
             'phase_17_consolidation': "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='knowledge' AND table_name='knowledge_atoms' AND column_name='is_golden')",
+            'phase_18_cmk': """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema='cmk'
+                      AND table_name='concepts'
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema='cmk'
+                      AND table_name='atom_embeddings'
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema='cmk'
+                      AND table_name='feedback_log'
+                )
+            """,
+            'phase_19_cognitive_architecture': """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema='public'
+                      AND table_name='canonical_knowledge'
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema='public'
+                      AND table_name='belief_nodes'
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema='public'
+                      AND table_name='belief_edges'
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema='public'
+                      AND table_name='hypotheses'
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema='public'
+                      AND table_name='concept_anchors'
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema='cmk'
+                      AND table_name='activation_tracking'
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema='knowledge'
+                      AND table_name='knowledge_atoms'
+                      AND column_name='usage_count'
+                )
+            """,
             'phase_20_application_evidence_nullable': """
                 SELECT EXISTS (
                     SELECT 1
@@ -759,7 +950,8 @@ class SystemManager:
                 domain = urlparse(url).netloc.lower()
                 if domain_failures.get(domain, 0) >= DOMAIN_FAILURE_THRESHOLD:
                     return False
-            except Exception:
+            except Exception as e:
+                logger.debug(f"[System] Domain failure check failed for {url}: {e}")
                 pass
 
             return True
@@ -929,7 +1121,8 @@ class SystemManager:
                 await publish_status(self.redis_client, "frontier", "mission_start", {
                     "mission_id": mission_id[:8], "topic": topic_name,
                 })
-            except Exception:
+            except Exception as e:
+                logger.debug(f"[System] Status publication failed (mission_start): {e}")
                 pass
             # Set mission status to active at start of execution
             await self.adapter.update_mission_status(mission_id, "active")
@@ -941,7 +1134,9 @@ class SystemManager:
             total_ingested = await frontier.run()
 
             console.print(f"[bold blue][DONE][/bold blue] Mission complete. [green]{total_ingested}[/green] total sources ingested.")
-            await self.adapter.update_mission_status(mission_id, "completed")
+            mission_row = await self.adapter.get_mission(mission_id)
+            if (mission_row or {}).get("status") == "active":
+                await self.adapter.update_mission_status(mission_id, "completed")
 
             # Spawn follow-on missions for emergent topics discovered during this mission
             if self.condenser:
@@ -967,7 +1162,8 @@ class SystemManager:
                 await publish_status(self.redis_client, "frontier", "mission_complete", {
                     "mission_id": mission_id[:8], "total_ingested": total_ingested,
                 })
-            except Exception:
+            except Exception as e:
+                logger.debug(f"[System] Status publication failed (mission_complete): {e}")
                 pass
 
         except Exception as e:
@@ -1044,18 +1240,33 @@ class SystemManager:
                     budget.condensation_running = False
                     budget.last_trigger = None
 
-    def _build_system_prompt(self, context: str, project: Optional[str]) -> str:
-        return (
+    def _compose_session_guidance(self, working_brief: str = "", analysis_brief: str = "") -> str:
+        sections = [section for section in (analysis_brief, working_brief) if section]
+        return "\n\n".join(sections)
+
+    def _build_system_prompt(self, context: str, project: Optional[str], working_brief: str = "") -> str:
+        base = (
             "You are Sheppard, a high-fidelity research and engineering assistant. "
             f"{f'You are currently working on the project: {project}.' if project else ''}\n"
+        )
+        
+        if working_brief:
+            base += f"\n{working_brief}\n"
+            
+        base += (
             "Use the following retrieved knowledge to ground your response. Cite sources using [Sn] keys.\n"
             f"\n--- KNOWLEDGE ---\n{context}\n--- END KNOWLEDGE ---\n"
             "Be precise, technical, and direct."
         )
+        return base
 
     def _check_initialized(self) -> None:
         if not self._initialized:
             raise RuntimeError("System not initialized")
+
+    def _set_startup_stage(self, stage: str) -> None:
+        self._startup_stage = stage
+        logger.info("[System] Startup stage: %s", stage)
 
     async def _ensure_local_postgres_ready(self, pg_dsn: Optional[str]) -> None:
         """Start local PostgreSQL on launch if the configured DSN targets this host and PG is down."""
@@ -1074,13 +1285,119 @@ class SystemManager:
         logger.info("[System] Local PostgreSQL is down on %s:%s; attempting startup", host, port)
         await self._start_local_postgres_service()
 
-        for _ in range(20):
+        timeout_s = int(os.environ.get("SHEPPARD_PG_STARTUP_TIMEOUT_S", "30"))
+        max_attempts = max(1, timeout_s * 2)
+        for _ in range(max_attempts):
             if await self._postgres_port_ready(host, port):
                 logger.info("[System] PostgreSQL is accepting connections on %s:%s", host, port)
                 return
             await asyncio.sleep(0.5)
 
-        raise RuntimeError(f"PostgreSQL did not become ready on {host}:{port} after startup attempt")
+        raise RuntimeError(
+            f"PostgreSQL did not become ready within {timeout_s}s "
+            f"(SHEPPARD_PG_STARTUP_TIMEOUT_S). Increase to allow more time on slow hardware."
+        )
+
+    async def _ensure_local_redis_ready(self, redis_url: str) -> None:
+        """Start local Redis on launch if configured target is local and Redis is down."""
+        if os.getenv("SHEPPARD_AUTO_START_REDIS", "1") == "0":
+            return
+
+        parsed = urlparse(redis_url)
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or 6379
+        if not self._is_local_postgres_target(host):
+            return
+        if await self._tcp_port_ready(host, port):
+            return
+
+        logger.info("[System] Local Redis is down on %s:%s; attempting startup", host, port)
+        await self._start_local_service(
+            service_name="redis-server",
+            commands=[
+                ("systemctl", "start", "redis-server"),
+                ("service", "redis-server", "start"),
+            ],
+            fallback_popen=(
+                "redis-server",
+                "--bind", host,
+                "--port", str(port),
+                "--save", "",
+                "--appendonly", "no",
+            ),
+        )
+        timeout_s = float(os.getenv("SHEPPARD_REDIS_STARTUP_TIMEOUT_S", "10"))
+        max_attempts = max(1, int(timeout_s / 0.5))
+        for _ in range(max_attempts):
+            if await self._tcp_port_ready(host, port):
+                logger.info("[System] Redis is accepting connections on %s:%s", host, port)
+                return
+            await asyncio.sleep(0.5)
+
+        raise RuntimeError(
+            f"Redis did not become ready on {host}:{port} after startup attempt "
+            f"within {timeout_s:g}s. Adjust SHEPPARD_REDIS_STARTUP_TIMEOUT_S if needed."
+        )
+
+    async def _ensure_local_ollama_ready(self, ollama_base: str) -> None:
+        """Start local Ollama on launch if configured target is local and Ollama is down."""
+        if os.getenv("SHEPPARD_AUTO_START_OLLAMA", "1") == "0":
+            return
+
+        parsed = urlparse(ollama_base)
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or 11434
+        if not self._is_local_postgres_target(host):
+            return
+        if await self._tcp_port_ready(host, port):
+            return
+
+        logger.info("[System] Local Ollama is down on %s:%s; attempting startup", host, port)
+        await self._start_local_service(
+            service_name="ollama",
+            commands=[
+                ("systemctl", "start", "ollama"),
+                ("service", "ollama", "start"),
+            ],
+            fallback_popen=("ollama", "serve"),
+        )
+        for _ in range(30):
+            if await self._tcp_port_ready(host, port):
+                logger.info("[System] Ollama is accepting connections on %s:%s", host, port)
+                return
+            await asyncio.sleep(0.5)
+
+        raise RuntimeError(f"Ollama did not become ready on {host}:{port} after startup attempt")
+
+    async def _warn_unreachable_ollama_routes(self) -> None:
+        """Probe all configured Ollama routing targets and warn on any that are unreachable.
+
+        The auto-start logic only handles localhost. Remote hosts that are down will
+        cause silent runtime failures when tasks are routed to them. This probe runs
+        at startup so the problem surfaces immediately with a clear message instead of
+        as a cryptic aiohttp connection error mid-query.
+        """
+        def _host_port(raw: str) -> tuple[str, int]:
+            parsed = urlparse(raw)
+            return parsed.hostname or "127.0.0.1", parsed.port or 11434
+
+        targets = {
+            "reasoning (OLLAMA_REASONING_HOST)": settings.OLLAMA_REASONING_HOST,
+            "extraction (OLLAMA_EXTRACTION_HOST)": settings.OLLAMA_EXTRACTION_HOST,
+            "summarization (OLLAMA_SUMMARIZE_HOST)": settings.OLLAMA_SUMMARIZE_HOST,
+            "embedding (OLLAMA_EMBED_HOST)": settings.OLLAMA_EMBED_HOST,
+        }
+
+        for label, raw in targets.items():
+            if not raw:
+                continue
+            host, port = _host_port(raw)
+            if not await self._tcp_port_ready(host, port):
+                logger.warning(
+                    "[System] Ollama routing target UNREACHABLE at startup: %s → %s:%s  "
+                    "— tasks routed there will fail until the host is available.",
+                    label, host, port,
+                )
 
     @staticmethod
     def _parse_postgres_target(pg_dsn: str) -> Optional[Tuple[str, int]]:
@@ -1094,6 +1411,9 @@ class SystemManager:
         return host in {"localhost", "127.0.0.1", "::1"}
 
     async def _postgres_port_ready(self, host: str, port: int) -> bool:
+        return await self._tcp_port_ready(host, port)
+
+    async def _tcp_port_ready(self, host: str, port: int) -> bool:
         try:
             reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=1.0)
             writer.close()
@@ -1103,10 +1423,50 @@ class SystemManager:
         except Exception:
             return False
 
+    async def _start_local_service(
+        self,
+        service_name: str,
+        commands: List[Tuple[str, ...]],
+        fallback_popen: Optional[Tuple[str, ...]] = None,
+    ) -> None:
+        last_error = None
+        for command in commands:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            except FileNotFoundError as exc:
+                last_error = exc
+                continue
+
+            _, stderr = await proc.communicate()
+            if proc.returncode == 0:
+                return
+            last_error = RuntimeError(stderr.decode().strip() or f"{service_name} start failed")
+
+        if fallback_popen:
+            try:
+                import subprocess
+                subprocess.Popen(
+                    list(fallback_popen),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+                return
+            except Exception as exc:
+                last_error = exc
+
+        if last_error:
+            raise RuntimeError(f"Unable to start {service_name}: {last_error}")
+
     async def _start_local_postgres_service(self) -> None:
         commands = [
             ("systemctl", "start", "postgresql"),
             ("service", "postgresql", "start"),
+            ("pg_ctlcluster", "--skip-systemctl-redirect", "14", "main", "start"),
         ]
         last_error = None
         for command in commands:

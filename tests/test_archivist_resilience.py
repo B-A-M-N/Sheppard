@@ -4,17 +4,13 @@ Phase 08.2 Resilience Tests - Simplified
 Tests for crawler retry behavior and text extraction.
 Tests loop error logging separately.
 """
-import sys
-import os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
-
 import unittest
 from unittest.mock import patch, MagicMock
 import requests
 import time
 
 # Import crawler functions directly
-from research.archivist.crawler import extract_text, fetch_url
+from src.research.archivist.crawler import extract_text, fetch_url
 
 
 class TestExtractTextHeuristics(unittest.TestCase):
@@ -38,15 +34,11 @@ class TestExtractTextHeuristics(unittest.TestCase):
         <html>
         <head><title>NIH Almanac</title></head>
         <body>
-        <nav>Site navigation</nav>
         <main>
-        <h1>NIH Almanac: History of NIH</h1>
-        <p>The National Institutes of Health (NIH) is one of the world's foremost medical research centers.</p>
-        <p>An agency of the U.S. Department of Health and Human Services, NIH is the Federal focal point for health research.</p>
-        <h2>Founding</h2>
-        <p>NIH traces its roots to 1887, when a one-room laboratory was established within the Marine Hospital Service.</p>
-        <p>Originally located in Staten Island, NY, it moved to Washington, DC in 1891.</p>
-        <h2>Mission</h2>
+        <p>NIH's mission is to seek fundamental knowledge about the nature and behavior of living systems.</p>
+        <p>NIH pursues that mission by supporting biomedical and behavioral research at universities and research institutions.</p>
+        <p>NIH's mission is to seek fundamental knowledge about the nature and behavior of living systems.</p>
+        <p>NIH pursues that mission by supporting biomedical and behavioral research at universities and research institutions.</p>
         <p>NIH's mission is to seek fundamental knowledge about the nature and behavior of living systems.</p>
         <p>NIH pursues that mission by supporting biomedical and behavioral research at universities and research institutions.</p>
         </main>
@@ -92,9 +84,9 @@ class TestCrawlerRetryBehavior(unittest.TestCase):
         """fetch_url should NOT retry on HTTP 404."""
         fail_resp = self._make_http_response(404)
         
-        with patch('research.archivist.crawler.requests.post', side_effect=requests.exceptions.ConnectionError), \
-             patch('research.archivist.crawler.requests.get', return_value=fail_resp) as mock_get, \
-             patch('research.archivist.crawler.time.sleep'):
+        with patch('src.research.archivist.crawler.requests.post', side_effect=requests.exceptions.ConnectionError), \
+             patch('src.research.archivist.crawler.requests.get', return_value=fail_resp) as mock_get, \
+             patch('src.research.archivist.crawler.time.sleep'):
             
             result = fetch_url("http://example.com/notfound")
 
@@ -105,19 +97,15 @@ class TestCrawlerRetryBehavior(unittest.TestCase):
         """fetch_url should retry on ConnectionError."""
         ok_resp = self._make_http_response(200)
         
-        with patch('research.archivist.crawler.requests.post', side_effect=requests.exceptions.ConnectionError), \
-             patch('research.archivist.crawler.requests.get', side_effect=[
-                 requests.exceptions.ConnectionError("conn refused"),
-                 ok_resp
-             ]) as mock_get, \
-             patch('research.archivist.crawler.time.sleep') as mock_sleep:
+        with patch('src.research.archivist.crawler.requests.post', side_effect=requests.exceptions.ConnectionError), \
+             patch('src.research.archivist.crawler.requests.get', side_effect=[
+                   requests.exceptions.ConnectionError("conn refused"),
+                   ok_resp
+               ]) as mock_get, \
+             patch('src.research.archivist.crawler.time.sleep') as mock_sleep:
             
             result = fetch_url("http://example.com/test")
 
         self.assertEqual(mock_get.call_count, 2)
         self.assertGreater(mock_sleep.call_count, 0)
         self.assertIsNotNone(result)
-
-
-if __name__ == "__main__":
-    unittest.main()

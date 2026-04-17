@@ -223,7 +223,7 @@ def _validate_multi_citation_block(
 
     missing = [c for c in citations if c not in item_map]
     for cite in missing:
-        errors.append(f"Citation {cite} referenced but not found in retrieved items.")
+        errors.append(f"Citation [{cite}] referenced but not found in retrieved items.")
         details.append({'claim': text, 'cited': cite, 'error': 'citation_not_found'})
 
     present = [c for c in citations if c in item_map]
@@ -414,7 +414,7 @@ def validate_response_grounding(
         for cite in valid_citations:
             # Look up the cited item
             if cite not in item_map:
-                errors.append(f"Citation {cite} referenced but not found in retrieved items.")
+                errors.append(f"Citation [{cite}] referenced but not found in retrieved items.")
                 details.append({'claim': text, 'cited': cite, 'error': 'citation_not_found'})
                 continue
 
@@ -427,7 +427,7 @@ def validate_response_grounding(
             content_words = claim_words - STOPWORDS
             overlap = content_words & atom_words
             if len(overlap) < 2:
-                errors.append(f"Insufficient lexical overlap for {cite}: only {len(overlap)} content words in common.")
+                errors.append(f"Insufficient lexical overlap for [{cite}]: only {len(overlap)} content words in common.")
                 details.append({'claim': text, 'cited': cite, 'error': 'lexical_overlap', 'overlap_count': len(overlap)})
 
             # --- Numeric Consistency (SKIP for derived claims) ---

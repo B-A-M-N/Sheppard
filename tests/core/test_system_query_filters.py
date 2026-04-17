@@ -16,7 +16,7 @@ class FakeRetriever:
 
 
 @pytest.mark.asyncio
-async def test_query_maps_project_filter_to_mission_filter():
+async def test_query_does_not_alias_project_filter_to_mission_filter():
     sm = SystemManager()
     sm._initialized = True
     sm.chat_bridge = None
@@ -26,5 +26,5 @@ async def test_query_maps_project_filter_to_mission_filter():
 
     assert sm.retriever.query is not None
     assert sm.retriever.query.project_filter == "mission-123"
-    assert sm.retriever.query.mission_filter == "mission-123"
+    assert sm.retriever.query.mission_filter is None
     assert sm.retriever.query.topic_filter == "topic-456"

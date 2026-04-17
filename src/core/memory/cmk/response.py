@@ -1,25 +1,22 @@
 """
-cmk/response.py — CMK-aware response generator for Sheppard's chat path.
+cmk/response.py — CMK-aware response generator (SUPERSEDED).
 
-Replaces src/core/sheppard/response.py's _build_messages() with
-evidence-tier constrained prompts when CMK is available.
+DEPRECATION NOTICE
+------------------
+CMKResponseGenerator is no longer a primary call path.
 
-Usage:
-  from src.core.memory.cmk.response import CMKResponseGenerator
+The canonical response generation + retrieval path is SystemManager.chat(),
+which handles CMK reasoning overlays via chat_bridge internally.  The legacy
+Sheppard shell (src/core/sheppard/response.py) delegates retrieval to
+SystemManager.query() and generates responses through its own Ollama clients.
 
-  gen = CMKResponseGenerator(
-      main_client=ollama_client,
-      main_model="mistral",
-      redis_client=redis,
-      pg_pool=pg_pool,
-  )
-  await gen.initialize()
+This module is retained for reference and potential offline testing only.
+Nothing in the active V3 path should import CMKResponseGenerator.generate_with_cmk()
+as a live code path.
 
-  response = await gen.generate_with_cmk(
-      user_query="What is quantum computing?",
-      memories=memories,  # existing memory dict
-      conversation_history=history,
-  )
+Original docstring (historical):
+  Replaces src/core/sheppard/response.py's _build_messages() with
+  evidence-tier constrained prompts when CMK is available.
 """
 
 import logging

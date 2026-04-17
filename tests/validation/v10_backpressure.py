@@ -6,7 +6,6 @@ Also verifies that after draining, enqueue succeeds again (frontier can resume).
 """
 import pytest
 import asyncio
-import types
 import json
 from src.memory.adapters.redis import RedisStoresImpl
 from src.research.acquisition.crawler import FirecrawlLocalClient, CrawlerConfig
@@ -106,16 +105,14 @@ async def test_v10_backpressure_crawler_integration(monkeypatch):
         async def enqueue_job(self, queue_name: str, payload: dict) -> bool:
             return await self.redis_queue.enqueue_job(queue_name, payload)
 
-    # Mock system_manager with adapter
-    mock_sm = types.SimpleNamespace(adapter=MockAdapter())
-    # Patch the system_manager in the core.system module where it is defined
-    monkeypatch.setattr("src.core.system.system_manager", mock_sm)
+    adapter = MockAdapter()
 
     # Create FirecrawlLocalClient with academic_only=False (doesn't matter)
     client = FirecrawlLocalClient(
         config=CrawlerConfig(),
         on_bytes_crawled=lambda x: None,
-        academic_only=False
+        academic_only=False,
+        enqueue_fn=adapter.enqueue_job,
     )
 
     # Mock _search: page 1 returns 10 URLs; page 2+ return none
@@ -150,4 +147,3 @@ async def test_v10_backpressure_crawler_integration(monkeypatch):
     rejected_urls = [f"https://example.com/page1-{i}" for i in range(5, 10)]
     for rurl in rejected_urls:
         assert rurl not in enqueued_set, f"URL {rurl} should have been rejected due to backpressure, but was enqueued"
-

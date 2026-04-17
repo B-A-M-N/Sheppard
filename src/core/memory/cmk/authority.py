@@ -16,6 +16,7 @@ import math
 import logging
 import uuid
 import json
+from enum import Enum
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 from dataclasses import dataclass, field

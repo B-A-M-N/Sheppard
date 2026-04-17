@@ -93,10 +93,12 @@ class FirecrawlLocalClient:
         config: Optional[CrawlerConfig] = None,
         on_bytes_crawled: Optional[Callable[[str, int], None]] = None,
         academic_only: bool = False,
+        enqueue_fn: Optional[Callable[..., Any]] = None,
     ):
         self.config = config or CrawlerConfig()
         self.on_bytes_crawled = on_bytes_crawled
         self.academic_only = academic_only
+        self.enqueue_fn = enqueue_fn
         self._session: Optional[aiohttp.ClientSession] = None
         self._seen_checksums: Set[str] = set()
         self._queue_size = 0
@@ -254,7 +256,9 @@ class FirecrawlLocalClient:
     async def _offload_to_slow_lane(self, topic_id: str, url: str, mission_id: str = None):
         """Asynchronous handoff to the Slow Lane (Laptop) worker via Redis Queue."""
         try:
-            from src.core.system import system_manager
+            if self.enqueue_fn is None:
+                logger.debug("[Crawler] Slow-lane offload skipped — enqueue_fn not configured")
+                return
             payload = {
                 "topic_id": topic_id,
                 "mission_id": mission_id or topic_id,
@@ -262,7 +266,7 @@ class FirecrawlLocalClient:
                 "priority": 0,
                 "requires_js": False
             }
-            await system_manager.adapter.enqueue_job("queue:scraping", payload)
+            await self.enqueue_fn("queue:scraping", payload)
             logger.info(f"[Crawler] Offloaded to SLOW-LANE queue: {url}")
         except Exception as e:
             logger.debug(f"[Crawler] Slow-lane offload failed: {e}")
@@ -322,7 +326,9 @@ class FirecrawlLocalClient:
         """Producer: Finds URLs and dumps them into the global Redis queue.
         Deep Mines up to Page 5 if no new URLs are found.
         """
-        from src.core.system import system_manager
+        if self.enqueue_fn is None:
+            logger.debug("[Crawler] discover_and_enqueue skipped — enqueue_fn not configured")
+            return 0
         total_enqueued = 0
 
         # Pre-filter patterns — reject before enqueuing
@@ -368,7 +374,7 @@ class FirecrawlLocalClient:
                     "lane": lane,
                     "priority": 1 if lane == "fast" else 0
                 }
-                success = await system_manager.adapter.enqueue_job("queue:scraping", payload)
+                success = await self.enqueue_fn("queue:scraping", payload)
                 if success:
                     if visited_urls is not None:
                         visited_urls.add(url)

@@ -9,12 +9,19 @@ import asyncio
 import json
 import tempfile
 import uuid
+import os
 import asyncpg
 import chromadb
+import contextlib
 from src.memory.storage_adapter import SheppardStorageAdapter, SemanticProjectionBuilder
 from src.memory.adapters.postgres import PostgresStoreImpl as PostgresImpl
 from src.memory.adapters.redis import RedisStoresImpl as RedisImpl
 from src.memory.adapters.chroma import ChromaSemanticStoreImpl as ChromaImpl
+
+pytestmark = pytest.mark.skipif(
+    os.getenv("SHEPPARD_RUN_DB_VALIDATION") != "1",
+    reason="requires live local Postgres/Chroma validation environment",
+)
 
 class FakeRedisClient:
     def __init__(self):
@@ -49,10 +56,18 @@ async def test_v04_consistency():
     profile_id = f"profile_{mission_id}"
 
     # Setup Postgres pool (use local test DB)
-    pg_pool = await asyncpg.create_pool(
-        'postgresql://sheppard:1234@localhost:5432/sheppard_v3',
-        min_size=1, max_size=5
-    )
+    try:
+        pg_pool = await asyncio.wait_for(
+            asyncpg.create_pool(
+                'postgresql://sheppard:1234@localhost:5432/sheppard_v3',
+                min_size=1, max_size=5,
+                timeout=2,
+                command_timeout=5,
+            ),
+            timeout=3,
+        )
+    except Exception as exc:
+        pytest.skip(f"Postgres not available for V04 consistency test: {exc}")
     pg_store = PostgresImpl(pg_pool)
 
     # Fake Redis clients for runtime, cache, queue
@@ -213,4 +228,5 @@ async def test_v04_consistency():
                 await adapter.pg.delete_where("config.domain_profiles", {"profile_id": profile_id})
         except Exception:
             pass
-        await pg_pool.close()
+        with contextlib.suppress(Exception):
+            await pg_pool.close()

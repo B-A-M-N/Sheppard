@@ -44,9 +44,9 @@ class Settings:
         self.OLLAMA_SUMMARIZE_HOST: str = os.getenv('OLLAMA_SUMMARIZE_HOST', _api)
 
         # Per-role model overrides — fall back to OLLAMA_MODEL if not set.
-        # Lets extraction_host run a different (already-available) model without
-        # requiring the same model be pulled on every machine.
+        # Lets each host run whichever model is already available on that machine.
         _model = self.OLLAMA_MODEL
+        self.OLLAMA_REASONING_MODEL: str = os.getenv('OLLAMA_REASONING_MODEL', _model)
         self.OLLAMA_EXTRACTION_MODEL: str = os.getenv('OLLAMA_EXTRACTION_MODEL', _model)
         self.OLLAMA_SUMMARIZE_MODEL: str = os.getenv('OLLAMA_SUMMARIZE_MODEL', 'llama3.2:latest')
         

@@ -59,10 +59,10 @@ class ModelRouter:
         summarize_host  = _host(settings.OLLAMA_SUMMARIZE_HOST)
         embed_host      = _host(settings.OLLAMA_EMBED_HOST)
 
-        # Reasoning model: the uncensored fine-tune for quality chat/synthesis
-        reasoning_model  = "mannix/llama3.1-8b-lexi:latest"
+        # Reasoning model: configurable via OLLAMA_REASONING_MODEL; falls back to OLLAMA_MODEL.
+        reasoning_model  = settings.OLLAMA_REASONING_MODEL
         # Extraction model: configurable per host — local machine may have a different model
-        # available. Falls back to OLLAMA_MODEL (rnj-1:8b-cloud) if not set in .env.
+        # available. Falls back to OLLAMA_MODEL if not set in .env.
         extraction_model = settings.OLLAMA_EXTRACTION_MODEL
         summarize_model  = settings.OLLAMA_SUMMARIZE_MODEL
         embed_model      = settings.OLLAMA_EMBED_MODEL

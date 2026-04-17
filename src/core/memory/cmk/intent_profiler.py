@@ -1,29 +1,27 @@
-"""
-intent_profiler.py — Classifies user query intent before retrieval.
-
-Determines:
-  - type: factual | conceptual | procedural | comparative | exploratory
-  - depth: surface | medium | deep
-  - stability: static | evolving | controversial
-  - risk_of_hallucination: 0.0-1.0
-
-This drives the Evidence Planner's retrieval strategy.
-"""
-
 import re
-from dataclasses import dataclass
-from typing import Literal
+from dataclasses import dataclass, field
+from typing import Literal, Optional, List, Any
 
 
 @dataclass
 class IntentProfile:
+    """
+    User query intent classification result.
+    Additive fields support the cognitive working memory layer.
+    """
+    # Original CMK v1 fields
     type: Literal["factual", "conceptual", "procedural", "comparative", "exploratory"]
     depth: Literal["surface", "medium", "deep"]
     stability: Literal["static", "evolving", "controversial"]
     risk_of_hallucination: float  # 0.0-1.0
+    entities: Optional[List[str]] = None
 
-    # Parsed entities (for comparative/procedural queries)
-    entities: list[str] | None = None
+    # Working Memory Layer Additions (Phase 1)
+    primary_intent: str = "exploratory"
+    confidence: float = 0.8
+    candidate_frames: List[str] = field(default_factory=list)
+    ambiguity_score: float = 0.0
+    escalation_bias: str = "none"
 
 
 class IntentProfiler:
@@ -86,12 +84,13 @@ class IntentProfiler:
         r'\b(?:AI|LLM|GPT|transformer|diffusion|quantum)\b',
     ]
 
-    def profile(self, query: str) -> IntentProfile:
+    def profile(self, query: str, prior_state: Any = None) -> IntentProfile:
         """
         Classify a user query into an intent profile.
 
         Args:
             query: The user's query string
+            prior_state: Optional WorkingState for context-aware profiling
 
         Returns:
             IntentProfile with type, depth, stability, and hallucination risk
@@ -104,12 +103,45 @@ class IntentProfiler:
         risk = self._hallucination_risk(query_type, depth, stability)
         entities = self._extract_entities(query_lower, query_type)
 
+        # ── Working Memory Additions (Phase 1) ──
+        
+        # Primary intent mapping
+        primary_intent = query_type
+        
+        # Candidate frames based on type and keywords
+        candidate_frames = []
+        if query_type == "comparative":
+            candidate_frames = ["comparison", "tradeoff_evaluation"]
+        elif query_type == "procedural":
+            candidate_frames = ["how_to", "implementation_plan"]
+        elif query_type == "conceptual":
+            candidate_frames = ["explanation", "mechanism_mapping"]
+        elif query_type == "factual":
+            candidate_frames = ["lookup"]
+        
+        # Escalation bias heuristics
+        escalation_bias = "none"
+        if query_type in ("comparative", "conceptual") and depth == "deep":
+            escalation_bias = "medium"
+        
+        # Ambiguity score
+        ambiguity_score = 0.5
+        if len(query_lower.split()) < 4:
+            ambiguity_score = 0.8  # Short queries are often ambiguous
+        elif entities and len(entities) >= 2:
+            ambiguity_score = 0.2  # Specific entities reduce ambiguity
+
         return IntentProfile(
             type=query_type,
             depth=depth,
             stability=stability,
             risk_of_hallucination=risk,
             entities=entities,
+            primary_intent=primary_intent,
+            confidence=0.8,
+            candidate_frames=candidate_frames,
+            ambiguity_score=ambiguity_score,
+            escalation_bias=escalation_bias,
         )
 
     def _classify_type(self, query: str) -> str:

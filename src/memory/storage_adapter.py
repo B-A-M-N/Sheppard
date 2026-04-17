@@ -536,6 +536,16 @@ class SheppardStorageAdapter(StorageAdapter):
         rows = await self.pg.fetch_many("mission.mission_frontier_snapshots", where={"mission_id": mission_id}, order_by="created_at DESC", limit=1)
         return rows[0]["frontier_json"] if rows else None
 
+    async def _increment_mission_ingestion_stats(self, mission_id: str, raw_bytes: int) -> None:
+        row = await self.pg.fetch_one("mission.research_missions", {"mission_id": mission_id})
+        if row is None:
+            return
+        row["bytes_ingested"] = int(row.get("bytes_ingested") or 0) + max(0, int(raw_bytes))
+        row["source_count"] = int(row.get("source_count") or 0) + 1
+        row["updated_at"] = _utcnow()
+        await self.pg.upsert_row("mission.research_missions", "mission_id", row)
+        await self.redis_runtime.set_active_state(f"mission:active:{mission_id}", row)
+
     # =====================================================
     # CorpusStore
     # =====================================================
@@ -925,6 +935,7 @@ class SheppardStorageAdapter(StorageAdapter):
 
         # 4. Hot Cache
         await self.redis_cache.cache_hot_object("source", source_id, pg_row, ttl_s=3600)
+        await self._increment_mission_ingestion_stats(mission_id, len(text_content.encode()))
 
         return source_id
 

@@ -7,6 +7,7 @@ and restored when a frontier is restarted (checkpoint/load cycle).
 import pytest
 import asyncio
 import json
+import os
 import asyncpg
 import contextlib
 from src.memory.storage_adapter import SheppardStorageAdapter
@@ -18,6 +19,11 @@ from src.research.acquisition.budget import BudgetMonitor, BudgetConfig
 from src.research.acquisition.frontier import AdaptiveFrontier, FrontierNode
 import chromadb
 import tempfile
+
+pytestmark = pytest.mark.skipif(
+    os.getenv("SHEPPARD_RUN_DB_VALIDATION") != "1",
+    reason="requires live local Postgres/Chroma validation environment",
+)
 
 class FakeRedisClient:
     """Minimal fake Redis for tests."""
@@ -87,7 +93,7 @@ async def test_v11_exhausted_modes_persistence():
         sm = SystemManager()
         sm.adapter = adapter
         sm.budget = BudgetMonitor(config=BudgetConfig())
-        sm.initialized = True
+        sm._initialized = True
 
         mission_id = "test-mission-v11"
 
@@ -95,16 +101,18 @@ async def test_v11_exhausted_modes_persistence():
         try:
             await adapter.pg.delete_where("mission.mission_nodes", {"mission_id": mission_id})
             await adapter.pg.delete_where("mission.research_missions", {"mission_id": mission_id})
-            await adapter.pg.delete_where("mission.domain_profiles", {"domain_profile_id": "profile_test"})
+            await adapter.pg.delete_where("config.domain_profiles", {"profile_id": "profile_test"})
         except Exception:
             pass  # Ignore if tables don't exist or rows absent
 
-        # Insert domain_profiles row required by FK constraint
+        # Insert domain profile row required by FK constraint
         try:
-            await adapter.pg.insert_row("mission.domain_profiles", {
-                "domain_profile_id": "profile_test",
-                "topic_id": mission_id,
-                "profile_name": "Test Profile V11",
+            await adapter.pg.insert_row("config.domain_profiles", {
+                "profile_id": "profile_test",
+                "name": "Test Profile V11",
+                "domain_type": "mixed",
+                "description": "Validation profile for V11 persistence test",
+                "config_json": "{}",
             })
         except Exception:
             pass  # Row may already exist
@@ -166,7 +174,7 @@ async def test_v11_exhausted_modes_persistence():
         await adapter.pg.delete_where("mission.mission_nodes", {"mission_id": mission_id})
         await adapter.pg.delete_where("mission.research_missions", {"mission_id": mission_id})
         try:
-            await adapter.pg.delete_where("mission.domain_profiles", {"domain_profile_id": "profile_test"})
+            await adapter.pg.delete_where("config.domain_profiles", {"profile_id": "profile_test"})
         except Exception:
             pass
     finally:

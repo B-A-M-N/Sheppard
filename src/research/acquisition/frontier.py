@@ -45,6 +45,15 @@ class ResearchPolicy:
     evidence_types: List[str] = field(default_factory=list)
     search_strategy: str = "balanced"
 
+
+@dataclass
+class ApprovalContext:
+    """Structured context for why human approval is required."""
+    reason_code: str   # BUDGET_PRESSURE | SCOPE_EXPANSION | BUDGET_AND_SCOPE | HIGH_BURN_RATE
+    reason_detail: str
+    usage_ratio: float
+    respawn_count: int
+
 @dataclass
 class FrontierNode:
     concept: str
@@ -70,6 +79,26 @@ class AdaptiveFrontier:
     MAX_RESPAWN_CYCLES = 3  # Maximum times we can regenerate frontier before failing
     MAX_CONSECUTIVE_ZERO_YIELD = 5  # Maximum consecutive nodes with zero discovery
     QUEUE_BACKPRESSURE_THRESHOLD = 8000  # Pause discovery when queue hits this depth
+    MAX_NOOP_RESPAWNS = 2  # Stop if fresh respawns keep producing nothing useful
+    MIN_QUERY_TOPIC_OVERLAP = 1  # Minimum shared tokens with topic/node anchor
+    LOW_YIELD_WINDOW = 4
+    LOW_YIELD_THRESHOLD = 1.0
+    # Approval policy thresholds (staged escalation)
+    APPROVAL_BUDGET_ONLY_THRESHOLD = 0.92    # Budget-only gate — near ceiling regardless of respawns
+    APPROVAL_USAGE_RATIO = 0.85              # Budget threshold for combo gate
+    APPROVAL_RESPAWN_THRESHOLD = 2           # Respawn count for combo gate
+    APPROVAL_SCOPE_ONLY_THRESHOLD = 4        # Scope-only gate — many respawns even at low budget
+    MAX_NODE_CONCEPT_LENGTH = 140
+    _NODE_NOISE_PATTERNS = (
+        "identify 3-5",
+        "new, specific sub-topics",
+        "research subject:",
+        "knowledge:",
+        "one per line",
+        "here are",
+        "sub-topics that could be added",
+        "missing from this context",
+    )
 
     def __init__(self, system_manager, mission_id: str, topic_name: str):
         self.sm = system_manager
@@ -83,6 +112,7 @@ class AdaptiveFrontier:
         self.consecutive_zero_yield = 0
         self.failed = False
         self.failure_reason: Optional[str] = None
+        self.noop_respawn_count = 0
 
         # Convergence tracking
         self._yield_history: List[int] = []  # per-cycle yield
@@ -125,18 +155,29 @@ class AdaptiveFrontier:
                 console.print(f"[dim][Budget] Raw: {raw_mb:.1f}MB / {ceiling_gb:.1f}GB ({ratio:.2%}) | Pending: {pending} | Condensed: {budget_status.condensed_bytes/(1024**2):.1f}MB | Running: {budget_status.condensation_running}[/dim]")
 
             # 3. Select Next Action
-            node, mode = self._select_next_action()
+            node, mode = await self._select_next_action()
             if not node:
                 # All nodes saturated, attempt to respawn new frontier
                 console.print(f"[bold cyan][Frontier][/bold cyan] Current frontier saturated. Generating fresh perspectives...")
                 if self.respawn_count >= self.MAX_RESPAWN_CYCLES:
                     await self._fail_mission("NO_DISCOVERY")
                     break
+                approval_ctx = self._get_approval_context()
+                if approval_ctx:
+                    await self._fail_mission("APPROVAL_REQUIRED", approval_ctx)
+                    break
 
                 self.respawn_count += 1
                 console.print(f"[yellow][Frontier][/yellow] Respawn cycle {self.respawn_count}/{self.MAX_RESPAWN_CYCLES}")
-                await self._respawn_nodes(None)
-                node, mode = self._select_next_action()
+                created = await self._respawn_nodes(None)
+                if created == 0:
+                    self.noop_respawn_count += 1
+                    if self.noop_respawn_count >= self.MAX_NOOP_RESPAWNS:
+                        await self._fail_mission("GOVERNANCE_STOP")
+                        break
+                else:
+                    self.noop_respawn_count = 0
+                node, mode = await self._select_next_action()
                 if not node:
                     # Even after respawn, no nodes available
                     await self._fail_mission("NO_DISCOVERY")
@@ -204,10 +245,22 @@ class AdaptiveFrontier:
             # Convergence check: stop if frontier has stabilized
             if self._should_converge():
                 console.print(f"[bold green][Frontier][/bold green] Frontier converged — novelty rate below threshold, exploration saturated.")
+                await self._complete_mission("SATURATED")
                 break
 
             if round_yield >= 5:
-                await self._respawn_nodes(node)
+                approval_ctx = self._get_approval_context()
+                if approval_ctx:
+                    await self._fail_mission("APPROVAL_REQUIRED", approval_ctx)
+                    break
+                created = await self._respawn_nodes(node)
+                if created == 0:
+                    self.noop_respawn_count += 1
+                    if self.noop_respawn_count >= self.MAX_NOOP_RESPAWNS:
+                        await self._fail_mission("GOVERNANCE_STOP")
+                        break
+                else:
+                    self.noop_respawn_count = 0
 
             # Small throttle between nodes to let vampires breathe
             await asyncio.sleep(5)
@@ -245,21 +298,45 @@ class AdaptiveFrontier:
         if self.visited_urls:
             console.print(f"[dim]  - Pre-loaded {len(self.visited_urls)} visited URLs from DB.[/dim]")
 
-    async def _fail_mission(self, reason: str):
-        """Terminate mission with explicit failure reason."""
+    async def _fail_mission(self, reason: str, approval_ctx: Optional["ApprovalContext"] = None):
+        """Terminate mission with explicit failure reason.
+
+        When *approval_ctx* is supplied the stop_reason stored in the DB carries
+        both the top-level reason and the structured sub-code so callers can
+        distinguish e.g. ``APPROVAL_REQUIRED:BUDGET_PRESSURE`` from
+        ``APPROVAL_REQUIRED:SCOPE_EXPANSION`` without string-parsing heuristics.
+        """
         self.failed = True
-        self.failure_reason = reason
-        console.print(f"[bold red][Frontier][/bold red] Mission terminated: {reason}")
+        if approval_ctx is not None:
+            self.failure_reason = f"{reason}:{approval_ctx.reason_code}"
+            console.print(
+                f"[bold red][Frontier][/bold red] Mission terminated: {reason} "
+                f"({approval_ctx.reason_code}) — {approval_ctx.reason_detail}"
+            )
+        else:
+            self.failure_reason = reason
+            console.print(f"[bold red][Frontier][/bold red] Mission terminated: {reason}")
 
         # Update mission status in DB
         try:
             await self.sm.adapter.update_mission_status(
                 self.mission_id,
                 status="failed",
-                stop_reason=reason
+                stop_reason=self.failure_reason,
             )
         except Exception as e:
             logger.error(f"[Frontier] Failed to update mission status: {e}")
+
+    async def _complete_mission(self, reason: str):
+        """Mark mission complete when exploration converges cleanly."""
+        try:
+            await self.sm.adapter.update_mission_status(
+                self.mission_id,
+                status="completed",
+                stop_reason=reason,
+            )
+        except Exception as e:
+            logger.error(f"[Frontier] Failed to complete mission: {e}")
 
     async def _save_node(self, node: FrontierNode, parent_node_id: Optional[str] = None):
         """Checkpoint a single node."""
@@ -281,6 +358,36 @@ class AdaptiveFrontier:
             exhausted_modes=list(node.exhausted_modes)
         )
         await self.sm.adapter.upsert_mission_node(v3_node.to_pg_row())
+        await self.sm.adapter.checkpoint_frontier(
+            self.mission_id,
+            {
+                "active_node_count": len(self.nodes),
+                "respawn_count": self.respawn_count,
+                "noop_respawn_count": self.noop_respawn_count,
+                "failed": self.failed,
+                "failure_reason": self.failure_reason,
+            },
+        )
+
+    def _normalize_node_concept(self, raw: str, parent_concept: str) -> Optional[str]:
+        if not raw:
+            return None
+        clean = re.sub(r'^(Node\s*\d+:?|\d+[\.\)]\s*|[-*•]\s*)', '', raw, flags=re.IGNORECASE).strip()
+        clean = clean.replace('"', '').replace("'", "")
+        clean = re.sub(r'\s+', ' ', clean).strip(" :;,-")
+        if not clean:
+            return None
+        lowered = clean.lower()
+        if any(pattern in lowered for pattern in self._NODE_NOISE_PATTERNS):
+            return None
+        if len(clean) < 8 or len(clean) > self.MAX_NODE_CONCEPT_LENGTH:
+            return None
+        if clean.endswith("?") or clean.lower() == parent_concept.lower():
+            return None
+        overlap = self._query_tokens(clean) & self._query_tokens(f"{self.topic_name} {parent_concept}")
+        if not overlap and len(clean.split()) < 3:
+            return None
+        return clean
 
     async def _frame_research_policy(self):
         """Load policy from DB or generate new one using V3 schema."""
@@ -384,9 +491,8 @@ Output valid JSON:
             
             node_count = 0
             for n in data.get('nodes', []):
-                # Clean node name (remove "Node 1:", "1.", etc)
-                clean_n = re.sub(r'^(Node\s*\d+:?|\d+[\.\)]\s*)', '', n, flags=re.IGNORECASE).strip()
-                if clean_n and len(clean_n) > 3:
+                clean_n = self._normalize_node_concept(n, parent_concept=self.topic_name)
+                if clean_n:
                     node = FrontierNode(concept=clean_n, parent_node_id=None)
                     self.nodes[clean_n] = node
                     await self._save_node(node, parent_node_id=None)
@@ -453,7 +559,7 @@ Output valid JSON:
             else:
                 console.print(f"[bold red][Frontier][/bold red] CRITICAL: Fallback node creation also failed!")
 
-    def _select_next_action(self) -> Tuple[Optional[FrontierNode], Optional[str]]:
+    async def _select_next_action(self) -> Tuple[Optional[FrontierNode], Optional[str]]:
         active = [n for n in self.nodes.values() if n.status == "underexplored"]
         if not active: return None, None
         
@@ -463,10 +569,10 @@ Output valid JSON:
         for mode in [EpistemicMode.GROUNDING, EpistemicMode.VERIFICATION, EpistemicMode.DIALECTIC, EpistemicMode.EXPANSION]:
             if mode not in node.exhausted_modes:
                 return node, mode
-        
+
         node.status = "saturated"
-        asyncio.create_task(self._save_node(node))
-        return self._select_next_action()
+        await self._save_node(node)
+        return await self._select_next_action()
 
     async def _entity_based_discovery(self, entities: List[str]) -> int:
         """
@@ -536,7 +642,8 @@ CRITICAL:
             c = c.replace('"', '').replace("'", "").replace("(", "").replace(")", "")
             c = re.sub(r'^(find|search|explain|analyze|what is|how to)\s+', '', c, flags=re.IGNORECASE)
             for term in [" AND ", " OR ", " NOT "]: c = c.replace(term, " ")
-            if len(c) > 3: clean_queries.append(c)
+            if len(c) > 3:
+                clean_queries.append(c)
 
         # Anchor query: concept + topic name to prevent cross-domain keyword bleed
         # e.g. "Biological Bases of Behavior Psychology" not just "Biological Bases of Behavior"
@@ -545,9 +652,38 @@ CRITICAL:
         if anchored_concept not in clean_queries:
             clean_queries.insert(0, anchored_concept)
 
-        return clean_queries[:4]
+        return self._apply_governance_filters(clean_queries, clean_concept)[:4]
 
-    async def _respawn_nodes(self, parent_node: Optional[FrontierNode]):
+    def _apply_governance_filters(self, queries: List[str], anchor: str) -> List[str]:
+        filtered: List[str] = []
+        seen = set()
+        anchor_tokens = self._query_tokens(f"{self.topic_name} {anchor}")
+        for query in queries:
+            normalized = " ".join(query.split())
+            if not normalized:
+                continue
+            lowered = normalized.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            overlap = len(self._query_tokens(normalized) & anchor_tokens)
+            if overlap < self.MIN_QUERY_TOPIC_OVERLAP:
+                logger.debug("[Frontier] Rejected low-overlap query: %s", normalized)
+                continue
+            filtered.append(normalized)
+
+        if not filtered:
+            filtered.append(f"{anchor} {self.topic_name}".strip())
+        return filtered
+
+    @staticmethod
+    def _query_tokens(text: str) -> Set[str]:
+        return {
+            token for token in re.findall(r"[a-z0-9]+", text.lower())
+            if len(token) > 2
+        }
+
+    async def _respawn_nodes(self, parent_node: Optional[FrontierNode]) -> int:
         parent_concept = parent_node.concept if parent_node else self.topic_name
         console.print(f"[bold cyan][Frontier][/bold cyan] Spawning deeper nodes for [white]{parent_concept}[/white]...")
         
@@ -567,8 +703,8 @@ Identify 3-5 new, specific sub-topics MISSING from this context. No quotes. One 
         if parent_node is not None:
             parent_node_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{self.mission_id}:{parent_node.concept}"))
         for line in resp.split('\n'):
-            clean = re.sub(r'^\d+[\.\)]\s*', '', line.strip()).replace('"', '').replace("'", "")
-            if len(clean) > 10 and clean.lower() not in [n.lower() for n in self.nodes.keys()]:
+            clean = self._normalize_node_concept(line, parent_concept=parent_concept)
+            if clean and clean.lower() not in [n.lower() for n in self.nodes.keys()]:
                 node = FrontierNode(concept=clean, parent_node_id=parent_node_id)
                 self.nodes[clean] = node
                 await self._save_node(node, parent_node_id=parent_node_id)
@@ -576,6 +712,7 @@ Identify 3-5 new, specific sub-topics MISSING from this context. No quotes. One 
         
         if new_count > 0:
             console.print(f"[bold blue][Frontier][/bold blue] Expansion: Added {new_count} technical nodes to DB.")
+        return new_count
 
     def _is_saturated(self) -> bool:
         return all(n.status == "saturated" for n in self.nodes.values())
@@ -605,7 +742,71 @@ Identify 3-5 new, specific sub-topics MISSING from this context. No quotes. One 
         if self._yield_entropy() < 0.3:
             return True
 
+        if self._is_low_yield_plateau():
+            return True
+
         return False
+
+    def _is_low_yield_plateau(self) -> bool:
+        if len(self._novelty_window) < self.LOW_YIELD_WINDOW:
+            return False
+        recent = self._novelty_window[-self.LOW_YIELD_WINDOW:]
+        return (sum(recent) / len(recent)) <= self.LOW_YIELD_THRESHOLD
+
+    def _get_approval_context(self) -> Optional[ApprovalContext]:
+        """Return an ApprovalContext if human approval is required; None otherwise.
+
+        Staged gates (evaluated in priority order):
+
+        1. BUDGET_PRESSURE  — usage_ratio >= APPROVAL_BUDGET_ONLY_THRESHOLD (0.92)
+           Near the budget ceiling regardless of respawn count.
+
+        2. SCOPE_EXPANSION  — respawn_count >= APPROVAL_SCOPE_ONLY_THRESHOLD (4)
+           Frontier has respawned many times even at moderate budget; scope is
+           widening beyond the original brief.
+
+        3. BUDGET_AND_SCOPE — respawn_count >= APPROVAL_RESPAWN_THRESHOLD (2)
+                               AND usage_ratio >= APPROVAL_USAGE_RATIO (0.85)
+           Original compound gate: both budget pressure and scope growth are
+           present simultaneously.
+        """
+        status = self.sm.budget.get_status(self.mission_id)
+        usage_ratio = float(getattr(status, "usage_ratio", 0.0) or 0.0) if status else 0.0
+
+        if usage_ratio >= self.APPROVAL_BUDGET_ONLY_THRESHOLD:
+            return ApprovalContext(
+                reason_code="BUDGET_PRESSURE",
+                reason_detail=f"Budget at {usage_ratio:.0%} — approaching ceiling",
+                usage_ratio=usage_ratio,
+                respawn_count=self.respawn_count,
+            )
+
+        if self.respawn_count >= self.APPROVAL_SCOPE_ONLY_THRESHOLD:
+            return ApprovalContext(
+                reason_code="SCOPE_EXPANSION",
+                reason_detail=(
+                    f"Frontier respawned {self.respawn_count}x — scope is widening "
+                    f"beyond original brief"
+                ),
+                usage_ratio=usage_ratio,
+                respawn_count=self.respawn_count,
+            )
+
+        if (
+            self.respawn_count >= self.APPROVAL_RESPAWN_THRESHOLD
+            and usage_ratio >= self.APPROVAL_USAGE_RATIO
+        ):
+            return ApprovalContext(
+                reason_code="BUDGET_AND_SCOPE",
+                reason_detail=(
+                    f"Budget at {usage_ratio:.0%} with {self.respawn_count} respawn "
+                    f"cycles — compounding pressure"
+                ),
+                usage_ratio=usage_ratio,
+                respawn_count=self.respawn_count,
+            )
+
+        return None
 
     def _novelty_rate(self) -> float:
         """
